@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
+      terminal-progress--release_created: ${{ steps.release.outputs['packages/terminal-progress--release_created'] }}
+      homeassistant--release_created: ${{ steps.release.outputs['packages/homeassistant--release_created'] }}
+      forge-session-title--release_created: ${{ steps.release.outputs['packages/forge-session-title--release_created'] }}
+    steps:
+      - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
+        id: release
+
+  publish-terminal-progress:
+    name: Publish terminal-progress
+    needs: release-please
+    if: needs.release-please.outputs.terminal-progress--release_created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      package-path: packages/terminal-progress
+      tag: latest
+
+  publish-homeassistant:
+    name: Publish homeassistant
+    needs: release-please
+    if: needs.release-please.outputs.homeassistant--release_created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      package-path: packages/homeassistant
+      tag: latest
+
+  publish-forge-session-title:
+    name: Publish forge-session-title
+    needs: release-please
+    if: needs.release-please.outputs.forge-session-title--release_created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      package-path: packages/forge-session-title
+      tag: latest

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Publish a package to npm"
+#USAGE arg "<package>" help="Package to publish (e.g. terminal-progress)"
+#USAGE arg "[tag]" help="npm dist-tag" default="latest"
+set -euo pipefail
+pkg="packages/${usage_package}"
+if [ ! -d "$pkg" ]; then
+  echo "Package not found: $pkg" >&2
+  exit 1
+fi
+cd "$pkg"
+npm publish --access public --tag "${usage_tag:-latest}"

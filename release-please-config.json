@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    "packages/terminal-progress": {
+      "component": "opencode-terminal-progress"
+    },
+    "packages/homeassistant": {
+      "component": "opencode-homeassistant"
+    },
+    "packages/forge-session-title": {
+      "component": "opencode-forge-session-title"
+    }
+  },
+  "include-v-in-tag": false,
+  "bump-minor-pre-major": true,
+  "release-type": "node",
+  "separate-pull-requests": true
+}

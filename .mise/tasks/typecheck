@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Type-check all packages"
+set -euo pipefail
+for pkg in packages/*/; do
+  name=$(basename "$pkg")
+  echo "Type-checking $name..."
+  tsc --noEmit --project "$pkg/tsconfig.json"
+done

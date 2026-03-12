@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description="Build with sourcemaps for development"
+#USAGE arg "<package>" help="Package to build (e.g. terminal-progress)"
+set -euo pipefail
+pkg="packages/${usage_package}"
+if [ ! -d "$pkg" ]; then
+  echo "Package not found: $pkg" >&2
+  exit 1
+fi
+bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun --sourcemap=inline

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":automergePatch",
+    ":automergeRequireAllStatusChecks",
+    ":separateMajorReleases",
+    ":prImmediately"
+  ],
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions updates weekly",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "schedule": ["before 9am on sunday"],
+      "pinDigests": true
+    },
+    {
+      "description": "Group pre-commit hook updates",
+      "matchManagers": ["pre-commit"],
+      "groupName": "pre-commit hooks"
+    },
+    {
+      "description": "Automerge patch and digest updates",
+      "matchUpdateTypes": ["patch", "pin", "digest"],
+      "automerge": true,
+      "automergeStrategy": "rebase"
+    }
+  ]
+}

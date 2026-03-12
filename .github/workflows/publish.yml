@@ -1,0 +1,53 @@
+name: Publish
+
+on:
+  workflow_call:
+    inputs:
+      package-path:
+        description: Path to the package directory (e.g. packages/terminal-progress)
+        type: string
+        required: true
+      tag:
+        description: npm dist-tag to publish under
+        type: string
+        default: latest
+  workflow_dispatch:
+    inputs:
+      package-path:
+        description: Path to the package directory (e.g. packages/terminal-progress)
+        type: string
+        required: true
+      tag:
+        description: npm dist-tag to publish under
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3.6.3
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: mise run setup
+
+      - name: Build
+        run: |
+          pkg="${{ inputs.package-path }}"
+          bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun
+
+      - name: Publish
+        run: npm publish --access public --tag ${{ inputs.tag }}
+        working-directory: ${{ inputs.package-path }}

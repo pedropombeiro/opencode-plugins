@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description="Build all plugins"
+set -euo pipefail
+for pkg in packages/*/; do
+  name=$(basename "$pkg")
+  echo "Building $name..."
+  bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun
+done

@@ -1,0 +1,72 @@
+---
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-json
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: renovate-config-validator
+        name: Renovate Config Validator
+        entry: mise x npm:renovate -- renovate-config-validator --strict
+        language: system
+        files: (^|/)\.?renovate(rc)?\.json5?$|^renovate\.json5?$
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        name: prettier (check)
+        types_or: [json, markdown, yaml]
+        language_version: system
+      - id: prettier
+        name: prettier (fix)
+        alias: prettier-fix
+        args: ['--write', '--list-different']
+        types_or: [json, markdown, yaml]
+        language_version: system
+        stages: [manual]
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: mise run lint
+        language: system
+        types_or: [ts, javascript]
+        pass_filenames: false
+      - id: typecheck
+        name: typecheck
+        entry: mise run typecheck
+        language: system
+        types_or: [ts]
+        pass_filenames: false
+      - id: mise-fmt
+        name: mise fmt (check)
+        entry: mise fmt --check
+        language: system
+        files: '(^|/)\.?mise(\.[\w-]+)*\.toml$'
+        pass_filenames: false
+      - id: mise-fmt-fix
+        name: mise fmt (fix)
+        entry: mise fmt
+        language: system
+        files: '(^|/)\.?mise(\.[\w-]+)*\.toml$'
+        pass_filenames: false
+        stages: [manual]
+      - id: commitlint
+        name: commitlint
+        entry: sh -c 'cat "$1" | npx --yes --package @commitlint/cli -- commitlint' --
+        language: system
+        stages: [commit-msg]
+
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: 3.6.1
+    hooks:
+      - id: editorconfig-checker
+        exclude: '\.md$'

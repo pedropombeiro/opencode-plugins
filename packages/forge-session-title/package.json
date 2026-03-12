@@ -1,0 +1,42 @@
+{
+  "name": "opencode-forge-session-title",
+  "version": "0.2.0",
+  "description": "OpenCode plugin that prefixes session titles with forge issue/PR/MR references (GitHub & GitLab)",
+  "author": {
+    "name": "Pedro Pombeiro",
+    "email": "pedropombeiro@users.noreply.github.com"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "default": "./dist/index.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
+    "directory": "packages/forge-session-title"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "session",
+    "title",
+    "github",
+    "gitlab",
+    "forge",
+    "merge-request",
+    "pull-request"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.85"
+  }
+}
