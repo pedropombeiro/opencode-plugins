@@ -31,7 +31,7 @@ There are no npm scripts. Do not add a `"scripts"` key to any `package.json`.
 
 ## Adding a new plugin
 
-1. Create `packages/<name>/` with `src/index.ts`, `package.json`, `tsconfig.json`, `README.md`
+1. Copy `packages/_template/` to `packages/<name>/` and replace all `PLUGIN-NAME` placeholders
 2. Add the package to `release-please-config.json` and `.release-please-manifest.json`
 3. Add a publish job in `.github/workflows/release.yml`
 
