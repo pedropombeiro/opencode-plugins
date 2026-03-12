@@ -1,6 +1,6 @@
 {
   "name": "opencode-terminal-progress",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "OpenCode plugin that shows agent progress in terminal tabs (iTerm2, WezTerm, Windows Terminal)",
   "author": {
     "name": "Pedro Pombeiro",

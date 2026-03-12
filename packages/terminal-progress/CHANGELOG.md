@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.4.2...opencode-terminal-progress-0.5.0) (2026-03-12)
+
+
+### Features
+
+* initialize opencode plugins monorepo ([1dba332](https://github.com/pedropombeiro/opencode-plugins/commit/1dba33204db3f3fb0166ceff175dcff9f2f86f35))
+
 ## [0.4.2](https://github.com/pedropombeiro/opencode-terminal-progress/compare/opencode-terminal-progress-v0.4.1...opencode-terminal-progress-v0.4.2) (2026-03-08)
 
 
