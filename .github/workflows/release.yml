@@ -20,6 +20,8 @@ jobs:
       terminal-progress--release_created: ${{ steps.release.outputs['packages/terminal-progress--release_created'] }}
       homeassistant--release_created: ${{ steps.release.outputs['packages/homeassistant--release_created'] }}
       forge-session-title--release_created: ${{ steps.release.outputs['packages/forge-session-title--release_created'] }}
+      atuin-history--release_created: ${{ steps.release.outputs['packages/atuin-history--release_created'] }}
+      tmux-indicator--release_created: ${{ steps.release.outputs['packages/tmux-indicator--release_created'] }}
     steps:
       - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
         id: release
@@ -49,4 +51,22 @@ jobs:
     uses: ./.github/workflows/publish.yml
     with:
       package-path: packages/forge-session-title
+      tag: latest
+
+  publish-atuin-history:
+    name: Publish atuin-history
+    needs: release-please
+    if: needs.release-please.outputs.atuin-history--release_created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      package-path: packages/atuin-history
+      tag: latest
+
+  publish-tmux-indicator:
+    name: Publish tmux-indicator
+    needs: release-please
+    if: needs.release-please.outputs.tmux-indicator--release_created == 'true'
+    uses: ./.github/workflows/publish.yml
+    with:
+      package-path: packages/tmux-indicator
       tag: latest

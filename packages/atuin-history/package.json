@@ -1,0 +1,38 @@
+{
+  "name": "opencode-atuin-history",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that records agent bash commands in Atuin shell history",
+  "author": {
+    "name": "Pedro Pombeiro",
+    "email": "pedropombeiro@users.noreply.github.com"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "default": "./dist/index.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
+    "directory": "packages/atuin-history"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "atuin",
+    "shell-history",
+    "history"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.85"
+  }
+}

@@ -9,6 +9,12 @@
     },
     "packages/forge-session-title": {
       "component": "opencode-forge-session-title"
+    },
+    "packages/atuin-history": {
+      "component": "opencode-atuin-history"
+    },
+    "packages/tmux-indicator": {
+      "component": "opencode-tmux-indicator"
     }
   },
   "include-v-in-tag": false,

@@ -1,0 +1,38 @@
+{
+  "name": "opencode-tmux-indicator",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that sets a tmux window option when the agent is waiting for input",
+  "author": {
+    "name": "Pedro Pombeiro",
+    "email": "pedropombeiro@users.noreply.github.com"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "default": "./dist/index.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
+    "directory": "packages/tmux-indicator"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tmux",
+    "indicator",
+    "status"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.85"
+  }
+}
