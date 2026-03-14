@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.2.0...opencode-tmux-indicator-0.2.1) (2026-03-14)
+
+
+### Bug Fixes
+
+* **tmux-indicator:** stop ringing bell on waiting ([5578704](https://github.com/pedropombeiro/opencode-plugins/commit/55787043144a364783e7c81137577e46c2ddbe39))
+
 ## [0.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.1.0...opencode-tmux-indicator-0.2.0) (2026-03-14)
 
 
