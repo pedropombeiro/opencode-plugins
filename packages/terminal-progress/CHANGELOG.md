@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.4.3...opencode-terminal-progress-0.5.0) (2026-03-18)
+
+
+### Features
+
+* **terminal-progress:** add Ghostty terminal detection ([4e6c499](https://github.com/pedropombeiro/opencode-plugins/commit/4e6c499b1e8fd9d5ae74096d1564a24c0ee34555))
+
 ## [0.4.3](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.4.2...opencode-terminal-progress-0.4.3) (2026-03-12)
 
 
