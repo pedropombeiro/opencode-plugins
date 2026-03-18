@@ -2,6 +2,6 @@
   "packages/terminal-progress": "0.4.3",
   "packages/homeassistant": "0.4.3",
   "packages/forge-session-title": "0.2.1",
-  "packages/atuin-history": "0.1.0",
+  "packages/atuin-history": "0.1.1",
   "packages/tmux-indicator": "0.3.0"
 }
