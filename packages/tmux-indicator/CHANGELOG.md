@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.3.0...opencode-tmux-indicator-0.3.1) (2026-03-18)
+
+
+### Bug Fixes
+
+* **tmux-indicator:** use writeFileSync for BEL and document tmux settings ([f79c7b2](https://github.com/pedropombeiro/opencode-plugins/commit/f79c7b2a591e26af3ee5125df3beccd606e5dd06))
+
 ## [0.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.2.1...opencode-tmux-indicator-0.3.0) (2026-03-18)
 
 
