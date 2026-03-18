@@ -7,6 +7,7 @@ An [OpenCode](https://opencode.ai) plugin that shows agent progress in your term
 
 | Terminal                                                  | Detection                                                   |
 | --------------------------------------------------------- | ----------------------------------------------------------- |
+| [Ghostty](https://ghostty.org)                            | `TERM_PROGRAM=ghostty`                                      |
 | [iTerm2](https://iterm2.com)                              | `TERM_PROGRAM=iTerm.app`, `LC_TERMINAL`, `ITERM_SESSION_ID` |
 | [WezTerm](https://wezfurlong.org/wezterm/)                | `TERM_PROGRAM=WezTerm`, `WEZTERM_EXECUTABLE`                |
 | [Windows Terminal](https://github.com/microsoft/terminal) | `WT_SESSION`                                                |
