@@ -27,6 +27,12 @@ export const TmuxIndicatorPlugin: Plugin = async ({ $ }) => {
     if (active || startupGrace) return;
     const wid = await getWindowId();
     await $`tmux set-option -w -t ${wid} @opencode-waiting 1`.quiet();
+    const tty = (
+      await $`tmux display-message -t ${tmuxPane} -p '#{pane_tty}'`.quiet().text()
+    ).trim();
+    if (tty) {
+      await $`printf '\a' > ${tty}`.nothrow().quiet();
+    }
     active = true;
   };
 
