@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import type { Plugin } from '@opencode-ai/plugin';
 
 export const TmuxIndicatorPlugin: Plugin = async ({ $ }) => {
@@ -31,7 +32,11 @@ export const TmuxIndicatorPlugin: Plugin = async ({ $ }) => {
       await $`tmux display-message -t ${tmuxPane} -p '#{pane_tty}'`.quiet().text()
     ).trim();
     if (tty) {
-      await $`printf '\a' > ${tty}`.nothrow().quiet();
+      try {
+        writeFileSync(tty, '\x07');
+      } catch {
+        /* pane TTY may not be writable */
+      }
     }
     active = true;
   };
