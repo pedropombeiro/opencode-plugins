@@ -2,10 +2,13 @@ import { openSync, writeSync } from 'fs';
 import type { Plugin } from '@opencode-ai/plugin';
 import type { EventSessionStatus } from '@opencode-ai/sdk';
 
-type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal';
+type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal' | 'ghostty';
 
 function detectTerminal(): Terminal | undefined {
   const env = process.env;
+  if (env['TERM_PROGRAM'] === 'ghostty') {
+    return 'ghostty';
+  }
   if (
     env['TERM_PROGRAM'] === 'iTerm.app' ||
     env['LC_TERMINAL'] === 'iTerm2' ||
