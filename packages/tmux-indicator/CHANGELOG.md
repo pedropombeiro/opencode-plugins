@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.2.1...opencode-tmux-indicator-0.3.0) (2026-03-18)
+
+
+### Features
+
+* **tmux-indicator:** send BEL to pane TTY to set tmux window_bell_flag ([13d22e5](https://github.com/pedropombeiro/opencode-plugins/commit/13d22e5087c051d20690dd59a20e32bb7417b3fd))
+
 ## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.2.0...opencode-tmux-indicator-0.2.1) (2026-03-14)
 
 
