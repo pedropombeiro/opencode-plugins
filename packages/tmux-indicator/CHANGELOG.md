@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.3.1...opencode-tmux-indicator-0.4.0) (2026-03-18)
+
+
+### Features
+
+* **terminal-progress:** add Ghostty terminal detection ([4e6c499](https://github.com/pedropombeiro/opencode-plugins/commit/4e6c499b1e8fd9d5ae74096d1564a24c0ee34555))
+
 ## [0.3.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.3.0...opencode-tmux-indicator-0.3.1) (2026-03-18)
 
 
