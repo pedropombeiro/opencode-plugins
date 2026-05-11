@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.4.3...opencode-homeassistant-0.5.0) (2026-05-11)
+
+
+### Features
+
+* **homeassistant:** emit busy state on permission.replied ([1513300](https://github.com/pedropombeiro/opencode-plugins/commit/151330069a6f260d2cd42a2df3183e436d3e2bc8))
+* **terminal-progress:** add Ghostty terminal detection ([4e6c499](https://github.com/pedropombeiro/opencode-plugins/commit/4e6c499b1e8fd9d5ae74096d1564a24c0ee34555))
+
 ## [0.4.3](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.4.2...opencode-homeassistant-0.4.3) (2026-03-12)
 
 
