@@ -280,11 +280,12 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
             })
             .catch(() => {});
         }
-      } else if ((event.type as string) === 'permission.replied') {
-        const props = (event as unknown as { properties: Record<string, unknown> }).properties as {
-          permissionID: string;
-        };
+      } else if (event.type === 'permission.replied') {
+        const props = event.properties;
         repliedPermissions.add(props.permissionID);
+        await send('busy', props.sessionID, {
+          durationMs: elapsedSince(props.sessionID),
+        });
       }
     },
     'tool.execute.before': async (input, output) => {
