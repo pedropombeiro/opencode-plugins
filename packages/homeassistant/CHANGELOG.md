@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.5.0...opencode-homeassistant-0.5.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **homeassistant:** handle reply IDs and question states ([bf5154a](https://github.com/pedropombeiro/opencode-plugins/commit/bf5154a3f5dd1271fa01f4c4ccf4ee570fbf2d33))
+
 ## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.4.3...opencode-homeassistant-0.5.0) (2026-05-11)
 
 
