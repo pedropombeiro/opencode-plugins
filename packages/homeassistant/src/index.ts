@@ -145,6 +145,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   const host = hostname();
   const sessionStartTimes = new Map<string, number>();
   const repliedPermissions = new Set<string>();
+  const activePermissionPolls = new Set<string>();
   const inflightWebhooks = new Map<string, Promise<void>>();
 
   function elapsedSince(sessionId?: string): number | undefined {
@@ -203,24 +204,29 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
 
     const timeoutMs = (config.permissionTimeout ?? DEFAULT_PERMISSION_TIMEOUT) * 1000;
     const deadline = Date.now() + timeoutMs;
+    activePermissionPolls.add(permissionId);
 
-    while (Date.now() < deadline) {
-      if (repliedPermissions.delete(permissionId)) return undefined;
+    try {
+      while (Date.now() < deadline) {
+        if (repliedPermissions.delete(permissionId)) return undefined;
 
-      const entity = await fetchHaEntity(ha.apiUrl, ha.token, ha.entity);
-      if (entity && entity.state) {
-        const colonIdx = entity.state.indexOf(':');
-        if (colonIdx > 0) {
-          const respPermId = entity.state.substring(0, colonIdx);
-          const response = entity.state.substring(colonIdx + 1);
-          if (respPermId === permissionId) {
-            await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
-            if (response === 'allow' || response === 'always') return 'allow';
-            if (response === 'deny') return 'deny';
+        const entity = await fetchHaEntity(ha.apiUrl, ha.token, ha.entity);
+        if (entity && entity.state) {
+          const colonIdx = entity.state.indexOf(':');
+          if (colonIdx > 0) {
+            const respPermId = entity.state.substring(0, colonIdx);
+            const response = entity.state.substring(colonIdx + 1);
+            if (respPermId === permissionId) {
+              await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
+              if (response === 'allow' || response === 'always') return 'allow';
+              if (response === 'deny') return 'deny';
+            }
           }
         }
+        await sleep(POLL_INTERVAL_MS);
       }
-      await sleep(POLL_INTERVAL_MS);
+    } finally {
+      activePermissionPolls.delete(permissionId);
     }
 
     return undefined;
@@ -280,12 +286,33 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
             })
             .catch(() => {});
         }
-      } else if (event.type === 'permission.replied') {
-        const props = event.properties;
-        repliedPermissions.add(props.permissionID);
-        await send('busy', props.sessionID, {
-          durationMs: elapsedSince(props.sessionID),
-        });
+      } else if ((event.type as string) === 'permission.replied') {
+        const props = (event as unknown as { properties: Record<string, unknown> }).properties as {
+          sessionID: string;
+          permissionID?: string;
+          requestID?: string;
+        };
+        const permissionId = props.requestID ?? props.permissionID;
+        if (permissionId && activePermissionPolls.has(permissionId)) {
+          repliedPermissions.add(permissionId);
+        }
+        if (sessionStartTimes.has(props.sessionID)) {
+          await send('busy', props.sessionID, {
+            durationMs: elapsedSince(props.sessionID),
+          });
+        }
+      } else if (
+        (event.type as string) === 'question.replied' ||
+        (event.type as string) === 'question.rejected'
+      ) {
+        const props = (event as unknown as { properties: Record<string, unknown> }).properties as {
+          sessionID: string;
+        };
+        if (sessionStartTimes.has(props.sessionID)) {
+          await send('busy', props.sessionID, {
+            durationMs: elapsedSince(props.sessionID),
+          });
+        }
       }
     },
     'tool.execute.before': async (input, output) => {
@@ -316,6 +343,13 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
         send('waiting', input.sessionID, {
           durationMs: elapsedSince(input.sessionID),
           waiting: { reason: 'question', title, questions: questionDetails },
+        });
+      }
+    },
+    'tool.execute.after': async (input) => {
+      if (input.tool === 'question' && sessionStartTimes.has(input.sessionID)) {
+        await send('busy', input.sessionID, {
+          durationMs: elapsedSince(input.sessionID),
         });
       }
     },
