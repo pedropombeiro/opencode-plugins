@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import type { Plugin } from '@opencode-ai/plugin';
+import { createAgentStateTracker } from '../../_shared/src/index.ts';
 
 export const TmuxIndicatorPlugin: Plugin = async ({ $ }) => {
   const tmux = process.env['TMUX'];
@@ -10,10 +11,6 @@ export const TmuxIndicatorPlugin: Plugin = async ({ $ }) => {
 
   let windowId: string | undefined;
   let active = false;
-  let startupGrace = true;
-  setTimeout(() => {
-    startupGrace = false;
-  }, 3000);
 
   const getWindowId = async (): Promise<string> => {
     if (!windowId) {
@@ -48,24 +45,21 @@ export const TmuxIndicatorPlugin: Plugin = async ({ $ }) => {
     active = false;
   };
 
+  let startupGrace = true;
+  setTimeout(() => {
+    startupGrace = false;
+  }, 3000);
+
+  const tracker = createAgentStateTracker({
+    onWaiting: activate,
+    onBusy: deactivate,
+    onIdle: deactivate,
+    onError: deactivate,
+  });
+
   return {
-    event: async ({ event }) => {
-      if ((event.type as string) === 'permission.asked') {
-        await activate();
-      } else if (
-        (event.type as string) === 'permission.replied' ||
-        event.type === 'session.idle' ||
-        (event.type === 'session.status' &&
-          (event as { properties: { status: { type: string } } }).properties.status.type === 'busy')
-      ) {
-        await deactivate();
-      }
-    },
-    'tool.execute.before': async (input) => {
-      if (input.tool === 'question') await activate();
-    },
-    'tool.execute.after': async (input) => {
-      if (input.tool === 'question') await deactivate();
-    },
+    event: tracker.event,
+    'tool.execute.before': tracker.toolExecuteBefore,
+    'tool.execute.after': tracker.toolExecuteAfter,
   };
 };
