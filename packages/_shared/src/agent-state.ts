@@ -30,6 +30,8 @@ interface AgentStateOptions {
   onBusy?: (sessionID: string) => Promise<void> | void;
   onIdle?: (sessionID: string) => Promise<void> | void;
   onError?: (sessionID: string) => Promise<void> | void;
+  onPermissionReplied?: (sessionID: string, requestID: string) => Promise<void> | void;
+  emitRepeatedBusy?: boolean;
   handleToolQuestions?: boolean;
 }
 
@@ -39,7 +41,10 @@ export function createAgentStateTracker(options: AgentStateOptions) {
 
   async function setState(sessionID: string, state: AgentState): Promise<void> {
     if (state === 'busy' && hasWait(sessionID)) return;
-    if (states.get(sessionID) === state) return;
+    if (states.get(sessionID) === state) {
+      if (state === 'busy' && options.emitRepeatedBusy) await options.onBusy?.(sessionID);
+      return;
+    }
     states.set(sessionID, state);
     if (state === 'waiting') return;
     if (state === 'busy') await options.onBusy?.(sessionID);
@@ -129,7 +134,10 @@ export function createAgentStateTracker(options: AgentStateOptions) {
     if (event.type === 'permission.replied') {
       const props = (event as PermissionRepliedEvent).properties;
       const id = readRequestId(props as Record<string, unknown>);
-      if (id) await resume(props.sessionID, id);
+      if (id && waits.get(id) === props.sessionID) {
+        await options.onPermissionReplied?.(props.sessionID, id);
+        await resume(props.sessionID, id);
+      }
       return;
     }
 
