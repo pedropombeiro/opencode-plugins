@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.5.0...opencode-terminal-progress-0.5.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* clear stale waiting state in terminal plugins ([#44](https://github.com/pedropombeiro/opencode-plugins/issues/44)) ([8b968db](https://github.com/pedropombeiro/opencode-plugins/commit/8b968db066f6d3e99891ee60dca5bf62c05adde2))
+
 ## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.4.3...opencode-terminal-progress-0.5.0) (2026-03-18)
 
 
