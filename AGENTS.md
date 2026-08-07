@@ -28,6 +28,7 @@ There are no npm scripts. Do not add a `"scripts"` key to any `package.json`.
 - All devDependencies live at the root
 - Each package has its own `package.json` with name, version, description, and peerDependencies only
 - Each package extends `../../tsconfig.base.json` via its own `tsconfig.json`
+- Internal shared code lives in `packages/_shared/` without a `package.json`; it is bundled into each plugin
 
 ## Adding a new plugin
 

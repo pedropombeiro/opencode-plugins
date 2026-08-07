@@ -1,6 +1,6 @@
 import { openSync, writeSync } from 'fs';
 import type { Plugin } from '@opencode-ai/plugin';
-import type { EventSessionStatus } from '@opencode-ai/sdk';
+import { createAgentStateTracker } from '../../_shared/src/index.ts';
 
 type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal' | 'ghostty';
 
@@ -48,66 +48,28 @@ export const TerminalProgressPlugin: Plugin = async () => {
   if (!maybeOsc) return {};
   const osc = maybeOsc;
 
-  let waitingForInput = false;
-
   function progress(code: string): void {
     osc(`9;4;${code}`);
   }
 
   function pause(): void {
-    waitingForInput = true;
     progress('4;50');
   }
 
-  function resume(): void {
-    waitingForInput = false;
-  }
-
   function showBusy(): void {
-    if (waitingForInput) return;
     progress('3');
   }
 
+  const tracker = createAgentStateTracker({
+    onWaiting: pause,
+    onBusy: showBusy,
+    onIdle: () => progress('0'),
+    onError: () => progress('2'),
+  });
+
   return {
-    event: async ({ event }) => {
-      switch (event.type as string) {
-        case 'session.status': {
-          const { status } = (event as EventSessionStatus).properties;
-          switch (status.type) {
-            case 'busy':
-              showBusy();
-              break;
-            case 'idle':
-              resume();
-              progress('0');
-              break;
-          }
-          break;
-        }
-        case 'session.idle':
-          resume();
-          progress('0');
-          break;
-        case 'session.error':
-          resume();
-          progress('2');
-          break;
-        case 'permission.asked':
-          pause();
-          break;
-        case 'permission.replied':
-          resume();
-          showBusy();
-          break;
-      }
-    },
-    'permission.ask': async () => {
-      pause();
-    },
-    'tool.execute.before': async (input) => {
-      if (input.tool === 'question') {
-        pause();
-      }
-    },
+    event: tracker.event,
+    'tool.execute.before': tracker.toolExecuteBefore,
+    'tool.execute.after': tracker.toolExecuteAfter,
   };
 };
