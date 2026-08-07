@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.5.1...opencode-homeassistant-0.5.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **homeassistant:** use shared agent state tracker ([6393ed1](https://github.com/pedropombeiro/opencode-plugins/commit/6393ed1f2e562c6d32175ca9b6e8dcbfbb4a113b))
+
 ## [0.5.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.5.0...opencode-homeassistant-0.5.1) (2026-08-05)
 
 
