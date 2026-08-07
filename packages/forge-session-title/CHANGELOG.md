@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-0.2.1...opencode-forge-session-title-0.3.0) (2026-08-07)
+
+
+### Features
+
+* **terminal-progress:** add Ghostty terminal detection ([4e6c499](https://github.com/pedropombeiro/opencode-plugins/commit/4e6c499b1e8fd9d5ae74096d1564a24c0ee34555))
+
 ## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-0.2.0...opencode-forge-session-title-0.2.1) (2026-03-12)
 
 
