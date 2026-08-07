@@ -64,6 +64,13 @@ export function readRequestId(properties: Record<string, unknown>): string | und
 }
 
 export function questionDetail(args: unknown): WaitingDetail {
+  if (typeof args === 'string') {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      args = undefined;
+    }
+  }
   const questions = Array.isArray((args as { questions?: unknown })?.questions)
     ? (args as { questions: unknown[] }).questions
         .filter(
