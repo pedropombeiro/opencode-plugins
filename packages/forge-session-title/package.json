@@ -1,6 +1,6 @@
 {
   "name": "opencode-forge-session-title",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "OpenCode plugin that prefixes session titles with forge issue/PR/MR references (GitHub & GitLab)",
   "author": {
     "name": "Pedro Pombeiro",
