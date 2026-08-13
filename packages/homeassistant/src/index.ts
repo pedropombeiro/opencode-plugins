@@ -35,6 +35,7 @@ const DEFAULT_PERMISSION_TIMEOUT = 120;
 const DEFAULT_RESPONSE_ENTITY = 'input_text.opencode_permission_response';
 const POLL_INTERVAL_MS = 2000;
 const STALE_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+const STALE_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 const WEBHOOK_DRAIN_TIMEOUT_MS = 3000;
 
 function loadConfig(): Config {
@@ -167,6 +168,12 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     }
   }
 
+  const staleSessionSweep = setInterval(
+    () => sweepStaleSessions(Date.now()),
+    STALE_SESSION_SWEEP_INTERVAL_MS,
+  );
+  staleSessionSweep.unref();
+
   function resolveHaConfig(): { apiUrl: string; token: string; entity: string } | undefined {
     if (!config.haApiUrl || !config.haToken) return undefined;
     const token = resolveEnvVars(config.haToken);
@@ -257,6 +264,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
 
   return {
     dispose: async () => {
+      clearInterval(staleSessionSweep);
       for (const [sessionId, start] of sessionStartTimes.entries()) {
         sessionStartTimes.delete(sessionId);
         send('idle', sessionId, { durationMs: Date.now() - start });
@@ -274,7 +282,6 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
         const { sessionID, status } = event.properties;
         if (status.type === 'busy') {
           const now = Date.now();
-          sweepStaleSessions(now);
           if (!sessionStartTimes.has(sessionID)) sessionStartTimes.set(sessionID, now);
         }
       }

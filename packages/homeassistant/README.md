@@ -8,7 +8,7 @@ An [OpenCode](https://opencode.ai) plugin that sends agent status to [Home Assis
 - Sends the hostname alongside the state, so you can identify which machine triggered the automation
 - Tracks session duration -- `idle`, `waiting`, and `error` payloads include `durationMs` (time since the last `busy` event)
 - Flushes pending webhooks when OpenCode exits, including a final `idle` update for active sessions
-- Automatically cleans up sessions stuck in `busy` state after 10 minutes of no activity
+- Automatically cleans up sessions stuck in `busy` state after 10 minutes of no activity, checked every minute
 - Per-state webhook routing -- send different states to different webhook IDs
 - Multiple webhook targets -- send the same state to several Home Assistant instances
 - Includes question choices in `waiting` payloads -- HA can render actionable notifications with the available options
