@@ -1,6 +1,6 @@
 {
   "name": "opencode-homeassistant",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "OpenCode plugin that sends agent status to Home Assistant via webhooks -- and optionally lets you respond to permission requests from HA",
   "author": {
     "name": "Pedro Pombeiro",

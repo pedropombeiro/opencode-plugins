@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.5.2...opencode-homeassistant-0.6.0) (2026-08-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **homeassistant:** requires @opencode-ai/plugin >=1.15.11 for the awaited dispose hook
+
+### Bug Fixes
+
+* **homeassistant:** flush webhooks on dispose ([f71fd78](https://github.com/pedropombeiro/opencode-plugins/commit/f71fd78558fe863801f83765311fafb3f4486bc5))
+* **homeassistant:** sweep stale sessions periodically ([efd33b6](https://github.com/pedropombeiro/opencode-plugins/commit/efd33b6ce4cc3b77cc59bedf1c2aef43646371aa))
+
 ## [0.5.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.5.1...opencode-homeassistant-0.5.2) (2026-08-07)
 
 
