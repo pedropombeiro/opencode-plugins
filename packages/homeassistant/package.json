@@ -33,6 +33,6 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.0.85"
+    "@opencode-ai/plugin": ">=1.15.11"
   }
 }

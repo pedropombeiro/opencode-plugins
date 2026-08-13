@@ -35,6 +35,7 @@ const DEFAULT_PERMISSION_TIMEOUT = 120;
 const DEFAULT_RESPONSE_ENTITY = 'input_text.opencode_permission_response';
 const POLL_INTERVAL_MS = 2000;
 const STALE_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+const WEBHOOK_DRAIN_TIMEOUT_MS = 3000;
 
 function loadConfig(): Config {
   const configPath =
@@ -149,7 +150,9 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     const previous = inflightWebhooks.get(key) ?? Promise.resolve();
     const promise = previous
       .then(() => sendWebhook(urls, payload))
-      .finally(() => inflightWebhooks.delete(key));
+      .finally(() => {
+        if (inflightWebhooks.get(key) === promise) inflightWebhooks.delete(key);
+      });
     inflightWebhooks.set(key, promise);
     return promise;
   }
@@ -159,7 +162,6 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       if (now - start >= STALE_SESSION_TIMEOUT_MS) {
         const durationMs = now - start;
         sessionStartTimes.delete(sessionId);
-        inflightWebhooks.delete(sessionId);
         send('idle', sessionId, { durationMs });
       }
     }
@@ -238,13 +240,15 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     },
     onIdle: async (sessionID) => {
       if (!sessionStartTimes.has(sessionID)) return;
-      await send('idle', sessionID, { durationMs: elapsedSince(sessionID) });
+      const durationMs = elapsedSince(sessionID);
       sessionStartTimes.delete(sessionID);
+      await send('idle', sessionID, { durationMs });
     },
     onError: async (sessionID) => {
       if (!sessionStartTimes.has(sessionID)) return;
-      await send('error', sessionID, { durationMs: elapsedSince(sessionID) });
+      const durationMs = elapsedSince(sessionID);
       sessionStartTimes.delete(sessionID);
+      await send('error', sessionID, { durationMs });
     },
     onPermissionReplied: (_sessionID, permissionID) => {
       if (activePermissionPolls.has(permissionID)) repliedPermissions.add(permissionID);
@@ -252,6 +256,16 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   });
 
   return {
+    dispose: async () => {
+      for (const [sessionId, start] of sessionStartTimes.entries()) {
+        sessionStartTimes.delete(sessionId);
+        send('idle', sessionId, { durationMs: Date.now() - start });
+      }
+      await Promise.race([
+        Promise.all([...inflightWebhooks.values()]),
+        sleep(WEBHOOK_DRAIN_TIMEOUT_MS),
+      ]);
+    },
     config: async () => {
       config = loadConfig();
     },
