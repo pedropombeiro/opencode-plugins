@@ -36,6 +36,8 @@ type PollResult =
   | { kind: 'question'; optionIndex: number }
   | { kind: 'invalid' };
 
+type PollOutcome = PollResult | { kind: 'no-config' } | { kind: 'canceled' } | { kind: 'timeout' };
+
 interface RawPostClient {
   _client?: {
     post?: (options: { url: string; path?: Record<string, unknown>; body?: unknown }) => unknown;
@@ -92,6 +94,12 @@ function sendWebhook(urls: string[], payload: WebhookPayload): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function describeForeignState(state: string): string {
+  const segments = state.split(':');
+  if (segments[0] === 'question') return `kind=question, requestID=${segments[1] ?? '(empty)'}`;
+  return `kind=permission, id=${segments[0] ?? '(empty)'}`;
 }
 
 function parseResponse(state: string, requestId: string): PollResult | undefined {
@@ -214,24 +222,62 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     };
   }
 
-  async function pollForResponse(requestId: string): Promise<PollResult | undefined> {
+  async function pollForResponse(requestId: string): Promise<PollOutcome> {
     const ha = resolveHaConfig();
-    if (!ha) return undefined;
+    if (!ha) {
+      await report(
+        `${requestId}: Home Assistant config unavailable (haApiUrl, haToken or ${'${ENV_VAR}'} expansion missing), not polling`,
+        undefined,
+      );
+      return { kind: 'no-config' };
+    }
 
     const timeoutMs = (config.permissionTimeout ?? DEFAULT_PERMISSION_TIMEOUT) * 1000;
     const deadline = Date.now() + timeoutMs;
     activePermissionPolls.add(requestId);
+    await trace(`${requestId}: poll started, entity=${ha.entity}, timeout=${timeoutMs}ms`);
+
+    let polls = 0;
+    let mismatches = 0;
+    let fetchFailures = 0;
 
     try {
       while (Date.now() < deadline) {
-        if (repliedPermissions.delete(requestId)) return undefined;
+        if (repliedPermissions.delete(requestId)) {
+          await trace(`${requestId}: poll canceled after ${polls} polls (answered elsewhere)`);
+          return { kind: 'canceled' };
+        }
 
+        polls += 1;
         const entity = await fetchHaEntity(ha.apiUrl, ha.token, ha.entity);
-        if (entity && entity.state) {
+        if (!entity) {
+          fetchFailures += 1;
+          if (fetchFailures === 1) {
+            await report(
+              `${requestId}: cannot read entity ${ha.entity} from Home Assistant`,
+              undefined,
+            );
+          }
+        } else if (entity.state) {
           const result = parseResponse(entity.state, requestId);
-          if (result) {
+          if (result?.kind === 'invalid') {
+            await report(
+              `${requestId}: response present but option index is not a valid index`,
+              undefined,
+            );
             await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
             return result;
+          }
+          if (result) {
+            await trace(`${requestId}: matched ${result.kind} response after ${polls} polls`);
+            await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
+            return result;
+          }
+          mismatches += 1;
+          if (mismatches === 1) {
+            await trace(
+              `${requestId}: observed a response for a different request (${describeForeignState(entity.state)})`,
+            );
           }
         }
         await sleep(POLL_INTERVAL_MS);
@@ -240,7 +286,11 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       activePermissionPolls.delete(requestId);
     }
 
-    return undefined;
+    await report(
+      `${requestId}: timed out after ${timeoutMs}ms (${polls} polls, ${mismatches} responses for other requests, ${fetchFailures} failed reads)`,
+      undefined,
+    );
+    return { kind: 'timeout' };
   }
 
   function describeError(error: unknown): string | undefined {
@@ -256,40 +306,58 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     return String(error);
   }
 
-  async function report(message: string, error: unknown): Promise<void> {
-    const detail = describeError(error);
+  async function log(level: 'debug' | 'error', message: string): Promise<void> {
     await client.app
-      .log({
-        body: {
-          service: 'opencode-homeassistant',
-          level: 'error',
-          message: detail ? `${message}: ${detail}` : message,
-        },
-      })
+      .log({ body: { service: 'opencode-homeassistant', level, message } })
       .catch(() => {});
   }
 
+  async function report(message: string, error: unknown): Promise<void> {
+    const detail = describeError(error);
+    await log('error', detail ? `${message}: ${detail}` : message);
+  }
+
+  async function trace(message: string): Promise<void> {
+    await log('debug', message);
+  }
+
   async function answerQuestion(requestID: string, waiting: WaitingDetail): Promise<void> {
-    if (activePermissionPolls.has(requestID)) return;
+    if (activePermissionPolls.has(requestID)) {
+      await trace(`${requestID}: already polling, not starting a second poll`);
+      return;
+    }
+
+    const optionCount = waiting.questions?.[0]?.options?.length ?? 0;
+    await trace(`${requestID}: answerQuestion started, ${optionCount} options offered`);
 
     const result = await pollForResponse(requestID);
-    if (result?.kind !== 'question') return;
+    if (result.kind !== 'question') {
+      if (result.kind === 'permission') {
+        await report(
+          `${requestID}: expected a question response but got a permission one`,
+          undefined,
+        );
+      }
+      return;
+    }
 
     const label = waiting.questions?.[0]?.options?.[result.optionIndex]?.label;
     if (label === undefined) {
       await report(
-        `question ${requestID}: option index ${result.optionIndex} out of range`,
+        `${requestID}: option index ${result.optionIndex} is out of range (${optionCount} options offered)`,
         undefined,
       );
       return;
     }
+    await trace(`${requestID}: option index ${result.optionIndex} resolved to a label`);
 
     const rawClient = (client as unknown as RawPostClient)._client;
     if (!rawClient?.post) {
-      await report(`question ${requestID}: SDK client exposes no raw post method`, undefined);
+      await report(`${requestID}: SDK client exposes no raw post method`, undefined);
       return;
     }
 
+    await trace(`${requestID}: sending reply`);
     try {
       const response = (await rawClient.post({
         url: '/question/{requestID}/reply',
@@ -298,16 +366,19 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       })) as { error?: unknown; response?: { status?: number } } | undefined;
 
       if (response?.error !== undefined) {
-        await report(`question ${requestID}: reply rejected`, response.error);
+        await report(`${requestID}: reply rejected`, response.error);
         return;
       }
 
       const status = response?.response?.status;
       if (typeof status === 'number' && (status < 200 || status >= 300)) {
-        await report(`question ${requestID}: reply returned HTTP ${status}`, undefined);
+        await report(`${requestID}: reply returned HTTP ${status}`, undefined);
+        return;
       }
+
+      await trace(`${requestID}: reply accepted (HTTP ${status ?? 'unknown'})`);
     } catch (error) {
-      await report(`question ${requestID}: reply threw`, error);
+      await report(`${requestID}: reply threw`, error);
     }
   }
 
@@ -331,7 +402,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       }
 
       const result = await pollForResponse(waiting.id);
-      if (result?.kind !== 'permission') return;
+      if (result.kind !== 'permission') return;
       const apiResponse = result.response === 'allow' ? 'once' : 'reject';
       await client
         .postSessionIdPermissionsPermissionId({
