@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.1...opencode-homeassistant-0.7.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **homeassistant:** surface question reply failures and trace the reply lifecycle ([#54](https://github.com/pedropombeiro/opencode-plugins/issues/54)) ([5594e6a](https://github.com/pedropombeiro/opencode-plugins/commit/5594e6a320425157ed0c63c93680d4c7872a6a43))
+
 ## [0.7.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.0...opencode-homeassistant-0.7.1) (2026-08-18)
 
 
