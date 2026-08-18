@@ -31,9 +31,21 @@ interface HaEntityState {
   attributes: Record<string, unknown>;
 }
 
+type PollResult =
+  | { kind: 'permission'; response: 'allow' | 'deny' }
+  | { kind: 'question'; optionIndex: number }
+  | { kind: 'invalid' };
+
+interface RawPostClient {
+  _client?: {
+    post?: (options: { url: string; path?: Record<string, unknown>; body?: unknown }) => unknown;
+  };
+}
+
 const DEFAULT_PERMISSION_TIMEOUT = 120;
 const DEFAULT_RESPONSE_ENTITY = 'input_text.opencode_permission_response';
 const POLL_INTERVAL_MS = 2000;
+const QUESTION_ID_GRACE_MS = 1000;
 const STALE_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const STALE_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 const WEBHOOK_DRAIN_TIMEOUT_MS = 3000;
@@ -83,6 +95,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseResponse(state: string, requestId: string): PollResult | undefined {
+  const segments = state.split(':');
+
+  if (segments[0] === 'question') {
+    if (segments.length !== 3 || segments[1] !== requestId) return undefined;
+    const optionIndex = Number(segments[2]);
+    if (!Number.isInteger(optionIndex) || optionIndex < 0) return { kind: 'invalid' };
+    return { kind: 'question', optionIndex };
+  }
+
+  if (segments.length !== 2 || segments[0] !== requestId) return undefined;
+  const response = segments[1];
+  if (response === 'allow' || response === 'always')
+    return { kind: 'permission', response: 'allow' };
+  if (response === 'deny') return { kind: 'permission', response: 'deny' };
+  return undefined;
+}
+
 async function fetchHaEntity(
   apiUrl: string,
   token: string,
@@ -129,6 +159,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   const repliedPermissions = new Set<string>();
   const activePermissionPolls = new Set<string>();
   const inflightWebhooks = new Map<string, Promise<void>>();
+  const pendingQuestionIds = new Map<string, (requestID: string) => void>();
 
   function elapsedSince(sessionId?: string): number | undefined {
     if (!sessionId) return undefined;
@@ -185,61 +216,117 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     };
   }
 
-  async function pollForPermissionResponse(
-    permissionId: string,
-  ): Promise<'allow' | 'deny' | undefined> {
+  async function pollForResponse(requestId: string): Promise<PollResult | undefined> {
     const ha = resolveHaConfig();
     if (!ha) return undefined;
 
     const timeoutMs = (config.permissionTimeout ?? DEFAULT_PERMISSION_TIMEOUT) * 1000;
     const deadline = Date.now() + timeoutMs;
-    activePermissionPolls.add(permissionId);
+    activePermissionPolls.add(requestId);
 
     try {
       while (Date.now() < deadline) {
-        if (repliedPermissions.delete(permissionId)) return undefined;
+        if (repliedPermissions.delete(requestId)) return undefined;
 
         const entity = await fetchHaEntity(ha.apiUrl, ha.token, ha.entity);
         if (entity && entity.state) {
-          const colonIdx = entity.state.indexOf(':');
-          if (colonIdx > 0) {
-            const respPermId = entity.state.substring(0, colonIdx);
-            const response = entity.state.substring(colonIdx + 1);
-            if (respPermId === permissionId) {
-              await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
-              if (response === 'allow' || response === 'always') return 'allow';
-              if (response === 'deny') return 'deny';
-            }
+          const result = parseResponse(entity.state, requestId);
+          if (result) {
+            await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
+            return result;
           }
         }
         await sleep(POLL_INTERVAL_MS);
       }
     } finally {
-      activePermissionPolls.delete(permissionId);
+      activePermissionPolls.delete(requestId);
     }
 
     return undefined;
+  }
+
+  async function answerQuestion(requestID: string, waiting: WaitingDetail): Promise<void> {
+    if (activePermissionPolls.has(requestID)) return;
+
+    const result = await pollForResponse(requestID);
+    if (result?.kind !== 'question') return;
+
+    const label = waiting.questions?.[0]?.options?.[result.optionIndex]?.label;
+    if (label === undefined) return;
+
+    const post = (client as unknown as RawPostClient)._client?.post;
+    if (!post) return;
+
+    await Promise.resolve(
+      post({
+        url: '/question/{requestID}/reply',
+        path: { requestID },
+        body: { answers: [[label]] },
+      }),
+    ).catch(() => {});
+  }
+
+  function awaitResolvedQuestionId(sessionID: string): Promise<string | undefined> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingQuestionIds.delete(sessionID);
+        resolve(undefined);
+      }, QUESTION_ID_GRACE_MS);
+      timer.unref?.();
+      pendingQuestionIds.set(sessionID, (requestID) => {
+        clearTimeout(timer);
+        pendingQuestionIds.delete(sessionID);
+        resolve(requestID);
+      });
+    });
   }
 
   const tracker = createAgentStateTracker({
     emitRepeatedBusy: true,
     onWaiting: async (sessionID, waiting) => {
       if (!sessionStartTimes.has(sessionID)) return;
+
+      if (waiting.reason === 'question' && !waiting.id) {
+        const requestID = await awaitResolvedQuestionId(sessionID);
+        const detail = requestID ? { ...waiting, id: requestID } : waiting;
+        await send('waiting', sessionID, {
+          durationMs: elapsedSince(sessionID),
+          waiting: detail,
+        });
+        if (requestID) await answerQuestion(requestID, detail);
+        return;
+      }
+
       await send('waiting', sessionID, {
         durationMs: elapsedSince(sessionID),
         waiting,
       });
 
-      if (waiting.reason !== 'permission' || !waiting.id) return;
-      const response = await pollForPermissionResponse(waiting.id);
-      if (!response) return;
-      const apiResponse = response === 'allow' ? 'once' : 'reject';
+      if (!waiting.id) return;
+
+      if (waiting.reason === 'question') {
+        await answerQuestion(waiting.id, waiting);
+        return;
+      }
+
+      const result = await pollForResponse(waiting.id);
+      if (result?.kind !== 'permission') return;
+      const apiResponse = result.response === 'allow' ? 'once' : 'reject';
       await client
         .postSessionIdPermissionsPermissionId({
           path: { id: sessionID, permissionID: waiting.id },
           body: { response: apiResponse },
         })
         .catch(() => {});
+    },
+    onWaitingIdResolved: async (sessionID, requestID, waiting) => {
+      if (!sessionStartTimes.has(sessionID)) return;
+      const notify = pendingQuestionIds.get(sessionID);
+      if (notify) {
+        notify(requestID);
+        return;
+      }
+      await answerQuestion(requestID, waiting);
     },
     onBusy: async (sessionID) => {
       if (!sessionStartTimes.has(sessionID)) return;
@@ -259,6 +346,9 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     },
     onPermissionReplied: (_sessionID, permissionID) => {
       if (activePermissionPolls.has(permissionID)) repliedPermissions.add(permissionID);
+    },
+    onQuestionResolved: (_sessionID, requestID) => {
+      if (activePermissionPolls.has(requestID)) repliedPermissions.add(requestID);
     },
   });
 

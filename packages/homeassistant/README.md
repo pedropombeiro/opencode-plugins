@@ -56,7 +56,7 @@ The plugin sends a `POST` request with `Content-Type: application/json`:
 | Field       | Description                                                                      |
 | ----------- | -------------------------------------------------------------------------------- |
 | `reason`    | Either `permission` (agent needs approval) or `question` (agent asks a question) |
-| `id`        | Permission ID, used for remote replies (only for `permission`)                   |
+| `id`        | Permission ID or question request ID, used for remote replies                    |
 | `type`      | Permission type, e.g. `bash`, `edit`, `webfetch` (only for `permission`)         |
 | `title`     | Human-readable description of the request                                        |
 | `pattern`   | The command or path pattern being requested (only for `permission`)              |
@@ -94,6 +94,7 @@ In a Home Assistant automation, access these values via `trigger.json.*`, e.g. `
   "durationMs": 5000,
   "waiting": {
     "reason": "question",
+    "id": "que_014e8b5fe001...",
     "title": "Choose framework",
     "questions": [
       {
@@ -211,13 +212,31 @@ To enable this, add the following to your config:
 
 **How it works:**
 
-1. Plugin sends the `waiting` webhook (with `waiting.id` set to the permission ID)
+1. Plugin sends the `waiting` webhook (with `waiting.id` set to the permission ID or question request ID)
 2. Plugin starts polling `permissionResponseEntity` every 2 seconds
-3. HA automation shows an actionable notification; when the user taps Allow/Deny, the automation sets the entity state to `<permissionId>:<response>` (e.g. `per_abc123:allow`)
-4. Plugin reads the response, clears the entity, and replies to OpenCode via the SDK
-5. If the user answers locally in the TUI instead, the plugin receives a `permission.replied` event and stops polling immediately
+3. HA automation shows an actionable notification; when the user taps an action, the automation sets the entity state (see formats below)
+4. Plugin reads the response, clears the entity, and replies to OpenCode
+5. If the user answers locally in the TUI instead, the plugin receives a `permission.replied` / `question.replied` event and stops polling immediately
 
-Valid responses: `allow`, `always`, `deny`.
+**Response formats**
+
+The entity value is disambiguated by splitting on `:`. A first segment of `question` marks a question response (3 segments); anything else is a permission response (2 segments).
+
+| Kind       | Format                               | Example                 |
+| ---------- | ------------------------------------ | ----------------------- |
+| Permission | `<permissionId>:<response>`          | `per_abc123:allow`      |
+| Question   | `question:<requestId>:<optionIndex>` | `question:que_xyz789:0` |
+
+Valid permission responses: `allow`, `always`, `deny`.
+
+`<optionIndex>` is a 0-based index into `questions[0].options` -- the same array sent in the `waiting` payload. An index is used rather than the label because labels may contain `:`, carry emoji, or exceed the `input_text` 255-character limit. If the index is out of range or unparsable, the plugin sends no reply rather than a malformed answer.
+
+Notes and limits:
+
+- Only `questions[0]` is answered. Multi-question requests are not supported.
+- Exactly one label is sent, since iOS notification actions are single-tap; `multiple: true` is not supported.
+- `custom: true` ("Type your own answer") is not representable, as HA builds buttons from `options` only.
+- HA should clear the entity shortly after setting it (5 seconds is a good default) to stop stale values latching. The 2-second poll interval sits comfortably inside that window -- do not raise it much beyond 2s without widening the reset delay.
 
 ## Automation ideas
 
@@ -605,7 +624,7 @@ Key design choices:
 - **`mode: parallel`** -- multiple concurrent sessions can each have their own notification in-flight.
 - **`durationMs >= 30000`** -- uses the plugin's per-session busy timer instead of HA's `last_changed`, which can be inaccurate when sessions overlap.
 - **Permission reply** -- tapping Approve/Deny writes to `input_text.opencode_permission_response` using the format `<permissionId>:<response>`, which the plugin polls for.
-- **Question actions** -- dynamically builds notification buttons from the question's options (up to 10, the iOS limit).
+- **Question actions** -- dynamically builds notification buttons from the question's options (up to 10, the iOS limit). Tapping one writes `question:<requestId>:<optionIndex>` to the same entity; the plugin resolves the index back to the option label and replies to OpenCode.
 
 ### Session duration tracking
 

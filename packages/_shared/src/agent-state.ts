@@ -27,10 +27,16 @@ interface EventInput {
 
 interface AgentStateOptions {
   onWaiting?: (sessionID: string, detail: WaitingDetail) => Promise<void> | void;
+  onWaitingIdResolved?: (
+    sessionID: string,
+    requestID: string,
+    detail: WaitingDetail,
+  ) => Promise<void> | void;
   onBusy?: (sessionID: string) => Promise<void> | void;
   onIdle?: (sessionID: string) => Promise<void> | void;
   onError?: (sessionID: string) => Promise<void> | void;
   onPermissionReplied?: (sessionID: string, requestID: string) => Promise<void> | void;
+  onQuestionResolved?: (sessionID: string, requestID: string) => Promise<void> | void;
   emitRepeatedBusy?: boolean;
   handleToolQuestions?: boolean;
 }
@@ -121,13 +127,17 @@ export function createAgentStateTracker(options: AgentStateOptions) {
 
     if (event.type === 'question.asked') {
       const props = (event as QuestionAskedEvent).properties;
-      if (props.tool && replaceWait(props.sessionID, `tool:${props.tool.callID}`, props.id)) return;
-      await wait(props.sessionID, props.id, {
+      const detail: WaitingDetail = {
         reason: 'question',
         id: props.id,
         title: props.questions?.[0]?.header,
         questions: props.questions,
-      });
+      };
+      if (props.tool && replaceWait(props.sessionID, `tool:${props.tool.callID}`, props.id)) {
+        await options.onWaitingIdResolved?.(props.sessionID, props.id, detail);
+        return;
+      }
+      await wait(props.sessionID, props.id, detail);
       return;
     }
 
@@ -143,6 +153,9 @@ export function createAgentStateTracker(options: AgentStateOptions) {
 
     if (event.type === 'question.replied' || event.type === 'question.rejected') {
       const props = (event as QuestionRepliedEvent).properties;
+      if (waits.get(props.requestID) === props.sessionID) {
+        await options.onQuestionResolved?.(props.sessionID, props.requestID);
+      }
       await resume(props.sessionID, props.requestID);
     }
   }
