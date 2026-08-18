@@ -243,6 +243,32 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     return undefined;
   }
 
+  function describeError(error: unknown): string | undefined {
+    if (error === undefined || error === null) return undefined;
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'object') {
+      try {
+        return JSON.stringify(error);
+      } catch {
+        return '[unserializable error]';
+      }
+    }
+    return String(error);
+  }
+
+  async function report(message: string, error: unknown): Promise<void> {
+    const detail = describeError(error);
+    await client.app
+      .log({
+        body: {
+          service: 'opencode-homeassistant',
+          level: 'error',
+          message: detail ? `${message}: ${detail}` : message,
+        },
+      })
+      .catch(() => {});
+  }
+
   async function answerQuestion(requestID: string, waiting: WaitingDetail): Promise<void> {
     if (activePermissionPolls.has(requestID)) return;
 
@@ -250,18 +276,39 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     if (result?.kind !== 'question') return;
 
     const label = waiting.questions?.[0]?.options?.[result.optionIndex]?.label;
-    if (label === undefined) return;
+    if (label === undefined) {
+      await report(
+        `question ${requestID}: option index ${result.optionIndex} out of range`,
+        undefined,
+      );
+      return;
+    }
 
-    const post = (client as unknown as RawPostClient)._client?.post;
-    if (!post) return;
+    const rawClient = (client as unknown as RawPostClient)._client;
+    if (!rawClient?.post) {
+      await report(`question ${requestID}: SDK client exposes no raw post method`, undefined);
+      return;
+    }
 
-    await Promise.resolve(
-      post({
+    try {
+      const response = (await rawClient.post({
         url: '/question/{requestID}/reply',
         path: { requestID },
         body: { answers: [[label]] },
-      }),
-    ).catch(() => {});
+      })) as { error?: unknown; response?: { status?: number } } | undefined;
+
+      if (response?.error !== undefined) {
+        await report(`question ${requestID}: reply rejected`, response.error);
+        return;
+      }
+
+      const status = response?.response?.status;
+      if (typeof status === 'number' && (status < 200 || status >= 300)) {
+        await report(`question ${requestID}: reply returned HTTP ${status}`, undefined);
+      }
+    } catch (error) {
+      await report(`question ${requestID}: reply threw`, error);
+    }
   }
 
   const tracker = createAgentStateTracker({
