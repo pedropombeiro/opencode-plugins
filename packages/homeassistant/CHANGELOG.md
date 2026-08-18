@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.6.0...opencode-homeassistant-0.7.0) (2026-08-18)
+
+
+### Features
+
+* **homeassistant:** answer questions from Home Assistant ([76c3e8e](https://github.com/pedropombeiro/opencode-plugins/commit/76c3e8e4a5883cece6adc8772e128b730ac8932a))
+
 ## [0.6.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.5.2...opencode-homeassistant-0.6.0) (2026-08-13)
 
 
