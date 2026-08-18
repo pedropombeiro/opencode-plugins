@@ -45,7 +45,6 @@ interface RawPostClient {
 const DEFAULT_PERMISSION_TIMEOUT = 120;
 const DEFAULT_RESPONSE_ENTITY = 'input_text.opencode_permission_response';
 const POLL_INTERVAL_MS = 2000;
-const QUESTION_ID_GRACE_MS = 1000;
 const STALE_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const STALE_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 const WEBHOOK_DRAIN_TIMEOUT_MS = 3000;
@@ -159,7 +158,6 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   const repliedPermissions = new Set<string>();
   const activePermissionPolls = new Set<string>();
   const inflightWebhooks = new Map<string, Promise<void>>();
-  const pendingQuestionIds = new Map<string, (requestID: string) => void>();
 
   function elapsedSince(sessionId?: string): number | undefined {
     if (!sessionId) return undefined;
@@ -266,36 +264,12 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     ).catch(() => {});
   }
 
-  function awaitResolvedQuestionId(sessionID: string): Promise<string | undefined> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingQuestionIds.delete(sessionID);
-        resolve(undefined);
-      }, QUESTION_ID_GRACE_MS);
-      timer.unref?.();
-      pendingQuestionIds.set(sessionID, (requestID) => {
-        clearTimeout(timer);
-        pendingQuestionIds.delete(sessionID);
-        resolve(requestID);
-      });
-    });
-  }
-
   const tracker = createAgentStateTracker({
     emitRepeatedBusy: true,
     onWaiting: async (sessionID, waiting) => {
       if (!sessionStartTimes.has(sessionID)) return;
 
-      if (waiting.reason === 'question' && !waiting.id) {
-        const requestID = await awaitResolvedQuestionId(sessionID);
-        const detail = requestID ? { ...waiting, id: requestID } : waiting;
-        await send('waiting', sessionID, {
-          durationMs: elapsedSince(sessionID),
-          waiting: detail,
-        });
-        if (requestID) await answerQuestion(requestID, detail);
-        return;
-      }
+      if (waiting.reason === 'question' && !waiting.id) return;
 
       await send('waiting', sessionID, {
         durationMs: elapsedSince(sessionID),
@@ -321,11 +295,10 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     },
     onWaitingIdResolved: async (sessionID, requestID, waiting) => {
       if (!sessionStartTimes.has(sessionID)) return;
-      const notify = pendingQuestionIds.get(sessionID);
-      if (notify) {
-        notify(requestID);
-        return;
-      }
+      await send('waiting', sessionID, {
+        durationMs: elapsedSince(sessionID),
+        waiting,
+      });
       await answerQuestion(requestID, waiting);
     },
     onBusy: async (sessionID) => {
