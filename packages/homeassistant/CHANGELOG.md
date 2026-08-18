@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.0...opencode-homeassistant-0.7.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **homeassistant:** send question webhook once the request ID exists ([#52](https://github.com/pedropombeiro/opencode-plugins/issues/52)) ([b9c3fda](https://github.com/pedropombeiro/opencode-plugins/commit/b9c3fdac2f3989ec5b0b8e50793c05cc7f88bdbf))
+
 ## [0.7.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.6.0...opencode-homeassistant-0.7.0) (2026-08-18)
 
 
