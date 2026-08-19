@@ -236,6 +236,8 @@ To enable this, add the following to your config:
 4. Plugin reads the response, clears the entity, and replies to OpenCode
 5. If the user answers locally in the TUI instead, the plugin receives a `permission.replied` / `question.replied` event and stops polling immediately
 
+Each pending request gets its own webhook and its own poll. When an agent asks for several permissions at once, you receive one notification per request and can answer them in any order. The session resumes only after every request has been answered, so make sure your automation includes the request ID in the response rather than assuming a single outstanding request.
+
 **Response formats**
 
 The entity value is disambiguated by splitting on `:`. A first segment of `question` marks a question response (3 segments); anything else is a permission response (2 segments).
