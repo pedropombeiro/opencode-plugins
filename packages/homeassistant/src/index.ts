@@ -4,6 +4,7 @@ import { homedir, hostname } from 'os';
 import { join } from 'path';
 import type { Plugin } from '@opencode-ai/plugin';
 import { createAgentStateTracker, type WaitingDetail } from '../../_shared/src/index.ts';
+import pkg from '../package.json' with { type: 'json' };
 
 type AgentState = 'busy' | 'idle' | 'waiting' | 'error';
 type WebhookUrlEntry = string | string[];
@@ -396,7 +397,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     return String(error);
   }
 
-  async function log(level: 'debug' | 'error', message: string): Promise<void> {
+  async function log(level: 'debug' | 'info' | 'error', message: string): Promise<void> {
     await client.app
       .log({ body: { service: 'opencode-homeassistant', level, message } })
       .catch(() => {});
@@ -409,6 +410,10 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
 
   async function trace(message: string): Promise<void> {
     await log('debug', message);
+  }
+
+  async function announce(message: string): Promise<void> {
+    await log('info', message);
   }
 
   async function answerQuestion(requestID: string, waiting: WaitingDetail): Promise<void> {
@@ -472,10 +477,23 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     }
   }
 
+  function describeStartup(): string {
+    const ha = resolveHaConfig();
+    const entity = config.permissionResponseEntity ?? DEFAULT_RESPONSE_ENTITY;
+    const timeout = config.permissionTimeout ?? DEFAULT_PERMISSION_TIMEOUT;
+    const remote = ha ? 'enabled' : `disabled (${describeMissingHaConfig()})`;
+    return `started version=${pkg.version}, entity=${entity}, permissionTimeout=${timeout}s, remoteReplies=${remote}`;
+  }
+
   const tracker = createAgentStateTracker({
     emitRepeatedBusy: true,
     onWaiting: async (sessionID, waiting) => {
-      if (!sessionStartTimes.has(sessionID)) return;
+      if (!sessionStartTimes.has(sessionID)) {
+        sessionStartTimes.set(sessionID, Date.now());
+        await trace(
+          `${waiting.id ?? '(unresolved)'}: reactivated idle session ${sessionID} from incoming ${waiting.reason} request`,
+        );
+      }
 
       if (waiting.reason === 'question' && !waiting.id) return;
 
@@ -532,6 +550,8 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       if (activePermissionPolls.has(requestID)) repliedPermissions.add(requestID);
     },
   });
+
+  await announce(describeStartup());
 
   return {
     dispose: async () => {

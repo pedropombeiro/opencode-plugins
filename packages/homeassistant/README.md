@@ -147,6 +147,17 @@ If no webhook URLs are configured or the config file is missing, the plugin is d
 
 The configuration is hot-reloaded whenever OpenCode's config changes -- no restart needed.
 
+At startup, the plugin writes an `INFO` log entry with its resolved version and remote reply
+settings:
+
+```text
+started version=X.Y.Z, entity=input_text.opencode_permission_response, permissionTimeout=120s, remoteReplies=enabled
+```
+
+When a remote reply doesn't respond, search the OpenCode log for `started version=` to confirm
+that the running process loaded the expected plugin version, entity, and timeout. This entry appears
+at the default log level, so you don't need `--log-level DEBUG`.
+
 ### Per-state webhook routing
 
 Use `webhookUrls` to send different states to different webhook IDs. A `default` key acts as a fallback for any state without its own entry:
