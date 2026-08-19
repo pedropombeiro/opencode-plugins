@@ -210,6 +210,24 @@ To enable this, add the following to your config:
 | `permissionResponseEntity` | `input_text.opencode_permission_response` | Entity the plugin polls for the user's response           |
 | `permissionTimeout`        | `120`                                     | Seconds to wait for a response before giving up           |
 
+> [!IMPORTANT]
+> `${ENV_VAR}` expansion reads the **opencode process environment**, not your interactive shell. Exporting the variable in `.zshrc` is not enough when opencode is launched from a GUI app, a launch agent, or any non-login context, and opencode does not read `.env` files. If the variable is missing, remote replies are silently skipped: the notification still arrives, but tapping it does nothing.
+>
+> A reliable option is a mise `[env]` entry, which does reach opencode:
+>
+> ```toml
+> # ~/.config/mise/config.local.toml (machine-local, untracked)
+> [env]
+> HA_LONG_LIVED_TOKEN = "eyJhbGciOi..."
+> ```
+>
+> To check what opencode actually sees, run it with `--log-level DEBUG` and answer a prompt. The plugin names the exact missing variable:
+>
+> ```text
+> not polling because haToken references HA_LONG_LIVED_TOKEN,
+> which is not set in the opencode process environment
+> ```
+
 **How it works:**
 
 1. Plugin sends the `waiting` webhook (with `waiting.id` set to the permission ID or question request ID)
