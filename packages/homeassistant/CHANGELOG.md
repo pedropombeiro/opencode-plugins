@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.4](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.3...opencode-homeassistant-0.7.4) (2026-08-19)
+
+
+### Bug Fixes
+
+* **homeassistant:** explain why an entity read failed ([#58](https://github.com/pedropombeiro/opencode-plugins/issues/58)) ([f0d19eb](https://github.com/pedropombeiro/opencode-plugins/commit/f0d19eb264b2469a2b147a877195a2ad5db6d65c))
+
 ## [0.7.3](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.2...opencode-homeassistant-0.7.3) (2026-08-19)
 
 
