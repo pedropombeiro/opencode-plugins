@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.7](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.6...opencode-homeassistant-0.7.7) (2026-08-19)
+
+
+### Bug Fixes
+
+* **homeassistant:** preserve requests after idle ([4fb7aeb](https://github.com/pedropombeiro/opencode-plugins/commit/4fb7aeb958dd1e4c7bdbc1008dd26847102a7c23))
+
 ## [0.7.6](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.5...opencode-homeassistant-0.7.6) (2026-08-19)
 
 
