@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.3](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.2...opencode-homeassistant-0.7.3) (2026-08-19)
+
+
+### Bug Fixes
+
+* **homeassistant:** name the missing token variable ([#56](https://github.com/pedropombeiro/opencode-plugins/issues/56)) ([9e559f3](https://github.com/pedropombeiro/opencode-plugins/commit/9e559f320b6ae5e246834b4d088ad84ed1a7a2ec))
+
 ## [0.7.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.1...opencode-homeassistant-0.7.2) (2026-08-18)
 
 
