@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.5](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.4...opencode-homeassistant-0.7.5) (2026-08-19)
+
+
+### Bug Fixes
+
+* **homeassistant:** report webhook delivery failures ([#60](https://github.com/pedropombeiro/opencode-plugins/issues/60)) ([ec59fec](https://github.com/pedropombeiro/opencode-plugins/commit/ec59fec1f6285cda5d168c01829583ba1cfa2bf0))
+
 ## [0.7.4](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.3...opencode-homeassistant-0.7.4) (2026-08-19)
 
 
