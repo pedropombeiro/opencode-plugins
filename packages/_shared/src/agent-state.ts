@@ -69,9 +69,8 @@ export function createAgentStateTracker(options: AgentStateOptions) {
   async function wait(sessionID: string, id: string, detail: WaitingDetail): Promise<void> {
     if (!isActive(sessionID) || waits.has(id)) return;
     waits.set(id, sessionID);
-    const wasWaiting = states.get(sessionID) === 'waiting';
     states.set(sessionID, 'waiting');
-    if (!wasWaiting) await options.onWaiting?.(sessionID, detail);
+    await options.onWaiting?.(sessionID, detail);
   }
 
   async function resume(sessionID: string, id: string): Promise<void> {
