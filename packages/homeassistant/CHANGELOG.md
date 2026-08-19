@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.6](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.5...opencode-homeassistant-0.7.6) (2026-08-19)
+
+
+### Bug Fixes
+
+* **homeassistant:** document one notification per pending request ([#63](https://github.com/pedropombeiro/opencode-plugins/issues/63)) ([99cdd6d](https://github.com/pedropombeiro/opencode-plugins/commit/99cdd6da3dc46cbf821be3a329653f84da3541b8))
+
 ## [0.7.5](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.4...opencode-homeassistant-0.7.5) (2026-08-19)
 
 
