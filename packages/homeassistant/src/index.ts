@@ -211,6 +211,29 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   );
   staleSessionSweep.unref();
 
+  function unsetTokenVars(): string[] {
+    if (!config.haToken) return [];
+    return [...config.haToken.matchAll(/\$\{([^}]+)}/g)]
+      .map((match) => match[1] as string)
+      .filter((name) => !process.env[name]);
+  }
+
+  function describeUnsetTokenVars(names: string[]): string {
+    return `haToken references ${names.join(', ')}, which ${
+      names.length > 1 ? 'are' : 'is'
+    } not set in the opencode process environment`;
+  }
+
+  function describeMissingHaConfig(): string | undefined {
+    if (!config.haApiUrl) return 'haApiUrl is not set';
+    if (!config.haToken) return 'haToken is not set';
+    if (resolveEnvVars(config.haToken)) return undefined;
+
+    const unset = unsetTokenVars();
+    if (unset.length > 0) return describeUnsetTokenVars(unset);
+    return 'haToken resolved to an empty value';
+  }
+
   function resolveHaConfig(): { apiUrl: string; token: string; entity: string } | undefined {
     if (!config.haApiUrl || !config.haToken) return undefined;
     const token = resolveEnvVars(config.haToken);
@@ -226,10 +249,18 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     const ha = resolveHaConfig();
     if (!ha) {
       await report(
-        `${requestId}: Home Assistant config unavailable (haApiUrl, haToken or ${'${ENV_VAR}'} expansion missing), not polling`,
+        `${requestId}: not polling because ${describeMissingHaConfig() ?? 'the Home Assistant config is unavailable'}`,
         undefined,
       );
       return { kind: 'no-config' };
+    }
+
+    const partiallyUnset = unsetTokenVars();
+    if (partiallyUnset.length > 0) {
+      await report(
+        `${requestId}: ${describeUnsetTokenVars(partiallyUnset)}, so the token is incomplete`,
+        undefined,
+      );
     }
 
     const timeoutMs = (config.permissionTimeout ?? DEFAULT_PERMISSION_TIMEOUT) * 1000;
