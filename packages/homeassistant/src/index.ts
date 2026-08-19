@@ -124,17 +124,28 @@ async function fetchHaEntity(
   apiUrl: string,
   token: string,
   entityId: string,
-): Promise<HaEntityState | undefined> {
+): Promise<{ entity: HaEntityState } | { failure: string }> {
   try {
     const resp = await fetch(`${apiUrl}/states/${entityId}`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(5000),
     });
-    if (!resp.ok) return undefined;
-    return (await resp.json()) as HaEntityState;
-  } catch {
-    return undefined;
+    if (!resp.ok) return { failure: describeHaHttpFailure(resp.status, entityId) };
+    return { entity: (await resp.json()) as HaEntityState };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { failure: `request to ${apiUrl} failed (${detail})` };
   }
+}
+
+function describeHaHttpFailure(status: number, entityId: string): string {
+  if (status === 401 || status === 403) {
+    return `HTTP ${status}, the long-lived token was rejected by Home Assistant`;
+  }
+  if (status === 404) {
+    return `HTTP 404, entity ${entityId} does not exist (create the input_text helper in Home Assistant)`;
+  }
+  return `HTTP ${status}`;
 }
 
 async function setHaEntity(
@@ -142,9 +153,9 @@ async function setHaEntity(
   token: string,
   entityId: string,
   state: string,
-): Promise<void> {
+): Promise<string | undefined> {
   try {
-    await fetch(`${apiUrl}/states/${entityId}`, {
+    const resp = await fetch(`${apiUrl}/states/${entityId}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -153,8 +164,10 @@ async function setHaEntity(
       body: JSON.stringify({ state }),
       signal: AbortSignal.timeout(5000),
     });
-  } catch {
-    /* best effort */
+    if (!resp.ok) return describeHaHttpFailure(resp.status, entityId);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
   }
 }
 
@@ -245,6 +258,16 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     };
   }
 
+  async function clearEntity(
+    ha: { apiUrl: string; token: string; entity: string },
+    requestId: string,
+  ): Promise<void> {
+    const failure = await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
+    if (failure) {
+      await report(`${requestId}: could not clear entity ${ha.entity}: ${failure}`, undefined);
+    }
+  }
+
   async function pollForResponse(requestId: string): Promise<PollOutcome> {
     const ha = resolveHaConfig();
     if (!ha) {
@@ -280,28 +303,29 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
         }
 
         polls += 1;
-        const entity = await fetchHaEntity(ha.apiUrl, ha.token, ha.entity);
-        if (!entity) {
+        const read = await fetchHaEntity(ha.apiUrl, ha.token, ha.entity);
+        if ('failure' in read) {
           fetchFailures += 1;
           if (fetchFailures === 1) {
             await report(
-              `${requestId}: cannot read entity ${ha.entity} from Home Assistant`,
+              `${requestId}: cannot read entity ${ha.entity} from Home Assistant: ${read.failure}`,
               undefined,
             );
           }
-        } else if (entity.state) {
+        } else if (read.entity.state) {
+          const entity = read.entity;
           const result = parseResponse(entity.state, requestId);
           if (result?.kind === 'invalid') {
             await report(
               `${requestId}: response present but option index is not a valid index`,
               undefined,
             );
-            await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
+            await clearEntity(ha, requestId);
             return result;
           }
           if (result) {
             await trace(`${requestId}: matched ${result.kind} response after ${polls} polls`);
-            await setHaEntity(ha.apiUrl, ha.token, ha.entity, '');
+            await clearEntity(ha, requestId);
             return result;
           }
           mismatches += 1;
