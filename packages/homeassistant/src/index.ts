@@ -31,6 +31,11 @@ interface HaEntityState {
   attributes: Record<string, unknown>;
 }
 
+interface WebhookFailure {
+  url: string;
+  reason: string;
+}
+
 type PollResult =
   | { kind: 'permission'; response: 'allow' | 'deny' }
   | { kind: 'question'; optionIndex: number }
@@ -49,7 +54,8 @@ const DEFAULT_RESPONSE_ENTITY = 'input_text.opencode_permission_response';
 const POLL_INTERVAL_MS = 2000;
 const STALE_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const STALE_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
-const WEBHOOK_DRAIN_TIMEOUT_MS = 3000;
+const WEBHOOK_TIMEOUT_MS = 5000;
+const WEBHOOK_DRAIN_TIMEOUT_MS = 6000;
 
 function loadConfig(): Config {
   const configPath =
@@ -79,17 +85,28 @@ function resolveWebhookUrls(config: Config, state: AgentState): string[] {
   return [];
 }
 
-function sendWebhook(urls: string[], payload: WebhookPayload): Promise<void> {
+function sendWebhook(urls: string[], payload: WebhookPayload): Promise<WebhookFailure[]> {
   return Promise.all(
-    urls.map((url) =>
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(2000),
-      }).catch(() => {}),
-    ),
-  ).then(() => {});
+    urls.map(async (url): Promise<WebhookFailure | undefined> => {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+        });
+        if (!resp.ok) return { url, reason: `HTTP ${resp.status}` };
+        return undefined;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const timedOut = error instanceof Error && error.name === 'TimeoutError';
+        return {
+          url,
+          reason: timedOut ? `timed out after ${WEBHOOK_TIMEOUT_MS}ms` : detail,
+        };
+      }
+    }),
+  ).then((results) => results.filter((r): r is WebhookFailure => r !== undefined));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -192,7 +209,15 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     extra?: { durationMs?: number; waiting?: WaitingDetail },
   ): Promise<void> {
     const urls = resolveWebhookUrls(config, state);
-    if (urls.length === 0) return Promise.resolve();
+    if (urls.length === 0) {
+      if (state === 'waiting') {
+        return report(
+          'no webhook URL configured for the waiting state, so no notification was sent',
+          undefined,
+        );
+      }
+      return Promise.resolve();
+    }
     const payload: WebhookPayload = { state, hostname: host, project, sessionId };
     if (extra?.durationMs !== undefined) payload.durationMs = extra.durationMs;
     if (extra?.waiting) payload.waiting = extra.waiting;
@@ -201,6 +226,16 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     const previous = inflightWebhooks.get(key) ?? Promise.resolve();
     const promise = previous
       .then(() => sendWebhook(urls, payload))
+      .then(async (failures) => {
+        for (const failure of failures) {
+          await report(
+            `${state} webhook to ${failure.url} failed: ${failure.reason}${
+              state === 'waiting' ? ' (no notification was delivered)' : ''
+            }`,
+            undefined,
+          );
+        }
+      })
       .finally(() => {
         if (inflightWebhooks.get(key) === promise) inflightWebhooks.delete(key);
       });
