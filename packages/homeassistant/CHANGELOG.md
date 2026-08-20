@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.8](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.7...opencode-homeassistant-0.7.8) (2026-08-20)
+
+
+### Bug Fixes
+
+* **homeassistant:** preserve waiting sessions during stale sweep ([2c11424](https://github.com/pedropombeiro/opencode-plugins/commit/2c11424bb79b2e096a07573a78d9103114cdadef))
+
 ## [0.7.7](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.6...opencode-homeassistant-0.7.7) (2026-08-19)
 
 
