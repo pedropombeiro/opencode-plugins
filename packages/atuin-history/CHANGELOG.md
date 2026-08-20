@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-0.2.0...opencode-atuin-history-0.2.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **homeassistant:** use shared agent state tracker ([6393ed1](https://github.com/pedropombeiro/opencode-plugins/commit/6393ed1f2e562c6d32175ca9b6e8dcbfbb4a113b))
+
 ## [0.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-0.1.1...opencode-atuin-history-0.2.0) (2026-08-07)
 
 ### Features
