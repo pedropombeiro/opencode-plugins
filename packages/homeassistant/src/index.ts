@@ -37,6 +37,11 @@ interface WebhookFailure {
   reason: string;
 }
 
+interface SessionTimes {
+  start: number;
+  lastActivity: number;
+}
+
 type PollResult =
   | { kind: 'permission'; response: 'allow' | 'deny' }
   | { kind: 'question'; optionIndex: number }
@@ -193,15 +198,25 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   let config = loadConfig();
   const project = basename(directory);
   const host = hostname();
-  const sessionStartTimes = new Map<string, number>();
+  const sessions = new Map<string, SessionTimes>();
   const repliedPermissions = new Set<string>();
   const activePermissionPolls = new Set<string>();
   const inflightWebhooks = new Map<string, Promise<void>>();
 
   function elapsedSince(sessionId?: string): number | undefined {
     if (!sessionId) return undefined;
-    const start = sessionStartTimes.get(sessionId);
-    return start !== undefined ? Date.now() - start : undefined;
+    const session = sessions.get(sessionId);
+    return session ? Date.now() - session.start : undefined;
+  }
+
+  function recordActivity(sessionId: string, now = Date.now()): boolean {
+    const session = sessions.get(sessionId);
+    if (session) {
+      session.lastActivity = now;
+      return false;
+    }
+    sessions.set(sessionId, { start: now, lastActivity: now });
+    return true;
   }
 
   function send(
@@ -245,20 +260,15 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   }
 
   function sweepStaleSessions(now: number): void {
-    for (const [sessionId, start] of sessionStartTimes.entries()) {
-      if (now - start >= STALE_SESSION_TIMEOUT_MS) {
-        const durationMs = now - start;
-        sessionStartTimes.delete(sessionId);
+    for (const [sessionId, session] of sessions.entries()) {
+      if (tracker.hasWait(sessionId)) continue;
+      if (now - session.lastActivity >= STALE_SESSION_TIMEOUT_MS) {
+        const durationMs = now - session.start;
+        sessions.delete(sessionId);
         send('idle', sessionId, { durationMs });
       }
     }
   }
-
-  const staleSessionSweep = setInterval(
-    () => sweepStaleSessions(Date.now()),
-    STALE_SESSION_SWEEP_INTERVAL_MS,
-  );
-  staleSessionSweep.unref();
 
   function unsetTokenVars(): string[] {
     if (!config.haToken) return [];
@@ -488,8 +498,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   const tracker = createAgentStateTracker({
     emitRepeatedBusy: true,
     onWaiting: async (sessionID, waiting) => {
-      if (!sessionStartTimes.has(sessionID)) {
-        sessionStartTimes.set(sessionID, Date.now());
+      if (recordActivity(sessionID)) {
         await trace(
           `${waiting.id ?? '(unresolved)'}: reactivated idle session ${sessionID} from incoming ${waiting.reason} request`,
         );
@@ -520,7 +529,8 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
         .catch(() => {});
     },
     onWaitingIdResolved: async (sessionID, requestID, waiting) => {
-      if (!sessionStartTimes.has(sessionID)) return;
+      if (!sessions.has(sessionID)) return;
+      recordActivity(sessionID);
       await send('waiting', sessionID, {
         durationMs: elapsedSince(sessionID),
         waiting,
@@ -528,19 +538,20 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       await answerQuestion(requestID, waiting);
     },
     onBusy: async (sessionID) => {
-      if (!sessionStartTimes.has(sessionID)) return;
+      if (!sessions.has(sessionID)) return;
+      recordActivity(sessionID);
       await send('busy', sessionID, { durationMs: elapsedSince(sessionID) });
     },
     onIdle: async (sessionID) => {
-      if (!sessionStartTimes.has(sessionID)) return;
+      if (!sessions.has(sessionID)) return;
       const durationMs = elapsedSince(sessionID);
-      sessionStartTimes.delete(sessionID);
+      sessions.delete(sessionID);
       await send('idle', sessionID, { durationMs });
     },
     onError: async (sessionID) => {
-      if (!sessionStartTimes.has(sessionID)) return;
+      if (!sessions.has(sessionID)) return;
       const durationMs = elapsedSince(sessionID);
-      sessionStartTimes.delete(sessionID);
+      sessions.delete(sessionID);
       await send('error', sessionID, { durationMs });
     },
     onPermissionReplied: (_sessionID, permissionID) => {
@@ -551,14 +562,20 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     },
   });
 
+  const staleSessionSweep = setInterval(
+    () => sweepStaleSessions(Date.now()),
+    STALE_SESSION_SWEEP_INTERVAL_MS,
+  );
+  staleSessionSweep.unref();
+
   await announce(describeStartup());
 
   return {
     dispose: async () => {
       clearInterval(staleSessionSweep);
-      for (const [sessionId, start] of sessionStartTimes.entries()) {
-        sessionStartTimes.delete(sessionId);
-        send('idle', sessionId, { durationMs: Date.now() - start });
+      for (const [sessionId, session] of sessions.entries()) {
+        sessions.delete(sessionId);
+        send('idle', sessionId, { durationMs: Date.now() - session.start });
       }
       await Promise.race([
         Promise.all([...inflightWebhooks.values()]),
@@ -572,8 +589,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       if (event.type === 'session.status') {
         const { sessionID, status } = event.properties;
         if (status.type === 'busy') {
-          const now = Date.now();
-          if (!sessionStartTimes.has(sessionID)) sessionStartTimes.set(sessionID, now);
+          recordActivity(sessionID);
         }
       }
       await tracker.event({ event });

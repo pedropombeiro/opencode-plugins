@@ -1,6 +1,6 @@
 name: PR
 
-on:
+'on':
   pull_request:
     branches:
       - main
@@ -29,6 +29,9 @@ jobs:
 
       - name: Typecheck
         run: mise run typecheck
+
+      - name: Test
+        run: mise run test
 
       - name: Build
         run: mise run build

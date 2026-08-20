@@ -8,6 +8,7 @@ All tasks are run via mise:
 - `mise run build` — build all plugins into `packages/*/dist/`
 - `mise run dev <package>` — build a single package with inline sourcemaps
 - `mise run typecheck` — type-check all packages
+- `mise run test` — run all tests
 - `mise run lint` — lint with ESLint
 - `mise run lint:fix` — lint and auto-fix
 - `mise run format` — format with Prettier
@@ -38,7 +39,7 @@ There are no npm scripts. Do not add a `"scripts"` key to any `package.json`.
 
 ## Testing
 
-There are no automated tests. Verify by running `mise run build` and `mise run typecheck` successfully.
+Verify by running `mise run test`, `mise run build`, and `mise run typecheck` successfully.
 
 ## Releasing
 

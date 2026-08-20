@@ -171,5 +171,5 @@ export function createAgentStateTracker(options: AgentStateOptions) {
     }
   }
 
-  return { event, toolExecuteBefore, toolExecuteAfter };
+  return { event, hasWait, toolExecuteBefore, toolExecuteAfter };
 }
