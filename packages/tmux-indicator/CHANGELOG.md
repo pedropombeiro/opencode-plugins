@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.4.1...opencode-tmux-indicator-0.5.0) (2026-09-11)
+
+
+### Features
+
+* **tmux-indicator:** navigate to waiting conversations ([cfd84a4](https://github.com/pedropombeiro/opencode-plugins/commit/cfd84a48e0cf6e0458f343c28bb59cc54c0a34cc))
+
 ## [0.4.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.4.0...opencode-tmux-indicator-0.4.1) (2026-08-07)
 
 ### Bug Fixes
