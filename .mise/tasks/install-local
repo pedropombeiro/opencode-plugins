@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Build a plugin into the local OpenCode plugins directory"
+set -euo pipefail
+package=${1:?Usage: mise run install-local PACKAGE}
+destination="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
+[[ -d "$destination" ]]
+bun build "packages/$package/src/index.ts" --outfile "$destination/$package.js" --target bun
