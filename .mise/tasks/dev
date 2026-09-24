@@ -7,4 +7,8 @@ if [ ! -d "$pkg" ]; then
   echo "Package not found: $pkg" >&2
   exit 1
 fi
-bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun --sourcemap=inline
+for entry in index tui; do
+  [ -f "$pkg/src/$entry.ts" ] || continue
+  bun build "$pkg/src/$entry.ts" --outdir "$pkg/dist" --target bun --sourcemap=inline \
+    --external '@opencode/plugin' --external '@opencode/plugin/*'
+done

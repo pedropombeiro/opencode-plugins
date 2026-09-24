@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 #MISE description="Build a plugin into the local OpenCode plugins directory"
+#USAGE arg "<package>" help="Package to install (e.g. terminal-progress)"
 set -euo pipefail
-package=${1:?Usage: mise run install-local PACKAGE}
-destination="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins"
-[[ -d "$destination" ]]
-bun build "packages/$package/src/index.ts" --outfile "$destination/$package.js" --target bun
+pkg="packages/${usage_package}"
+if [ ! -d "$pkg" ]; then
+  echo "Package not found: $pkg" >&2
+  exit 1
+fi
+destination="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/${usage_package}"
+mkdir -p "$destination"
+for entry in index tui; do
+  [ -f "$pkg/src/$entry.ts" ] || continue
+  bun build "$pkg/src/$entry.ts" --outfile "$destination/$entry.js" --target bun \
+    --external '@opencode/plugin' --external '@opencode/plugin/*'
+done

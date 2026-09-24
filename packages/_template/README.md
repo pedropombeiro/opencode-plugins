@@ -2,6 +2,8 @@
 
 An [OpenCode](https://opencode.ai) plugin that ...
 
+Requires OpenCode 2.
+
 ## Installation
 
 ```bash
@@ -12,7 +14,7 @@ Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-PLUGIN-NAME"]
+  "plugins": ["opencode-PLUGIN-NAME"]
 }
 ```
 

@@ -14,7 +14,11 @@ else
   pkgs=(packages/*/)
 fi
 for pkg in "${pkgs[@]}"; do
-  name=$(basename "$pkg")
-  echo "Building $name..."
-  bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun
+  pkg=${pkg%/}
+  echo "Building $(basename "$pkg")..."
+  for entry in index tui; do
+    [ -f "$pkg/src/$entry.ts" ] || continue
+    bun build "$pkg/src/$entry.ts" --outdir "$pkg/dist" --target bun \
+      --external '@opencode/plugin' --external '@opencode/plugin/*'
+  done
 done
