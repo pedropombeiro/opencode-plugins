@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-1.0.1...opencode-tmux-indicator-1.0.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* **tmux-indicator:** only flag sessions shown in this terminal ([6f931db](https://github.com/pedropombeiro/opencode-plugins/commit/6f931db5ae56ce98a73d4d797b47ceda2a92efca))
+
 ## [1.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-1.0.0...opencode-tmux-indicator-1.0.1) (2026-09-24)
 
 
