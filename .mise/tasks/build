@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-#MISE description="Build all plugins"
+#MISE description="Build all plugins, or only the packages passed as arguments"
 set -euo pipefail
-for pkg in packages/*/; do
+if [ $# -gt 0 ]; then
+  pkgs=()
+  for name in "$@"; do
+    if [ ! -d "packages/$name" ]; then
+      echo "Package not found: packages/$name" >&2
+      exit 1
+    fi
+    pkgs+=("packages/$name/")
+  done
+else
+  pkgs=(packages/*/)
+fi
+for pkg in "${pkgs[@]}"; do
   name=$(basename "$pkg")
   echo "Building $name..."
   bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - v1
 
 permissions:
   contents: write
@@ -24,6 +25,8 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
         id: release
+        with:
+          target-branch: ${{ github.ref_name }}
 
   publish:
     name: Publish ${{ matrix.package }}
@@ -62,11 +65,9 @@ jobs:
 
       - if: matrix.enabled == 'true'
         name: Build
-        run: |
-          pkg="packages/${{ matrix.package }}"
-          bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun
+        run: mise run build ${{ matrix.package }}
 
       - if: matrix.enabled == 'true'
         name: Publish
-        run: npm publish --access public --tag latest
+        run: npm publish --access public --tag ${{ github.ref_name == 'main' && 'latest' || github.ref_name }}
         working-directory: packages/${{ matrix.package }}

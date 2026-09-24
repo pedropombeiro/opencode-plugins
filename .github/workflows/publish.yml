@@ -44,9 +44,7 @@ jobs:
         run: mise run setup
 
       - name: Build
-        run: |
-          pkg="${{ inputs.package-path }}"
-          bun build "$pkg/src/index.ts" --outdir "$pkg/dist" --target bun
+        run: mise run build "$(basename "${{ inputs.package-path }}")"
 
       - name: Publish
         run: npm publish --access public --tag ${{ inputs.tag }}
