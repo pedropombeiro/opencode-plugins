@@ -1,23 +1,6 @@
-export interface WaitingQuestionOption {
-  label: string;
-  description?: string;
-}
+import type { WaitingDetail, WaitingQuestion } from './waiting.ts';
 
-export interface WaitingQuestion {
-  header: string;
-  question: string;
-  options: WaitingQuestionOption[];
-  multiple?: boolean;
-}
-
-export interface WaitingDetail {
-  reason: 'permission' | 'question';
-  id?: string;
-  type?: string;
-  title?: string;
-  pattern?: string | string[];
-  questions?: WaitingQuestion[];
-}
+export type { WaitingDetail, WaitingQuestion };
 
 export interface PermissionAskedEvent {
   type: 'permission.asked';

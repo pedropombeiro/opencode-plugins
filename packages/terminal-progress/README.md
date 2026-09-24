@@ -1,7 +1,10 @@
 # opencode-terminal-progress
 
-An [OpenCode](https://opencode.ai) plugin that shows agent progress in your terminal tab using
+An [OpenCode](https://opencode.ai) CLI plugin that shows agent progress in your terminal tab using
 [OSC 9;4](https://iterm2.com/documentation-escape-codes.html) progress reporting.
+
+Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
+(`npm install opencode-terminal-progress@v1`).
 
 ## Supported terminals
 
@@ -29,16 +32,19 @@ Set `OPENCODE_TERMINAL_PROGRESS=0` (or `false`/`no`) to disable progress reporti
 ## Installation
 
 ```bash
-npm install opencode-terminal-progress
+opencode plugin add opencode-terminal-progress
 ```
 
-Add to your `~/.config/opencode/opencode.json`:
+This adds the plugin to `~/.config/opencode/cli.json`:
 
 ```json
 {
-  "plugin": ["opencode-terminal-progress"]
+  "plugins": ["opencode-terminal-progress"]
 }
 ```
+
+The plugin runs in the terminal interface, so it keeps working when the CLI connects to a remote
+server.
 
 ## License
 
