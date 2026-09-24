@@ -17,24 +17,32 @@ async function eventually<T>(read: () => Promise<T>, check: (value: T) => boolea
   return value;
 }
 
+const listeners = new Set<Listener>();
+
+function broadcast(type: string, data: Record<string, unknown>): void {
+  for (const listener of listeners) listener({ details: { type, data } as OpenCodeEvent });
+}
+
 function createContext() {
-  const listeners = new Set<Listener>();
+  const tabs = new Set<string>();
   const context = {
     data: {
       listen: (listener: Listener) => {
         listeners.add(listener);
         return () => listeners.delete(listener);
       },
+      session: { root: (sessionID: string) => sessionID },
     },
     ui: {
-      tabs: { enabled: () => false, focus: () => false },
-      router: { navigate: () => {} },
+      tabs: {
+        enabled: () => true,
+        list: () => [...tabs].map((sessionID) => ({ sessionID })),
+        focus: () => false,
+      },
+      router: { current: () => ({ type: 'home' }), navigate: () => {} },
     },
   } as unknown as Plugin.Context;
-  const emit = async (type: string, data: Record<string, unknown>) => {
-    for (const listener of listeners) listener({ details: { type, data } as OpenCodeEvent });
-  };
-  return { context, emit };
+  return { context, tabs };
 }
 
 test('keeps waiting sessions across unrelated activity, startup grace, and multiple instances', async () => {
@@ -53,14 +61,13 @@ test('keeps waiting sessions across unrelated activity, startup grace, and multi
       const cleanup = await plugin.setup(context);
       if (cleanup) cleanups.push(cleanup);
     }
-    const emit = (index: number, type: string, data: Record<string, unknown>) =>
-      instances[index]!.emit(type, data);
-    const busy = (index: number, sessionID: string) =>
-      emit(index, 'session.execution.started', { sessionID });
-    const wait = (index: number, sessionID: string) =>
-      emit(index, 'permission.asked', { sessionID, id: sessionID, action: 'shell', resources: [] });
-    const idle = (index: number, sessionID: string) =>
-      emit(index, 'session.execution.succeeded', { sessionID });
+    const busy = (index: number, sessionID: string) => {
+      instances[index]!.tabs.add(sessionID);
+      broadcast('session.execution.started', { sessionID });
+    };
+    const wait = (sessionID: string) =>
+      broadcast('permission.asked', { sessionID, id: sessionID, action: 'shell', resources: [] });
+    const idle = (sessionID: string) => broadcast('session.execution.succeeded', { sessionID });
     const targets = async () =>
       ((await tmux('show-options', '-p', '-t', '%0')).match(/@opencode-waiting-target-/g) ?? [])
         .length;
@@ -76,23 +83,27 @@ test('keeps waiting sessions across unrelated activity, startup grace, and multi
       ).toEqual({ flag: expectedFlag, targets: expectedTargets });
     };
 
-    await busy(0, 'ses_a');
-    await wait(0, 'ses_a');
-    await busy(0, 'ses_b');
-    await wait(0, 'ses_b');
-    await busy(1, 'ses_c');
-    await wait(1, 'ses_c');
+    busy(0, 'ses_a');
+    wait('ses_a');
+    busy(0, 'ses_b');
+    wait('ses_b');
+    busy(1, 'ses_c');
+    wait('ses_c');
     expect(await flag()).toBe('');
     await Bun.sleep(3200);
     await expectState('1', 2);
 
-    await busy(0, 'ses_unrelated');
-    await idle(0, 'ses_unrelated');
-    await emit(0, 'permission.replied', { sessionID: 'ses_a', requestID: 'ses_a' });
+    busy(0, 'ses_unrelated');
+    idle('ses_unrelated');
+    broadcast('permission.replied', { sessionID: 'ses_a', requestID: 'ses_a' });
     await expectState('1', 2);
-    await idle(0, 'ses_b');
+    idle('ses_b');
     await expectState('1', 1);
-    await idle(1, 'ses_c');
+    idle('ses_c');
+    await expectState('', 0);
+
+    broadcast('permission.asked', { sessionID: 'ses_elsewhere', id: 'per_x', action: 'shell' });
+    await Bun.sleep(200);
     await expectState('', 0);
   } finally {
     for (const cleanup of cleanups) await cleanup();

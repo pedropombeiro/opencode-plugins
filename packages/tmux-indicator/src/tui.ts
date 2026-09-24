@@ -1,7 +1,12 @@
 import { writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Plugin } from '@opencode/plugin/tui';
-import { createAgentStateTracker, exec, type OpenCodeEvent } from '../../_shared/src/index.ts';
+import {
+  createAgentStateTracker,
+  createViewFilter,
+  exec,
+  type OpenCodeEvent,
+} from '../../_shared/src/index.ts';
 import { createNavigation } from './navigation.ts';
 
 async function tmux(...args: string[]): Promise<string> {
@@ -95,9 +100,10 @@ export default {
       onError: deactivate,
     });
 
+    const shows = createViewFilter(context, tracker.tracks);
     const handle = (event: OpenCodeEvent) => enqueue(() => tracker.handle(event));
     const stop = context.data.listen(({ details }) => {
-      void handle(details).catch(() => {});
+      if (shows(details)) void handle(details).catch(() => {});
     });
 
     return async () => {
