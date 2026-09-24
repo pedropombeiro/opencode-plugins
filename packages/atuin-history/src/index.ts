@@ -1,46 +1,58 @@
-import type { Plugin } from '@opencode-ai/plugin';
+import { hostname } from 'node:os';
+import type { Plugin } from '@opencode/plugin';
+import { exec } from '../../_shared/src/v2.ts';
 
 const AUTHOR = 'opencode';
+const SHELL_TOOL = 'shell';
 
-export const AtuinHistoryPlugin: Plugin = async ({ $ }) => {
-  const sessionResult = await $`atuin uuid`.quiet();
-  const session = sessionResult.text().trim();
-  const hostnameResult = await $`hostname -s`.quiet();
-  const hostname = `${AUTHOR}@${hostnameResult.text().trim()}`;
+interface ShellInput {
+  command?: unknown;
+}
 
-  return {
-    'shell.env': async (_input, output) => {
-      output.env['ATUIN_HISTORY_AUTHOR'] = AUTHOR;
-      if (session) output.env['ATUIN_SESSION'] = session;
-      output.env['ATUIN_HOST_NAME'] = hostname;
-    },
-    'tool.execute.after': async (input, output) => {
-      if (input.tool !== 'bash') return;
-      const command = (input.args as { command?: string } | undefined)?.command;
-      if (!command) return;
+interface ShellMetadata {
+  exit?: unknown;
+}
 
-      try {
-        const env: Record<string, string> = {
-          ATUIN_HISTORY_AUTHOR: AUTHOR,
-          ATUIN_HOST_NAME: hostname,
-        };
-        if (session) env['ATUIN_SESSION'] = session;
+export default {
+  id: 'opencode-atuin-history',
+  async setup(ctx) {
+    const uuid = await exec('atuin', ['uuid']);
+    if (uuid.code !== 0) return;
 
-        const startResult = await $`atuin history start -- ${command}`.env(env).quiet();
-        const id = startResult.text().trim();
-        if (!id) return;
+    const session = uuid.stdout.trim();
+    const env: Record<string, string> = {
+      ATUIN_HISTORY_AUTHOR: AUTHOR,
+      ATUIN_HOST_NAME: `${AUTHOR}@${hostname().split('.')[0]}`,
+    };
+    if (session) env['ATUIN_SESSION'] = session;
 
-        const metadata = (output as { metadata?: { exitCode?: number; duration?: number } })
-          .metadata;
-        const exit = metadata?.exitCode ?? 0;
-        const args = ['--exit', String(exit)];
-        if (metadata?.duration) {
-          args.push('--duration', String(Math.round(metadata.duration * 1e6)));
-        }
-        await $`atuin history end ${args} -- ${id}`.env(env).quiet();
-      } catch {
-        /* best effort */
-      }
-    },
-  };
-};
+    const started = new Map<string, number>();
+
+    await ctx.shell.hook('create.before', (event) => {
+      Object.assign(event.env, env);
+    });
+
+    await ctx.tool.hook('execute.before', (event) => {
+      if (event.tool === SHELL_TOOL) started.set(event.id, Date.now());
+    });
+
+    await ctx.tool.hook('execute.after', async (event) => {
+      if (event.tool !== SHELL_TOOL) return;
+      const start = started.get(event.id);
+      started.delete(event.id);
+      if (event.status !== 'completed') return;
+
+      const command = (event.input as ShellInput | undefined)?.command;
+      if (typeof command !== 'string' || !command) return;
+
+      const exit = (event.result.metadata as ShellMetadata | undefined)?.exit;
+      const history = await exec('atuin', ['history', 'start', '--', command], { env });
+      const id = history.stdout.trim();
+      if (history.code !== 0 || !id) return;
+
+      const args = ['history', 'end', '--exit', String(typeof exit === 'number' ? exit : 0)];
+      if (start !== undefined) args.push('--duration', String((Date.now() - start) * 1e6));
+      await exec('atuin', [...args, '--', id], { env });
+    });
+  },
+} satisfies Plugin.Plugin;
