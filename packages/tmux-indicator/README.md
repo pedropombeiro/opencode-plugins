@@ -1,8 +1,11 @@
 # opencode-tmux-indicator
 
-An [OpenCode](https://opencode.ai) plugin that sets a tmux window option
+An [OpenCode](https://opencode.ai) CLI plugin that sets a tmux window option
 (`@opencode-waiting`) when the agent is waiting for user input (permission prompt or question),
 and clears it when the agent resumes.
+
+Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
+(`npm install opencode-tmux-indicator@v1`).
 
 ## How it works
 
@@ -32,23 +35,21 @@ Its value is an HTTP Unix socket path inside a private temporary directory. Use
 The socket accepts two requests:
 
 - `GET /waiting` returns a sorted JSON array of currently waiting OpenCode session IDs.
-- `POST /select/SESSION_ID` displays a waiting session in the existing OpenCode TUI. It returns
-  `true` when the SDK accepts the navigation event, HTTP 404 if the session is no longer waiting,
-  or HTTP 502 if navigation fails.
+- `POST /select/SESSION_ID` displays a waiting session in the OpenCode terminal interface that
+  owns the socket. It returns `true` once the plugin has asked the interface to show the session,
+  HTTP 404 if the session is no longer waiting, or HTTP 502 if navigation fails.
 
-The bridge publishes `tui.session.select` through the plugin's SDK client, preserving its
-in-process transport and project directory. OpenCode does not need to expose a TCP port.
-Session navigation requires an OpenCode version that supports that event.
+The plugin runs inside the terminal interface, so it focuses the session's tab when session tabs
+are enabled and otherwise navigates to the session. OpenCode does not need to expose a TCP port.
 
 Navigators should query each socket, cycle through individual sessions, and remove stale pane
-options when the owning process has exited. A navigation response confirms event publication,
-not that a TUI has finished rendering the selected conversation.
+options when the owning process has exited.
 
 ## Install a local build
 
 Run `mise run install-local tmux-indicator` from the repository root to install a bundled copy
-at `~/.config/opencode/plugins/tmux-indicator.js`. Remove the npm plugin entry from your
-OpenCode configuration to avoid loading both copies, then restart OpenCode.
+at `~/.config/opencode/plugins/tmux-indicator/tui.js`. Remove the npm plugin entry from your
+`cli.json` to avoid loading both copies, then restart OpenCode.
 
 ## Recommended tmux settings
 
@@ -69,16 +70,19 @@ environment where OpenCode is launched.
 ## Installation
 
 ```bash
-npm install opencode-tmux-indicator
+opencode plugin add opencode-tmux-indicator
 ```
 
-Add to your `~/.config/opencode/opencode.json`:
+This adds the plugin to `~/.config/opencode/cli.json`:
 
 ```json
 {
-  "plugin": ["opencode-tmux-indicator"]
+  "plugins": ["opencode-tmux-indicator"]
 }
 ```
+
+The plugin runs in the terminal interface, which is where `$TMUX` and `$TMUX_PANE` are set, so it
+keeps working when the CLI connects to a remote server.
 
 ## License
 

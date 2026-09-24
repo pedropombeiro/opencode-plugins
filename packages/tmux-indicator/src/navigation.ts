@@ -3,25 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { PluginInput } from '@opencode-ai/plugin';
 
-interface TuiPublisher {
-  publish(options: {
-    body: { type: 'tui.session.select'; properties: { sessionID: string } };
-    query: { directory: string };
-    throwOnError: true;
-    signal: AbortSignal;
-  }): Promise<{ data?: boolean }>;
-}
+export type SelectSession = (sessionID: string) => Promise<boolean> | boolean;
 
-export async function createNavigation(
-  client: PluginInput['client'],
-  directory: string,
-  waiting: Set<string>,
-) {
+export async function createNavigation(select: SelectSession, waiting: Set<string>) {
   const folder = mkdtempSync(join(tmpdir(), 'oc-tmux-'));
   const socket = join(folder, 's');
-  const tui = client.tui as unknown as TuiPublisher;
   const server = createServer(async (request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (request.method === 'GET' && request.url === '/waiting') {
@@ -34,15 +21,8 @@ export async function createNavigation(
       return;
     }
     try {
-      const result = await tui.publish({
-        body: { type: 'tui.session.select', properties: { sessionID } },
-        query: { directory },
-        throwOnError: true,
-        signal: AbortSignal.timeout(3000),
-      });
-      response
-        .writeHead(result.data === true ? 200 : 502)
-        .end(JSON.stringify(result.data === true));
+      const selected = (await select(sessionID)) === true;
+      response.writeHead(selected ? 200 : 502).end(JSON.stringify(selected));
     } catch {
       response.writeHead(502).end('false');
     }
