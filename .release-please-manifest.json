@@ -1,5 +1,5 @@
 {
-  "packages/terminal-progress": "1.0.0",
+  "packages/terminal-progress": "1.0.1",
   "packages/homeassistant": "1.0.0",
   "packages/forge-session-title": "1.0.0",
   "packages/atuin-history": "1.0.0",

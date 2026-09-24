@@ -1,6 +1,6 @@
 {
   "name": "opencode-terminal-progress",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenCode CLI plugin that shows agent progress in terminal tabs (Ghostty, iTerm2, WezTerm, Windows Terminal)",
   "author": {
     "name": "Pedro Pombeiro",
