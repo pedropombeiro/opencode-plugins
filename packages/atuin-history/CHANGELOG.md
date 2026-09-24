@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-1.0.0...opencode-atuin-history-1.0.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **docs:** point OpenCode 1 users to the opencode-v1 dist-tag ([dcaacb7](https://github.com/pedropombeiro/opencode-plugins/commit/dcaacb780dc151fbbfaaf3452a680afe956d58f1))
+
 ## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-0.2.1...opencode-atuin-history-1.0.0) (2026-09-24)
 
 

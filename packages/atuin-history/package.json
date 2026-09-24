@@ -1,6 +1,6 @@
 {
   "name": "opencode-atuin-history",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenCode plugin that records agent bash commands in Atuin shell history",
   "author": {
     "name": "Pedro Pombeiro",
