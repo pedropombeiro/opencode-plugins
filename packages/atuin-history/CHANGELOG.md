@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-0.2.1...opencode-atuin-history-1.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **atuin-history:** Requires OpenCode 2. OpenCode 1 users should install the `v1` dist-tag.
+
+### Features
+
+* **atuin-history:** port to the OpenCode 2 plugin API ([e8a6932](https://github.com/pedropombeiro/opencode-plugins/commit/e8a693265d887686eed73db6a823a09832341b4c))
+
 ## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-0.2.0...opencode-atuin-history-0.2.1) (2026-09-24)
 
 ### Bug Fixes
