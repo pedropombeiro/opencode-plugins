@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.8...opencode-homeassistant-1.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **homeassistant:** Requires OpenCode 2. Configuration no longer reloads while OpenCode runs, and log entries only appear in the debug log. OpenCode 1 users should install the `v1` dist-tag.
+
+### Features
+
+* **homeassistant:** port to the OpenCode 2 plugin API ([c1ab19b](https://github.com/pedropombeiro/opencode-plugins/commit/c1ab19b0d541689eec2c383da0954c92306371c4))
+
 ## [0.7.8](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-0.7.7...opencode-homeassistant-0.7.8) (2026-08-20)
 
 
