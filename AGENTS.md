@@ -69,7 +69,8 @@ Releases are fully automated via [release-please](https://github.com/googleapis/
 ### OpenCode 1 maintenance
 
 The `v1` branch holds the last OpenCode 1 versions (0.x) of every plugin. Releases from `v1` publish
-under the npm dist-tag `v1`; releases from `main` publish under `latest`.
+under the npm dist-tag `opencode-v1`; releases from `main` publish under `latest`. npm rejects
+dist-tags that are valid semver ranges, such as `v1`.
 
 To ship an OpenCode 1 hotfix, open a PR against `v1` with a `fix:` commit, then merge the
 release-please PR that targets `v1`. Do not merge V2 code into `v1`.

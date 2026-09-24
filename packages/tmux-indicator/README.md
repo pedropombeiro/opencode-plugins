@@ -4,8 +4,8 @@ An [OpenCode](https://opencode.ai) CLI plugin that sets a tmux window option
 (`@opencode-waiting`) when the agent is waiting for user input (permission prompt or question),
 and clears it when the agent resumes.
 
-Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
-(`npm install opencode-tmux-indicator@v1`).
+Requires OpenCode 2. For OpenCode 1, install the `opencode-v1` dist-tag
+(`npm install opencode-tmux-indicator@opencode-v1`).
 
 ## How it works
 

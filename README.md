@@ -4,7 +4,7 @@ A collection of [OpenCode](https://opencode.ai) plugins.
 
 The plugins target OpenCode 2. The last OpenCode 1 versions live on the
 [`v1` branch](https://github.com/pedropombeiro/opencode-plugins/tree/v1) and install from the npm
-`v1` dist-tag, for example `npm install opencode-homeassistant@v1`.
+`opencode-v1` dist-tag, for example `npm install opencode-homeassistant@opencode-v1`.
 
 ## Plugins
 

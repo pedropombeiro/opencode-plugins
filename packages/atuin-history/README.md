@@ -3,8 +3,8 @@
 An [OpenCode](https://opencode.ai) plugin that records shell commands run by the agent in
 [Atuin](https://atuin.sh) shell history, attributed to a dedicated `opencode` author.
 
-Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
-(`npm install opencode-atuin-history@v1`).
+Requires OpenCode 2. For OpenCode 1, install the `opencode-v1` dist-tag
+(`npm install opencode-atuin-history@opencode-v1`).
 
 ## How it works
 

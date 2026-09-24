@@ -3,8 +3,8 @@
 An [OpenCode](https://opencode.ai) plugin that automatically prefixes session titles with forge
 issue and PR/MR references extracted from the current git branch.
 
-Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
-(`npm install opencode-forge-session-title@v1`).
+Requires OpenCode 2. For OpenCode 1, install the `opencode-v1` dist-tag
+(`npm install opencode-forge-session-title@opencode-v1`).
 
 ## Supported forges
 

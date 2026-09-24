@@ -3,8 +3,8 @@
 An [OpenCode](https://opencode.ai) CLI plugin that shows agent progress in your terminal tab using
 [OSC 9;4](https://iterm2.com/documentation-escape-codes.html) progress reporting.
 
-Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
-(`npm install opencode-terminal-progress@v1`).
+Requires OpenCode 2. For OpenCode 1, install the `opencode-v1` dist-tag
+(`npm install opencode-terminal-progress@opencode-v1`).
 
 ## Supported terminals
 
