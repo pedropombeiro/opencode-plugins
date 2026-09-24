@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-1.0.1...opencode-terminal-progress-1.0.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* **terminal-progress:** only report sessions shown in this terminal ([76b6e38](https://github.com/pedropombeiro/opencode-plugins/commit/76b6e3847b59035524e730518686185eddbd29a3))
+
 ## [1.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-1.0.0...opencode-terminal-progress-1.0.1) (2026-09-24)
 
 
