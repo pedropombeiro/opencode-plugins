@@ -1,5 +1,5 @@
 import type { Plugin } from '@opencode/plugin';
-import { exec } from '../../_shared/src/v2.ts';
+import { exec } from '../../_shared/src/index.ts';
 import { detectForge, prefixTitle, type Forge } from './title.ts';
 
 const SKIP_BRANCHES = new Set(['master', 'main', 'HEAD', 'develop']);

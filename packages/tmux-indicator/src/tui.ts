@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Plugin } from '@opencode/plugin/tui';
-import { createAgentStateTracker, exec, type OpenCodeEvent } from '../../_shared/src/v2.ts';
+import { createAgentStateTracker, exec, type OpenCodeEvent } from '../../_shared/src/index.ts';
 import { createNavigation } from './navigation.ts';
 
 async function tmux(...args: string[]): Promise<string> {

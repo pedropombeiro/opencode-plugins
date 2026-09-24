@@ -2,7 +2,7 @@ import { afterEach, describe, expect, jest, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { OpenCodeEvent } from '../../_shared/src/v2.ts';
+import type { OpenCodeEvent } from '../../_shared/src/index.ts';
 import { createDebugLog, createHomeAssistant, type Config } from './index.ts';
 
 const originalFetch = globalThis.fetch;

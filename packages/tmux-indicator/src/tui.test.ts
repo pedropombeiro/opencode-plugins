@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plugin } from '@opencode/plugin/tui';
-import { exec, type OpenCodeEvent } from '../../_shared/src/v2.ts';
+import { exec, type OpenCodeEvent } from '../../_shared/src/index.ts';
 import plugin from './tui.ts';
 
 type Listener = (input: { details: OpenCodeEvent }) => void;

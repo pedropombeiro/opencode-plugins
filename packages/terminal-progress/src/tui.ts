@@ -1,6 +1,6 @@
 import { closeSync, openSync, writeSync } from 'node:fs';
 import type { Plugin } from '@opencode/plugin/tui';
-import { createAgentStateTracker } from '../../_shared/src/v2.ts';
+import { createAgentStateTracker } from '../../_shared/src/index.ts';
 
 type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal' | 'ghostty';
 

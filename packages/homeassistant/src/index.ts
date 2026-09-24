@@ -8,7 +8,7 @@ import {
   type FormInfo,
   type OpenCodeEvent,
   type WaitingDetail,
-} from '../../_shared/src/v2.ts';
+} from '../../_shared/src/index.ts';
 import pkg from '../package.json' with { type: 'json' };
 import { HomeAssistantRpc } from './rpc.ts';
 
