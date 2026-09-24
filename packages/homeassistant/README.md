@@ -2,6 +2,9 @@
 
 An [OpenCode](https://opencode.ai) plugin that sends agent status to [Home Assistant](https://www.home-assistant.io) via webhooks -- and optionally lets you respond to permission requests from HA.
 
+Requires OpenCode 2. For OpenCode 1, install the `v1` dist-tag
+(`npm install opencode-homeassistant@v1`).
+
 ## Features
 
 - Notifies Home Assistant when the OpenCode agent becomes busy, idle, waiting, or encounters an error
@@ -13,20 +16,17 @@ An [OpenCode](https://opencode.ai) plugin that sends agent status to [Home Assis
 - Multiple webhook targets -- send the same state to several Home Assistant instances
 - Includes question choices in `waiting` payloads -- HA can render actionable notifications with the available options
 - Remote permission response -- approve or deny agent permissions from HA (via entity polling)
-- Hot-reloads configuration when OpenCode's config changes (no restart needed)
 - JSON payload, compatible with Home Assistant's webhook trigger out of the box
 
 ## States
 
-Requires OpenCode 1.15.11 or later so terminal webhooks can be flushed during plugin shutdown.
-
-| State     | OpenCode Event / Hook        | Condition                | Description                             |
-| --------- | ---------------------------- | ------------------------ | --------------------------------------- |
-| `busy`    | `event` → `session.status`   | `status.type === 'busy'` | Agent starts processing                 |
-| `idle`    | `event` → `session.status`   | `status.type === 'idle'` | Agent finishes and is waiting for input |
-| `waiting` | `event` → `permission.asked` |                          | Agent requests user permission          |
-| `waiting` | `tool.execute.before`        | `tool === 'question'`    | Agent asks the user a question          |
-| `error`   | `event` → `session.error`    |                          | Session encounters an error             |
+| State     | OpenCode event                                                  | Description                             |
+| --------- | --------------------------------------------------------------- | --------------------------------------- |
+| `busy`    | `session.execution.started`, repeated on `session.step.started` | Agent starts or continues processing    |
+| `idle`    | `session.execution.succeeded`, `session.execution.interrupted`  | Agent finishes and is waiting for input |
+| `waiting` | `permission.asked`                                              | Agent requests user permission          |
+| `waiting` | `form.created`                                                  | Agent asks the user a question          |
+| `error`   | `session.execution.failed`                                      | Session encounters an error             |
 
 ## Payload
 
@@ -57,7 +57,7 @@ The plugin sends a `POST` request with `Content-Type: application/json`:
 | ----------- | -------------------------------------------------------------------------------- |
 | `reason`    | Either `permission` (agent needs approval) or `question` (agent asks a question) |
 | `id`        | Permission ID or question request ID, used for remote replies                    |
-| `type`      | Permission type, e.g. `bash`, `edit`, `webfetch` (only for `permission`)         |
+| `type`      | Permission action, e.g. `shell`, `edit`, `webfetch` (only for `permission`)      |
 | `title`     | Human-readable description of the request                                        |
 | `pattern`   | The command or path pattern being requested (only for `permission`)              |
 | `questions` | Array of question details with options (only for `question`)                     |
@@ -76,8 +76,8 @@ In a Home Assistant automation, access these values via `trigger.json.*`, e.g. `
   "waiting": {
     "reason": "permission",
     "id": "per_cd77d4766001...",
-    "type": "bash",
-    "title": "bash: mkdir test-folder",
+    "type": "shell",
+    "title": "shell: mkdir test-folder",
     "pattern": ["mkdir test-folder"]
   }
 }
@@ -94,17 +94,16 @@ In a Home Assistant automation, access these values via `trigger.json.*`, e.g. `
   "durationMs": 5000,
   "waiting": {
     "reason": "question",
-    "id": "que_014e8b5fe001...",
+    "id": "frm_014e8b5fe001...",
     "title": "Choose framework",
     "questions": [
       {
         "header": "Choose framework",
         "question": "Which framework would you like to use?",
         "options": [
-          { "label": "React", "description": "Component-based UI library" },
-          { "label": "Vue", "description": "Progressive framework" }
-        ],
-        "multiple": false
+          { "label": "React", "value": "React", "description": "Component-based UI library" },
+          { "label": "Vue", "value": "Vue", "description": "Progressive framework" }
+        ]
       }
     ]
   }
@@ -113,23 +112,31 @@ In a Home Assistant automation, access these values via `trigger.json.*`, e.g. `
 
 Each question in the `questions` array has:
 
-| Field      | Type       | Description                                 |
-| ---------- | ---------- | ------------------------------------------- |
-| `header`   | `string`   | Short label (max 30 chars)                  |
-| `question` | `string`   | Full question text                          |
-| `options`  | `array`    | Available choices (`label` + `description`) |
-| `multiple` | `boolean?` | Whether multiple selections are allowed     |
+| Field      | Type       | Description                                             |
+| ---------- | ---------- | ------------------------------------------------------- |
+| `header`   | `string`   | Short label                                             |
+| `question` | `string`   | Full question text                                      |
+| `options`  | `array`    | Available choices (`label`, `value`, and `description`) |
+| `multiple` | `boolean?` | Whether multiple selections are allowed                 |
 
 ## Installation
 
-Add the plugin to your `opencode.json`:
+```bash
+opencode plugin add opencode-homeassistant
+```
+
+This adds the plugin to your `opencode.json`:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-homeassistant"]
+  "plugins": ["opencode-homeassistant"]
 }
 ```
+
+The package has a server entrypoint, which sends webhooks and polls Home Assistant, and a CLI
+entrypoint, which OpenCode loads automatically. The CLI entrypoint only delivers question answers
+from Home Assistant, because OpenCode 2 lets only CLI plugins reply to questions.
 
 ## Configuration
 
@@ -143,20 +150,42 @@ Create `~/.config/opencode/opencode-homeassistant.json`:
 
 The config file path can be overridden with the `OPENCODE_HA_CONFIG_PATH` environment variable. See [webhook trigger documentation at Home Assistant](https://www.home-assistant.io/docs/automation/trigger/#webhook-trigger).
 
+You can also pass any of these settings as plugin options. Options take precedence over the config
+file:
+
+```json
+{
+  "plugins": [
+    {
+      "package": "opencode-homeassistant",
+      "options": { "webhookUrl": "https://ha.local/api/webhook/opencode_status" }
+    }
+  ]
+}
+```
+
 If no webhook URLs are configured or the config file is missing, the plugin is disabled silently.
+The plugin reads its configuration when it loads, so restart OpenCode after changing it.
 
-The configuration is hot-reloaded whenever OpenCode's config changes -- no restart needed.
+### Debug log
 
-At startup, the plugin writes an `INFO` log entry with its resolved version and remote reply
-settings:
+The plugin writes nothing by default. To troubleshoot remote replies, enable the debug log:
+
+```json
+{
+  "debug": true,
+  "debugLogPath": "~/.local/state/opencode/homeassistant.log"
+}
+```
+
+`debugLogPath` defaults to `~/.local/state/opencode/homeassistant.log`. At startup the plugin
+records its resolved version and remote reply settings:
 
 ```text
 started version=X.Y.Z, entity=input_text.opencode_permission_response, permissionTimeout=120s, remoteReplies=enabled
 ```
 
-When a remote reply doesn't respond, search the OpenCode log for `started version=` to confirm
-that the running process loaded the expected plugin version, entity, and timeout. This entry appears
-at the default log level, so you don't need `--log-level DEBUG`.
+Each poll then records when it starts, which response it matched, and why it gave up.
 
 ### Per-state webhook routing
 
@@ -232,7 +261,7 @@ To enable this, add the following to your config:
 > HA_LONG_LIVED_TOKEN = "eyJhbGciOi..."
 > ```
 >
-> To check what opencode actually sees, run it with `--log-level DEBUG` and answer a prompt. The plugin names the exact missing variable:
+> To check what opencode actually sees, enable the [debug log](#debug-log) and answer a prompt. The plugin names the exact missing variable:
 >
 > ```text
 > not polling because haToken references HA_LONG_LIVED_TOKEN,
@@ -244,8 +273,8 @@ To enable this, add the following to your config:
 1. Plugin sends the `waiting` webhook (with `waiting.id` set to the permission ID or question request ID)
 2. Plugin starts polling `permissionResponseEntity` every 2 seconds
 3. HA automation shows an actionable notification; when the user taps an action, the automation sets the entity state (see formats below)
-4. Plugin reads the response, clears the entity, and replies to OpenCode
-5. If the user answers locally in the TUI instead, the plugin receives a `permission.replied` / `question.replied` event and stops polling immediately
+4. Plugin reads the response, clears the entity, and replies to OpenCode. Question answers go through the plugin's CLI entrypoint, so they need a connected OpenCode terminal interface.
+5. If the user answers locally in the TUI instead, the plugin receives a `permission.replied`, `form.replied`, or `form.cancelled` event and stops polling immediately
 
 Each pending request gets its own webhook and its own poll. When an agent asks for several permissions at once, you receive one notification per request and can answer them in any order. The session resumes only after every request has been answered, so make sure your automation includes the request ID in the response rather than assuming a single outstanding request.
 
@@ -256,7 +285,7 @@ The entity value is disambiguated by splitting on `:`. A first segment of `quest
 | Kind       | Format                               | Example                 |
 | ---------- | ------------------------------------ | ----------------------- |
 | Permission | `<permissionId>:<response>`          | `per_abc123:allow`      |
-| Question   | `question:<requestId>:<optionIndex>` | `question:que_xyz789:0` |
+| Question   | `question:<requestId>:<optionIndex>` | `question:frm_xyz789:0` |
 
 Valid permission responses: `allow`, `always`, `deny`.
 
@@ -265,7 +294,7 @@ Valid permission responses: `allow`, `always`, `deny`.
 Notes and limits:
 
 - Only `questions[0]` is answered. Multi-question requests are not supported.
-- Exactly one label is sent, since iOS notification actions are single-tap; `multiple: true` is not supported.
+- Exactly one option is sent, since iOS notification actions are single-tap. For `multiple: true` questions, the answer contains only that option.
 - `custom: true` ("Type your own answer") is not representable, as HA builds buttons from `options` only.
 - HA should clear the entity shortly after setting it (5 seconds is a good default) to stop stale values latching. The 2-second poll interval sits comfortably inside that window -- do not raise it much beyond 2s without widening the reset delay.
 

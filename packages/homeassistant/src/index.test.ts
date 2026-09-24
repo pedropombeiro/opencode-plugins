@@ -1,17 +1,15 @@
 import { afterEach, describe, expect, jest, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { HomeAssistantPlugin } from './index.ts';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { OpenCodeEvent } from '../../_shared/src/v2.ts';
+import { createDebugLog, createHomeAssistant, type Config } from './index.ts';
 
 const originalFetch = globalThis.fetch;
-const originalConfigPath = process.env['OPENCODE_HA_CONFIG_PATH'];
 
 afterEach(() => {
   jest.useRealTimers();
   globalThis.fetch = originalFetch;
-  if (originalConfigPath === undefined) delete process.env['OPENCODE_HA_CONFIG_PATH'];
-  else process.env['OPENCODE_HA_CONFIG_PATH'] = originalConfigPath;
 });
 
 interface WebhookBody {
@@ -20,31 +18,74 @@ interface WebhookBody {
   waiting?: { id?: string };
 }
 
-async function createPlugin() {
-  const directory = mkdtempSync(join(tmpdir(), 'opencode-homeassistant-'));
-  const configPath = join(directory, 'config.json');
-  writeFileSync(configPath, JSON.stringify({ webhookUrl: 'https://ha.test/webhook' }));
-  process.env['OPENCODE_HA_CONFIG_PATH'] = configPath;
+function event(type: string, data: Record<string, unknown>): OpenCodeEvent {
+  return { type, data } as unknown as OpenCodeEvent;
+}
 
+const started = (sessionID: string) => event('session.execution.started', { sessionID });
+
+function permissionAsked(sessionID: string, id: string, resources = ['command']) {
+  return event('permission.asked', { id, sessionID, action: 'shell', resources });
+}
+
+function formCreated(sessionID: string, id: string, type = 'string') {
+  return event('form.created', {
+    form: {
+      id,
+      sessionID,
+      title: 'Questions',
+      fields: [
+        {
+          key: 'q0',
+          type,
+          title: 'Tea or coffee?',
+          options: [
+            { value: 'Tea', label: 'Tea' },
+            { value: 'Coffee', label: 'Coffee' },
+          ],
+        },
+      ],
+    },
+  });
+}
+
+function createPlugin(config: Config = {}) {
   const webhooks: WebhookBody[] = [];
   const logs: Array<{ level: string; message: string }> = [];
-  globalThis.fetch = (async (_input, init) => {
+  const permissionReplies: unknown[][] = [];
+  const formReplies: unknown[][] = [];
+  const entity = { state: '' };
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.startsWith('https://ha.test/api/states/')) {
+      if (init?.method === 'POST') {
+        entity.state = (JSON.parse(String(init.body)) as { state: string }).state;
+        return new Response('{}');
+      }
+      return new Response(JSON.stringify({ state: entity.state, attributes: {} }));
+    }
     webhooks.push(JSON.parse(String(init?.body)) as WebhookBody);
     return new Response('ok');
   }) as typeof fetch;
 
-  const client = {
-    app: {
-      log: async ({ body }: { body: { level: string; message: string } }) => {
-        logs.push(body);
-        return {};
-      },
+  const plugin = createHomeAssistant({
+    directory: '/work/project',
+    config: { webhookUrl: 'https://ha.test/webhook', ...config },
+    log: (level, message) => {
+      logs.push({ level, message });
     },
-    postSessionIdPermissionsPermissionId: async () => ({}),
-  };
-  const plugin = await HomeAssistantPlugin({ client, directory, worktree: directory } as never);
-  return { directory, logs, plugin, webhooks };
+    replyPermission: async (...args) => {
+      permissionReplies.push(args);
+    },
+    replyForm: async (...args) => {
+      formReplies.push(args);
+    },
+  });
+  return { entity, formReplies, logs, permissionReplies, plugin, webhooks };
 }
+
+const remote = { haApiUrl: 'https://ha.test/api', haToken: 'token' };
 
 async function flushPromises(): Promise<void> {
   for (let i = 0; i < 5; i += 1) await Promise.resolve();
@@ -57,104 +98,129 @@ async function advanceMinutes(minutes: number): Promise<void> {
   }
 }
 
-describe('HomeAssistantPlugin', () => {
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100 && !condition(); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe('createHomeAssistant', () => {
+  test('sends busy and idle webhooks for an execution', async () => {
+    const { plugin, webhooks } = createPlugin();
+
+    await plugin.handle(started('ses_1'));
+    await plugin.handle(event('session.execution.succeeded', { sessionID: 'ses_1' }));
+
+    expect(webhooks.map((body) => body.state)).toEqual(['busy', 'idle']);
+    await plugin.dispose();
+  });
+
   test('sends a waiting webhook for a permission request after idle', async () => {
-    const { directory, logs, plugin, webhooks } = await createPlugin();
+    const { logs, plugin, webhooks } = createPlugin();
     const sessionID = 'ses_1';
 
-    await plugin.event?.({
-      event: { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } },
-    });
-    await plugin.event?.({
-      event: {
-        type: 'permission.asked',
-        properties: { id: 'per_1', sessionID, permission: 'bash', patterns: ['first'] },
-      },
-    } as never);
-    await plugin.event?.({
-      event: { type: 'session.status', properties: { sessionID, status: { type: 'idle' } } },
-    });
-    await plugin.event?.({
-      event: {
-        type: 'permission.asked',
-        properties: { id: 'per_2', sessionID, permission: 'bash', patterns: ['second'] },
-      },
-    } as never);
+    await plugin.handle(started(sessionID));
+    await plugin.handle(permissionAsked(sessionID, 'per_1', ['first']));
+    await plugin.handle(event('session.execution.succeeded', { sessionID }));
+    await plugin.handle(permissionAsked(sessionID, 'per_2', ['second']));
 
     expect(webhooks.filter((body) => body.waiting).map((body) => body.waiting?.id)).toEqual([
       'per_1',
       'per_2',
     ]);
-    expect(logs).toContainEqual(
-      expect.objectContaining({
-        level: 'debug',
-        message: 'per_2: reactivated idle session ses_1 from incoming permission request',
-      }),
-    );
+    expect(logs).toContainEqual({
+      level: 'debug',
+      message: 'per_2: reactivated idle session ses_1 from incoming permission request',
+    });
+    await plugin.dispose();
+  });
 
-    await plugin.dispose?.();
-    rmSync(directory, { recursive: true });
+  test('replies to a permission request answered in Home Assistant', async () => {
+    const { entity, permissionReplies, plugin } = createPlugin(remote);
+
+    await plugin.handle(started('ses_1'));
+    entity.state = 'per_1:allow';
+    await plugin.handle(permissionAsked('ses_1', 'per_1'));
+    await waitFor(() => permissionReplies.length > 0);
+
+    expect(permissionReplies).toEqual([['ses_1', 'per_1', 'once']]);
+    expect(entity.state).toBe('');
+    await plugin.dispose();
+  });
+
+  test('relays the chosen option value for a form answered in Home Assistant', async () => {
+    const { entity, formReplies, plugin } = createPlugin(remote);
+
+    await plugin.handle(started('ses_1'));
+    entity.state = 'question:frm_1:1';
+    await plugin.handle(formCreated('ses_1', 'frm_1'));
+    await waitFor(() => formReplies.length > 0);
+
+    expect(formReplies).toEqual([['ses_1', 'frm_1', { q0: 'Coffee' }]]);
+    await plugin.dispose();
+  });
+
+  test('answers a multiselect field with a list', async () => {
+    const { entity, formReplies, plugin } = createPlugin(remote);
+
+    entity.state = 'question:frm_2:0';
+    await plugin.handle(formCreated('ses_1', 'frm_2', 'multiselect'));
+    await waitFor(() => formReplies.length > 0);
+
+    expect(formReplies).toEqual([['ses_1', 'frm_2', { q0: ['Tea'] }]]);
+    await plugin.dispose();
   });
 
   test('does not sweep a session waiting on a permission prompt', async () => {
     jest.useFakeTimers();
-    const { directory, plugin, webhooks } = await createPlugin();
-    const sessionID = 'ses_waiting';
+    const { plugin, webhooks } = createPlugin();
 
-    await plugin.event?.({
-      event: { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } },
-    });
-    await plugin.event?.({
-      event: {
-        type: 'permission.asked',
-        properties: { id: 'per_waiting', sessionID, permission: 'bash', patterns: ['command'] },
-      },
-    } as never);
+    await plugin.handle(started('ses_waiting'));
+    await plugin.handle(permissionAsked('ses_waiting', 'per_waiting'));
 
     await advanceMinutes(11);
 
     expect(webhooks.filter((body) => body.state === 'idle')).toEqual([]);
-
-    await plugin.dispose?.();
-    rmSync(directory, { recursive: true });
+    await plugin.dispose();
   });
 
   test('sweeps a session with no recent activity', async () => {
     jest.useFakeTimers();
-    const { directory, plugin, webhooks } = await createPlugin();
-    const sessionID = 'ses_stale';
+    const { plugin, webhooks } = createPlugin();
 
-    await plugin.event?.({
-      event: { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } },
-    });
+    await plugin.handle(started('ses_stale'));
 
     await advanceMinutes(10);
 
     expect(webhooks).toContainEqual(
-      expect.objectContaining({ state: 'idle', sessionId: sessionID }),
+      expect.objectContaining({ state: 'idle', sessionId: 'ses_stale' }),
     );
-
-    await plugin.dispose?.();
-    rmSync(directory, { recursive: true });
+    await plugin.dispose();
   });
 
-  test('measures staleness from the last busy activity', async () => {
+  test('measures staleness from the last step', async () => {
     jest.useFakeTimers();
-    const { directory, plugin, webhooks } = await createPlugin();
-    const sessionID = 'ses_active';
+    const { plugin, webhooks } = createPlugin();
 
-    await plugin.event?.({
-      event: { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } },
-    });
+    await plugin.handle(started('ses_active'));
     await advanceMinutes(5);
-    await plugin.event?.({
-      event: { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } },
-    });
+    await plugin.handle(event('session.step.started', { sessionID: 'ses_active' }));
     await advanceMinutes(6);
 
     expect(webhooks.filter((body) => body.state === 'idle')).toEqual([]);
+    await plugin.dispose();
+  });
+});
 
-    await plugin.dispose?.();
+describe('createDebugLog', () => {
+  test('writes nothing unless debug is enabled', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'opencode-homeassistant-'));
+    const path = join(directory, 'nested', 'debug.log');
+
+    await createDebugLog({ debugLogPath: path })('info', 'ignored');
+    await createDebugLog({ debug: true, debugLogPath: path })('info', 'recorded');
+
+    expect(readFileSync(path, 'utf8')).toMatch(/^\S+ info recorded\n$/);
     rmSync(directory, { recursive: true });
   });
 });

@@ -11,6 +11,9 @@
   "exports": {
     ".": {
       "default": "./dist/index.js"
+    },
+    "./tui": {
+      "default": "./dist/tui.js"
     }
   },
   "repository": {
@@ -33,6 +36,6 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.15.11"
+    "@opencode/plugin": "^2.0.0"
   }
 }

@@ -1,21 +1,43 @@
-import { existsSync, readFileSync } from 'fs';
-import { basename } from 'path';
-import { homedir, hostname } from 'os';
-import { join } from 'path';
-import type { Plugin } from '@opencode-ai/plugin';
-import { createAgentStateTracker, type WaitingDetail } from '../../_shared/src/index.ts';
+import { existsSync, readFileSync } from 'node:fs';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { homedir, hostname } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import type { Plugin } from '@opencode/plugin';
+import {
+  createAgentStateTracker,
+  type FormInfo,
+  type OpenCodeEvent,
+  type WaitingDetail,
+} from '../../_shared/src/v2.ts';
 import pkg from '../package.json' with { type: 'json' };
+import { HomeAssistantRpc } from './rpc.ts';
 
 type AgentState = 'busy' | 'idle' | 'waiting' | 'error';
 type WebhookUrlEntry = string | string[];
+type LogLevel = 'debug' | 'info' | 'error';
+type FormAnswer = Record<string, string | string[]>;
 
-interface Config {
+export interface Config {
   webhookUrl?: string;
   webhookUrls?: Partial<Record<AgentState | 'default', WebhookUrlEntry>>;
   haApiUrl?: string;
   haToken?: string;
   permissionResponseEntity?: string;
   permissionTimeout?: number;
+  debug?: boolean;
+  debugLogPath?: string;
+}
+
+export interface HomeAssistantDeps {
+  directory: string;
+  config: Config;
+  log: (level: LogLevel, message: string) => Promise<void> | void;
+  replyPermission: (
+    sessionID: string,
+    requestID: string,
+    decision: 'once' | 'reject',
+  ) => Promise<void>;
+  replyForm: (sessionID: string, formID: string, answer: FormAnswer) => Promise<void>;
 }
 
 interface WebhookPayload {
@@ -49,21 +71,16 @@ type PollResult =
 
 type PollOutcome = PollResult | { kind: 'no-config' } | { kind: 'canceled' } | { kind: 'timeout' };
 
-interface RawPostClient {
-  _client?: {
-    post?: (options: { url: string; path?: Record<string, unknown>; body?: unknown }) => unknown;
-  };
-}
-
 const DEFAULT_PERMISSION_TIMEOUT = 120;
 const DEFAULT_RESPONSE_ENTITY = 'input_text.opencode_permission_response';
+const DEFAULT_DEBUG_LOG_PATH = join(homedir(), '.local', 'state', 'opencode', 'homeassistant.log');
 const POLL_INTERVAL_MS = 2000;
 const STALE_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const STALE_SESSION_SWEEP_INTERVAL_MS = 60 * 1000;
 const WEBHOOK_TIMEOUT_MS = 5000;
 const WEBHOOK_DRAIN_TIMEOUT_MS = 6000;
 
-function loadConfig(): Config {
+export function loadConfig(): Config {
   const configPath =
     process.env['OPENCODE_HA_CONFIG_PATH'] ??
     join(homedir(), '.config', 'opencode', 'opencode-homeassistant.json');
@@ -194,14 +211,15 @@ async function setHaEntity(
   }
 }
 
-export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
-  let config = loadConfig();
-  const project = basename(directory);
+export function createHomeAssistant(deps: HomeAssistantDeps) {
+  const { config } = deps;
+  const project = basename(deps.directory);
   const host = hostname();
   const sessions = new Map<string, SessionTimes>();
   const repliedPermissions = new Set<string>();
   const activePermissionPolls = new Set<string>();
   const inflightWebhooks = new Map<string, Promise<void>>();
+  const forms = new Map<string, FormInfo>();
 
   function elapsedSince(sessionId?: string): number | undefined {
     if (!sessionId) return undefined;
@@ -407,10 +425,12 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     return String(error);
   }
 
-  async function log(level: 'debug' | 'info' | 'error', message: string): Promise<void> {
-    await client.app
-      .log({ body: { service: 'opencode-homeassistant', level, message } })
-      .catch(() => {});
+  async function log(level: LogLevel, message: string): Promise<void> {
+    try {
+      await deps.log(level, message);
+    } catch {
+      return;
+    }
   }
 
   async function report(message: string, error: unknown): Promise<void> {
@@ -426,64 +446,56 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
     await log('info', message);
   }
 
-  async function answerQuestion(requestID: string, waiting: WaitingDetail): Promise<void> {
-    if (activePermissionPolls.has(requestID)) {
-      await trace(`${requestID}: already polling, not starting a second poll`);
+  async function answerQuestion(sessionID: string, formID: string): Promise<void> {
+    if (activePermissionPolls.has(formID)) {
+      await trace(`${formID}: already polling, not starting a second poll`);
       return;
     }
 
-    const optionCount = waiting.questions?.[0]?.options?.length ?? 0;
-    await trace(`${requestID}: answerQuestion started, ${optionCount} options offered`);
+    const field = forms
+      .get(formID)
+      ?.fields.find((candidate) => !('hidden' in candidate && candidate.hidden));
+    const options = field && 'options' in field ? (field.options ?? []) : [];
+    await trace(`${formID}: answerQuestion started, ${options.length} options offered`);
 
-    const result = await pollForResponse(requestID);
+    const result = await pollForResponse(formID);
     if (result.kind !== 'question') {
       if (result.kind === 'permission') {
-        await report(
-          `${requestID}: expected a question response but got a permission one`,
-          undefined,
-        );
+        await report(`${formID}: expected a question response but got a permission one`, undefined);
       }
       return;
     }
 
-    const label = waiting.questions?.[0]?.options?.[result.optionIndex]?.label;
-    if (label === undefined) {
+    const option = options[result.optionIndex];
+    if (!field || !option) {
       await report(
-        `${requestID}: option index ${result.optionIndex} is out of range (${optionCount} options offered)`,
+        `${formID}: option index ${result.optionIndex} is out of range (${options.length} options offered)`,
         undefined,
       );
       return;
     }
-    await trace(`${requestID}: option index ${result.optionIndex} resolved to a label`);
+    await trace(`${formID}: option index ${result.optionIndex} resolved to a value`);
 
-    const rawClient = (client as unknown as RawPostClient)._client;
-    if (!rawClient?.post) {
-      await report(`${requestID}: SDK client exposes no raw post method`, undefined);
-      return;
-    }
-
-    await trace(`${requestID}: sending reply`);
+    const answer = { [field.key]: field.type === 'multiselect' ? [option.value] : option.value };
     try {
-      const response = (await rawClient.post({
-        url: '/question/{requestID}/reply',
-        path: { requestID },
-        body: { answers: [[label]] },
-      })) as { error?: unknown; response?: { status?: number } } | undefined;
-
-      if (response?.error !== undefined) {
-        await report(`${requestID}: reply rejected`, response.error);
-        return;
-      }
-
-      const status = response?.response?.status;
-      if (typeof status === 'number' && (status < 200 || status >= 300)) {
-        await report(`${requestID}: reply returned HTTP ${status}`, undefined);
-        return;
-      }
-
-      await trace(`${requestID}: reply accepted (HTTP ${status ?? 'unknown'})`);
+      await deps.replyForm(sessionID, formID, answer);
+      await trace(`${formID}: reply relayed to the CLI`);
     } catch (error) {
-      await report(`${requestID}: reply threw`, error);
+      await report(`${formID}: reply could not be relayed`, error);
+    }
+  }
+
+  async function answerPermission(sessionID: string, requestID: string): Promise<void> {
+    const result = await pollForResponse(requestID);
+    if (result.kind !== 'permission') return;
+    try {
+      await deps.replyPermission(
+        sessionID,
+        requestID,
+        result.response === 'allow' ? 'once' : 'reject',
+      );
+    } catch (error) {
+      await report(`${requestID}: permission reply rejected`, error);
     }
   }
 
@@ -498,13 +510,12 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   const tracker = createAgentStateTracker({
     emitRepeatedBusy: true,
     onWaiting: async (sessionID, waiting) => {
+      const id = waiting.id ?? '(unresolved)';
       if (recordActivity(sessionID)) {
         await trace(
-          `${waiting.id ?? '(unresolved)'}: reactivated idle session ${sessionID} from incoming ${waiting.reason} request`,
+          `${id}: reactivated idle session ${sessionID} from incoming ${waiting.reason} request`,
         );
       }
-
-      if (waiting.reason === 'question' && !waiting.id) return;
 
       await send('waiting', sessionID, {
         durationMs: elapsedSince(sessionID),
@@ -512,30 +523,11 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       });
 
       if (!waiting.id) return;
-
-      if (waiting.reason === 'question') {
-        await answerQuestion(waiting.id, waiting);
-        return;
-      }
-
-      const result = await pollForResponse(waiting.id);
-      if (result.kind !== 'permission') return;
-      const apiResponse = result.response === 'allow' ? 'once' : 'reject';
-      await client
-        .postSessionIdPermissionsPermissionId({
-          path: { id: sessionID, permissionID: waiting.id },
-          body: { response: apiResponse },
-        })
-        .catch(() => {});
-    },
-    onWaitingIdResolved: async (sessionID, requestID, waiting) => {
-      if (!sessions.has(sessionID)) return;
-      recordActivity(sessionID);
-      await send('waiting', sessionID, {
-        durationMs: elapsedSince(sessionID),
-        waiting,
-      });
-      await answerQuestion(requestID, waiting);
+      const answer =
+        waiting.reason === 'question'
+          ? answerQuestion(sessionID, waiting.id)
+          : answerPermission(sessionID, waiting.id);
+      void answer.catch((error: unknown) => report(`${id}: remote reply failed`, error));
     },
     onBusy: async (sessionID) => {
       if (!sessions.has(sessionID)) return;
@@ -554,10 +546,7 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
       sessions.delete(sessionID);
       await send('error', sessionID, { durationMs });
     },
-    onPermissionReplied: (_sessionID, permissionID) => {
-      if (activePermissionPolls.has(permissionID)) repliedPermissions.add(permissionID);
-    },
-    onQuestionResolved: (_sessionID, requestID) => {
+    onResolved: (_sessionID, requestID) => {
       if (activePermissionPolls.has(requestID)) repliedPermissions.add(requestID);
     },
   });
@@ -568,33 +557,72 @@ export const HomeAssistantPlugin: Plugin = async ({ client, directory }) => {
   );
   staleSessionSweep.unref();
 
-  await announce(describeStartup());
+  void announce(describeStartup());
 
-  return {
-    dispose: async () => {
-      clearInterval(staleSessionSweep);
-      for (const [sessionId, session] of sessions.entries()) {
-        sessions.delete(sessionId);
-        send('idle', sessionId, { durationMs: Date.now() - session.start });
-      }
-      await Promise.race([
-        Promise.all([...inflightWebhooks.values()]),
-        sleep(WEBHOOK_DRAIN_TIMEOUT_MS),
-      ]);
-    },
-    config: async () => {
-      config = loadConfig();
-    },
-    event: async ({ event }) => {
-      if (event.type === 'session.status') {
-        const { sessionID, status } = event.properties;
-        if (status.type === 'busy') {
-          recordActivity(sessionID);
-        }
-      }
-      await tracker.event({ event });
-    },
-    'tool.execute.before': tracker.toolExecuteBefore,
-    'tool.execute.after': tracker.toolExecuteAfter,
+  async function handle(event: OpenCodeEvent): Promise<void> {
+    if (event.type === 'session.execution.started') recordActivity(event.data.sessionID);
+    if (event.type === 'form.created') forms.set(event.data.form.id, event.data.form);
+    await tracker.handle(event);
+    if (event.type === 'form.replied' || event.type === 'form.cancelled') {
+      forms.delete(event.data.id);
+    }
+  }
+
+  async function dispose(): Promise<void> {
+    clearInterval(staleSessionSweep);
+    for (const [sessionId, session] of sessions.entries()) {
+      sessions.delete(sessionId);
+      void send('idle', sessionId, { durationMs: Date.now() - session.start });
+    }
+    await Promise.race([
+      Promise.all([...inflightWebhooks.values()]),
+      sleep(WEBHOOK_DRAIN_TIMEOUT_MS),
+    ]);
+  }
+
+  return { handle, dispose };
+}
+
+function expandHome(path: string): string {
+  return path === '~' || path.startsWith('~/') ? join(homedir(), path.slice(1)) : path;
+}
+
+export function createDebugLog(config: Config): HomeAssistantDeps['log'] {
+  if (!config.debug) return () => {};
+  const path = expandHome(config.debugLogPath ?? DEFAULT_DEBUG_LOG_PATH);
+  let ready: Promise<unknown> | undefined;
+  return async (level, message) => {
+    ready ??= mkdir(dirname(path), { recursive: true }).catch(() => {});
+    await ready;
+    await appendFile(path, `${new Date().toISOString()} ${level} ${message}\n`).catch(() => {});
   };
-};
+}
+
+export default {
+  id: 'opencode-homeassistant',
+  async setup(ctx) {
+    const config: Config = { ...loadConfig(), ...(ctx.options as Config) };
+    const rpc = await ctx.rpc.register(HomeAssistantRpc, {});
+    const homeAssistant = createHomeAssistant({
+      directory: ctx.location.directory,
+      config,
+      log: createDebugLog(config),
+      replyPermission: (sessionID, requestID, decision) =>
+        ctx.permission.reply({ sessionID, requestID, decision }),
+      replyForm: (sessionID, formID, answer) =>
+        rpc.events.emit('answer', { sessionID, formID, answer }),
+    });
+
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        await homeAssistant.handle(event);
+      }
+    })().catch(() => {});
+
+    return async () => {
+      controller.abort();
+      await homeAssistant.dispose();
+    };
+  },
+} satisfies Plugin.Plugin;
