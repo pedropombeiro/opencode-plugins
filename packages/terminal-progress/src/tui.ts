@@ -1,6 +1,6 @@
 import { closeSync, openSync, writeSync } from 'node:fs';
 import type { Plugin } from '@opencode/plugin/tui';
-import { createAgentStateTracker } from '../../_shared/src/index.ts';
+import { createAgentStateTracker, createViewFilter } from '../../_shared/src/index.ts';
 
 type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal' | 'ghostty';
 
@@ -76,8 +76,9 @@ export default {
       onError: () => progress('2'),
     });
 
+    const shows = createViewFilter(context, tracker.tracks);
     const stop = context.data.listen(({ details }) => {
-      void tracker.handle(details);
+      if (shows(details)) void tracker.handle(details);
     });
 
     return () => {

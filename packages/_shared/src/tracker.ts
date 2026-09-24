@@ -104,5 +104,9 @@ export function createAgentStateTracker(options: AgentStateOptions) {
     }
   }
 
-  return { handle, hasWait };
+  function tracks(sessionID: string): boolean {
+    return isActive(sessionID) || hasWait(sessionID);
+  }
+
+  return { handle, hasWait, tracks };
 }
