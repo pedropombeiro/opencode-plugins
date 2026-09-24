@@ -69,5 +69,5 @@ jobs:
 
       - if: matrix.enabled == 'true'
         name: Publish
-        run: npm publish --access public --tag ${{ github.ref_name == 'main' && 'latest' || github.ref_name }}
+        run: npm publish --access public --tag ${{ github.ref_name == 'main' && 'latest' || 'opencode-v1' }}
         working-directory: packages/${{ matrix.package }}
