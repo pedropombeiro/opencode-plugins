@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-1.0.1...opencode-homeassistant-1.0.2) (2026-09-24)
+
+
+### Bug Fixes
+
+* **homeassistant:** only handle sessions in the plugin's location ([7b5c02b](https://github.com/pedropombeiro/opencode-plugins/commit/7b5c02b77c71f40f281cfe07f8a9ff56c3dfe6c1))
+
 ## [1.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-1.0.0...opencode-homeassistant-1.0.1) (2026-09-24)
 
 
