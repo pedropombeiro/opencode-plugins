@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.5.1...opencode-terminal-progress-1.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **terminal-progress:** Requires OpenCode 2 and loads through `cli.json`. OpenCode 1 users should install the `v1` dist-tag.
+
+### Features
+
+* **terminal-progress:** port to the OpenCode 2 CLI plugin API ([ddd6de1](https://github.com/pedropombeiro/opencode-plugins/commit/ddd6de190793d437abbc45708a7483974ce1de61))
+
 ## [0.5.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-0.5.0...opencode-terminal-progress-0.5.1) (2026-08-07)
 
 ### Bug Fixes
