@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.5.0...opencode-tmux-indicator-1.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **tmux-indicator:** Requires OpenCode 2 and loads through `cli.json`. OpenCode 1 users should install the `v1` dist-tag.
+
+### Features
+
+* **tmux-indicator:** port to the OpenCode 2 CLI plugin API ([05388c9](https://github.com/pedropombeiro/opencode-plugins/commit/05388c9a535fd12597ac881710269dedfd1e3d78))
+
 ## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-tmux-indicator-0.4.1...opencode-tmux-indicator-0.5.0) (2026-09-11)
 
 

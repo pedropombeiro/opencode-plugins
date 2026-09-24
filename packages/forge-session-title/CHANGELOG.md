@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-0.3.0...opencode-forge-session-title-1.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forge-session-title:** Requires OpenCode 2. OpenCode 1 users should install the `v1` dist-tag.
+
+### Features
+
+* **forge-session-title:** port to the OpenCode 2 plugin API ([74e29e2](https://github.com/pedropombeiro/opencode-plugins/commit/74e29e25bc4f3bf19bb6dc797617e462b48291b8))
+
 ## [0.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-0.2.1...opencode-forge-session-title-0.3.0) (2026-08-07)
 
 ### Features
