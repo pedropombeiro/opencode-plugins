@@ -3,5 +3,5 @@
   "packages/homeassistant": "1.0.0",
   "packages/forge-session-title": "1.0.0",
   "packages/atuin-history": "1.0.0",
-  "packages/tmux-indicator": "1.0.0"
+  "packages/tmux-indicator": "1.0.1"
 }
