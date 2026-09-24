@@ -5,6 +5,7 @@ import { basename, dirname, join } from 'node:path';
 import type { Plugin } from '@opencode/plugin';
 import {
   createAgentStateTracker,
+  createLocationFilter,
   type FormInfo,
   type OpenCodeEvent,
   type WaitingDetail,
@@ -613,10 +614,15 @@ export default {
         rpc.events.emit('answer', { sessionID, formID, answer }),
     });
 
+    const owns = createLocationFilter(
+      ctx.location.directory,
+      async (sessionID) => (await ctx.session.get({ sessionID })).location.directory,
+    );
+
     const controller = new AbortController();
     void (async () => {
       for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-        await homeAssistant.handle(event);
+        if (await owns(event)) await homeAssistant.handle(event);
       }
     })().catch(() => {});
 
