@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-1.0.1...opencode-forge-session-title-1.1.0) (2026-10-01)
+
+
+### Features
+
+* **forge-session-title:** follow the active session target ([8f5088f](https://github.com/pedropombeiro/opencode-plugins/commit/8f5088f0ce482d9041e67c6f8c445f1fb4bccfc6))
+
 ## [1.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-1.0.0...opencode-forge-session-title-1.0.1) (2026-09-24)
 
 
