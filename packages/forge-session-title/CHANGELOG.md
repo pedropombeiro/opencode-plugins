@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-1.1.0...opencode-forge-session-title-1.2.0) (2026-10-02)
+
+
+### Features
+
+* **forge-session-title:** include the issue for created and reviewed MRs ([2e98f0c](https://github.com/pedropombeiro/opencode-plugins/commit/2e98f0c2e26a74d179cb861097322dc35d54ae02))
+
 ## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-1.0.1...opencode-forge-session-title-1.1.0) (2026-10-01)
 
 
