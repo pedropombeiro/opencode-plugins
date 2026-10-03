@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-1.2.0...opencode-forge-session-title-1.3.0) (2026-10-03)
+
+
+### Features
+
+* **forge-session-title:** expose the session target over RPC ([fa33e4f](https://github.com/pedropombeiro/opencode-plugins/commit/fa33e4fc8f5697e0fa6b42ca9af7dc3abd13aec0))
+
 ## [1.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forge-session-title-1.1.0...opencode-forge-session-title-1.2.0) (2026-10-02)
 
 
