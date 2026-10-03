@@ -9,9 +9,15 @@ import {
   type Forge,
 } from './title.ts';
 import { parseTarget, targetPrefix, targetRequest, type Target } from './target.ts';
+import { ForgeSessionTitleRpc, type TargetOutput } from './rpc.ts';
 
 const SKIP_BRANCHES = new Set(['master', 'main', 'HEAD', 'develop']);
 type SessionState = { target?: Target; prefix?: string };
+
+function targetOutput(target: Target | undefined): TargetOutput {
+  if (!target) return {};
+  return { url: target.url, ...(target.issueUrl ? { issueUrl: target.issueUrl } : {}) };
+}
 
 async function getForge(directory: string): Promise<Forge | undefined> {
   const result = await exec('git', ['remote', 'get-url', 'origin'], { cwd: directory });
@@ -48,6 +54,13 @@ export default {
     async function stateFor(sessionID: string): Promise<SessionState> {
       return ((await ctx.storage.get(`sessions/${sessionID}`)) as SessionState | undefined) ?? {};
     }
+
+    const rpc = await ctx.rpc.register(ForgeSessionTitleRpc, {
+      target: async (input) => {
+        const { sessionID } = input as { sessionID: string };
+        return targetOutput((await stateFor(sessionID)).target);
+      },
+    });
 
     function forgeFor(directory: string): Promise<Forge | undefined> {
       let forge = forges.get(directory);
@@ -144,6 +157,7 @@ export default {
               ...(state.prefix ? { prefix: state.prefix } : {}),
               ...(target ? { target } : {}),
             });
+            await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(target) });
             await update(sessionID);
           });
           return {
@@ -180,6 +194,9 @@ export default {
       }
     })().catch(() => {});
 
-    return () => controller.abort();
+    return async () => {
+      controller.abort();
+      await rpc.dispose();
+    };
   },
 } satisfies Plugin.Plugin;

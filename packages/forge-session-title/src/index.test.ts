@@ -42,7 +42,28 @@ async function harness(storage = new Map<string, unknown>()) {
   let tool: Tool;
   let hook: Hook;
   let renames = 0;
+  let rpcHandlers: Record<string, (input: unknown) => Promise<unknown>> = {};
+  const emitted: Array<{ name: string; data: unknown }> = [];
+  let rpcDisposed = false;
   const ctx = {
+    rpc: {
+      register: async (
+        _definition: unknown,
+        handlers: Record<string, (input: unknown) => Promise<unknown>>,
+      ) => {
+        rpcHandlers = handlers;
+        return {
+          events: {
+            emit: async (name: string, data: unknown) => {
+              emitted.push({ name, data });
+            },
+          },
+          dispose: async () => {
+            rpcDisposed = true;
+          },
+        };
+      },
+    },
     location: { directory: process.cwd() },
     storage: {
       get: async (key: string) => storage.get(key),
@@ -77,6 +98,9 @@ async function harness(storage = new Map<string, unknown>()) {
     sessions,
     cleanup,
     renames: () => renames,
+    emitted,
+    rpcDisposed: () => rpcDisposed,
+    target: (sessionID = 'one') => rpcHandlers.target!({ sessionID }),
     set: (input: unknown, sessionID = 'one') => tool.execute(input, { sessionID }),
     context: async (sessionID = 'one') => {
       const event = { sessionID, system: [] as { type: string; text: string }[] };
@@ -189,6 +213,29 @@ describe('session target integration', () => {
     } finally {
       sourceBranches.clear();
     }
+  });
+
+  test('exposes the target over RPC and announces changes', async () => {
+    const storage = new Map<string, unknown>();
+    const app = await harness(storage);
+    expect(await app.target()).toEqual({});
+    const issue = 'https://gitlab.com/group/project/-/issues/42';
+    await app.set({ target: mr, issue_url: issue });
+    expect(await app.target()).toEqual({ url: mr, issueUrl: issue });
+    expect(await app.target('two')).toEqual({});
+    await app.set({ target: 'branch' });
+    expect(await app.target()).toEqual({});
+    expect(app.emitted).toEqual([
+      { name: 'targetChanged', data: { sessionID: 'one', url: mr, issueUrl: issue } },
+      { name: 'targetChanged', data: { sessionID: 'one' } },
+    ]);
+    await app.cleanup();
+    expect(app.rpcDisposed()).toBe(true);
+
+    const reloaded = await harness(storage);
+    await reloaded.set({ target: nextMr });
+    expect(await reloaded.target()).toEqual({ url: nextMr });
+    await reloaded.cleanup();
   });
 
   test('skips child sessions and sessions in another location', async () => {

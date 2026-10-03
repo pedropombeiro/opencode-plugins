@@ -52,6 +52,58 @@ Child sessions and untitled sessions are skipped. Branch-based naming skips the 
 default branch and branches named `main`, `master`, `develop`, or `HEAD`. Explicit targets also
 work on these branches. Resetting to branch mode there removes the managed prefix.
 
+## RPC
+
+Other plugins and clients can read a session's explicit target through the
+`opencode-forge-session-title` [RPC](https://opencode.ai/v2/docs/build/plugins/rpc), for
+example to show the status of the session's MR. Copy this definition into the caller:
+
+```ts
+const ForgeSessionTitleRpc = {
+  id: 'opencode-forge-session-title',
+  methods: {
+    target: {
+      input: {
+        type: 'object',
+        properties: { sessionID: { type: 'string' } },
+        required: ['sessionID'],
+      },
+      output: {
+        type: 'object',
+        properties: { url: { type: 'string' }, issueUrl: { type: 'string' } },
+      },
+    },
+  },
+  events: {
+    targetChanged: {
+      schema: {
+        type: 'object',
+        properties: {
+          sessionID: { type: 'string' },
+          url: { type: 'string' },
+          issueUrl: { type: 'string' },
+        },
+        required: ['sessionID'],
+      },
+    },
+  },
+} as const;
+```
+
+- `target` returns `{ url, issueUrl? }` for a session with an explicit target, and `{}` in
+  automatic branch mode.
+- `targetChanged` fires after `set_session_target` runs. It omits `url` when the session
+  returns to branch mode.
+
+```ts
+const forge = context.client.rpc(ForgeSessionTitleRpc);
+const { url } = await forge.target({ sessionID }, { location: session.location });
+const stop = forge.events.on('targetChanged', (event) => refresh(event.data.sessionID));
+```
+
+The call fails when the plugin isn't loaded on the server, so callers should fall back to
+another source, such as the session title prefix.
+
 ## Branch name patterns
 
 The plugin extracts issue numbers from these common branch naming conventions:
