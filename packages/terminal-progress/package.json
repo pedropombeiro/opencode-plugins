@@ -1,7 +1,7 @@
 {
   "name": "opencode-terminal-progress",
   "version": "1.0.2",
-  "description": "OpenCode CLI plugin that shows agent progress in terminal tabs (Ghostty, iTerm2, WezTerm, Windows Terminal)",
+  "description": "OpenCode CLI plugin that shows agent progress in terminal tabs (Ghostty, iTerm2, kitty, WezTerm, Windows Terminal)",
   "author": {
     "name": "Pedro Pombeiro",
     "email": "pedropombeiro@users.noreply.github.com"
@@ -29,6 +29,7 @@
     "terminal",
     "progress",
     "iterm2",
+    "kitty",
     "wezterm",
     "windows-terminal",
     "osc"

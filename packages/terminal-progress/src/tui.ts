@@ -1,11 +1,15 @@
 import { closeSync, openSync, writeSync } from 'node:fs';
 import type { Plugin } from '@opencode/plugin/tui';
 import { createAgentStateTracker, createViewFilter } from '../../_shared/src/index.ts';
+import { detectKitty, isKittyHost } from './kitty.ts';
 
-type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal' | 'ghostty';
+type Terminal = 'iterm2' | 'wezterm' | 'windows-terminal' | 'ghostty' | 'kitty';
 
-function detectTerminal(): Terminal | undefined {
+async function detectTerminal(): Promise<Terminal | undefined> {
   const env = process.env;
+  if (isKittyHost(env)) {
+    return (await detectKitty(env)) ? 'kitty' : undefined;
+  }
   if (env['TERM_PROGRAM'] === 'ghostty') {
     return 'ghostty';
   }
@@ -59,21 +63,45 @@ function createOsc(): Osc | undefined {
 
 export default {
   id: 'opencode-terminal-progress',
-  setup(context) {
+  async setup(context) {
     const progressEnv = process.env['OPENCODE_TERMINAL_PROGRESS'];
     if (progressEnv && /^(0|false|no)$/i.test(progressEnv)) return;
-    if (!detectTerminal()) return;
+    const terminal = await detectTerminal();
+    if (!terminal) return;
 
     const osc = createOsc();
     if (!osc) return;
 
     const progress = (code: string): void => osc.write(`9;4;${code}`);
+    const isKitty = terminal === 'kitty';
+
+    let stateTimer: ReturnType<typeof setInterval> | undefined;
+    const clearStateTimer = (): void => {
+      if (stateTimer) {
+        clearInterval(stateTimer);
+        stateTimer = undefined;
+      }
+    };
+
+    const setState = (code: string): void => {
+      clearStateTimer();
+      progress(code);
+      // kitty clears any progress ~60 s after the last OSC 9;4 report, so while a
+      // state is active we re-report it periodically to keep the indicator alive.
+      // Other terminals keep the progress state until told otherwise.
+      if (isKitty) {
+        stateTimer = setInterval(() => progress(code), 30_000);
+      }
+    };
 
     const tracker = createAgentStateTracker({
-      onWaiting: () => progress('4;50'),
-      onBusy: () => progress('3'),
-      onIdle: () => progress('0'),
-      onError: () => progress('2'),
+      onWaiting: () => setState('4;50'),
+      onBusy: () => setState('3'),
+      onIdle: () => {
+        clearStateTimer();
+        progress('0');
+      },
+      onError: () => setState('2'),
     });
 
     const shows = createViewFilter(context, tracker.tracks);
@@ -83,6 +111,7 @@ export default {
 
     return () => {
       stop();
+      clearStateTimer();
       progress('0');
       osc.close();
     };
