@@ -332,9 +332,11 @@ OpenCode scopes plugin storage by plugin ID, so nothing stored under the former 
 `opencode-forge-session-title`, carries over:
 
 - Sessions start in branch-based naming. Ask the agent to set their targets again.
-- A title that kept a single-reference prefix from before, such as `[!456] Review`, can get a
-  second prefix, such as `[#12, !45] [!456] Review`. Remove the older one by hand. Older prefixes
-  with two references, such as `[#12, !45]`, are replaced automatically.
+- A title that kept a single-reference prefix from before, such as `[!456] Review`, now looks
+  like a reference that you wrote. Until you set a target, the status follows that PR/MR, labeled
+  "from the session title". Setting a target adds a second prefix, such as
+  `[#12, !45] [!456] Review`. Remove the older prefix by hand. Older prefixes with two
+  references, such as `[#12, !45]`, are replaced automatically.
 - The first look at each PR/MR records a new review baseline, so comments posted before then
   aren't announced.
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
