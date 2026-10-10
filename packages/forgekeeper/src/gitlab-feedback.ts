@@ -1,6 +1,7 @@
 // Reads a GitLab MR's comments for GitLab's `feedback` capability.
 import type { FeedbackSnapshot, ReviewComment } from './forge';
 import type { GraphQL } from './gitlab';
+import { query, typed } from './graphql';
 
 interface NoteNode {
   id: string;
@@ -20,7 +21,17 @@ export const MAX_COMMENT_PAGES = 20;
 
 // ONLY_COMMENTS leaves out system notes such as "added 1 commit". Pages run
 // backwards from the newest comment, in creation order within each page.
-export const COMMENTS_QUERY = `query($project: ID!, $iid: String!, $before: String) {
+export const COMMENTS_QUERY = query<{
+  currentUser?: { id: string } | null;
+  project?: {
+    mergeRequest?: {
+      notes?: {
+        pageInfo: { hasPreviousPage: boolean; startCursor: string | null };
+        nodes: NoteNode[];
+      } | null;
+    } | null;
+  } | null;
+}>(`query($project: ID!, $iid: String!, $before: String) {
   currentUser { id }
   project(fullPath: $project) {
     mergeRequest(iid: $iid) {
@@ -34,7 +45,7 @@ export const COMMENTS_QUERY = `query($project: ID!, $iid: String!, $before: Stri
       }
     }
   }
-}`;
+}`);
 
 // GitLab's global ID prefix changes with the note's type, for example when a
 // reply turns a comment into a discussion, so only the number identifies it.
@@ -66,11 +77,12 @@ export function toComment(node: NoteNode): ReviewComment | undefined {
 // Reads the MR's newest comments, oldest first, or undefined when the MR
 // doesn't exist.
 export async function fetchComments(
-  graphql: GraphQL,
+  transport: GraphQL,
   host: string,
   project: string,
   iid: string,
 ): Promise<FeedbackSnapshot | undefined> {
+  const graphql = typed(transport);
   const pages: ReviewComment[][] = [];
   let viewerID: string | undefined;
   let before: string | undefined;
@@ -84,10 +96,10 @@ export async function fetchComments(
     const variables: Record<string, string> = { project, iid };
     if (before) variables.before = before;
     const data = await graphql(host, COMMENTS_QUERY, variables);
-    viewerID ??= data?.currentUser?.id ?? undefined;
-    const connection = data?.project?.mergeRequest?.notes;
+    viewerID ??= data.currentUser?.id ?? undefined;
+    const connection = data.project?.mergeRequest?.notes;
     if (!connection) return page === 0 ? undefined : snapshot(false);
-    pages.push((connection.nodes as NoteNode[]).flatMap((node) => toComment(node) ?? []));
+    pages.push(connection.nodes.flatMap((node) => toComment(node) ?? []));
     if (!connection.pageInfo.hasPreviousPage) return snapshot(true);
     before = connection.pageInfo.startCursor ?? undefined;
     if (!before) return snapshot(false);

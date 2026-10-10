@@ -14,6 +14,7 @@ import {
 } from './forge';
 import type { RemoteProject, Repository } from './git';
 import { fetchComments } from './gitlab-feedback';
+import { query, typed, type Query, type Transport, type Typed } from './graphql';
 
 interface DiscussionPage {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
@@ -44,6 +45,13 @@ interface MergeRequestNode {
   reviewers?: { nodes: ReviewerNode[] } | null;
 }
 
+// What `mergeRequestNumbersQuery` selects.
+interface MergeRequestNumber {
+  iid: string;
+  updatedAt: string | null;
+  sourceProject: { fullPath: string } | null;
+}
+
 interface ReviewerNode {
   type: string;
   username?: string;
@@ -65,7 +73,13 @@ const MERGE_REQUEST_FIELDS = `
   discussions(first: ${PAGE_SIZE}) { ${DISCUSSIONS} }
 `;
 
-export function mergeRequestsQuery(projectCount: number): string {
+// Queries that look up several projects give each an alias, `p0`, `p1`, and
+// so on. A project that doesn't exist, or that the viewer can't see, is null.
+type Projects<T> = { [alias: `p${number}`]: T | null | undefined };
+
+export function mergeRequestsQuery(
+  projectCount: number,
+): Query<Projects<{ mergeRequests?: { nodes: MergeRequestNode[] } | null }>> {
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
@@ -76,10 +90,12 @@ export function mergeRequestsQuery(projectCount: number): string {
         mergeRequests(sourceBranches: [$branch], state: opened, first: 20) { nodes { ${MERGE_REQUEST_FIELDS} } }
       }`,
   ).join('\n');
-  return `query($branch: String!, ${variables}) {\n${projects}\n}`;
+  return query(`query($branch: String!, ${variables}) {\n${projects}\n}`);
 }
 
-export function mergeRequestQuery(projectCount: number): string {
+export function mergeRequestQuery(
+  projectCount: number,
+): Query<Projects<{ mergeRequest?: MergeRequestNode | null }>> {
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
@@ -88,11 +104,13 @@ export function mergeRequestQuery(projectCount: number): string {
     (_, index) =>
       `p${index}: project(fullPath: $p${index}) { mergeRequest(iid: $iid) { ${MERGE_REQUEST_FIELDS} } }`,
   ).join('\n');
-  return `query($iid: String!, ${variables}) {\n${projects}\n}`;
+  return query(`query($iid: String!, ${variables}) {\n${projects}\n}`);
 }
 
 // Only the fields that pick the newest MR from the source project.
-export function mergeRequestNumbersQuery(projectCount: number): string {
+export function mergeRequestNumbersQuery(
+  projectCount: number,
+): Query<Projects<{ mergeRequests?: { nodes: MergeRequestNumber[] } | null }>> {
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
@@ -103,18 +121,22 @@ export function mergeRequestNumbersQuery(projectCount: number): string {
         mergeRequests(sourceBranches: [$branch], state: opened, first: 20) { nodes { iid updatedAt sourceProject { fullPath } } }
       }`,
   ).join('\n');
-  return `query($branch: String!, ${variables}) {\n${projects}\n}`;
+  return query(`query($branch: String!, ${variables}) {\n${projects}\n}`);
 }
 
-export const SOURCE_BRANCH_QUERY = `query($project: ID!, $iid: String!) {
+export const SOURCE_BRANCH_QUERY = query<{
+  project?: { mergeRequest?: { sourceBranch?: string | null } | null } | null;
+}>(`query($project: ID!, $iid: String!) {
   project(fullPath: $project) { mergeRequest(iid: $iid) { sourceBranch } }
-}`;
+}`);
 
-export const DISCUSSIONS_QUERY = `query($project: ID!, $iid: String!, $after: String) {
+export const DISCUSSIONS_QUERY = query<{
+  project?: { mergeRequest?: { discussions?: DiscussionPage | null } | null } | null;
+}>(`query($project: ID!, $iid: String!, $after: String) {
   project(fullPath: $project) {
     mergeRequest(iid: $iid) { discussions(first: ${PAGE_SIZE}, after: $after) { ${DISCUSSIONS} } }
   }
-}`;
+}`);
 
 export function classifyError(message: string, code: number): ForgeError {
   const text = message.trim().replace(/^glab:\s*/, '') || `glab exited with code ${code}`;
@@ -130,18 +152,11 @@ export function classifyError(message: string, code: number): ForgeError {
   return new ForgeError('request', text.split('\n')[0]);
 }
 
-// The `data` of a GraphQL response. Each query casts its fields to the node
-// types it requested.
-export type GraphQLData = Record<string, any>;
-
-export type GraphQL = (
-  host: string,
-  query: string,
-  variables: Record<string, string>,
-) => Promise<GraphQLData>;
+type Variables = Record<string, string>;
+export type GraphQL = Transport<Variables>;
 
 interface GraphQLResponse {
-  data?: GraphQLData | null;
+  data?: object | null;
   errors?: { message?: unknown }[];
 }
 
@@ -238,7 +253,11 @@ function duoState(state: string): AutomatedReviewState {
 export class GitLabForge implements Forge {
   readonly traits = gitlabTraits;
 
-  constructor(readonly graphql: GraphQL) {}
+  private readonly graphql: Typed<Variables>;
+
+  constructor(graphql: GraphQL) {
+    this.graphql = typed(graphql);
+  }
 
   async findByBranch(repository: Repository): Promise<GitLabMergeRequest[]> {
     const { source, targets, sourceBranch } = repository;
@@ -250,7 +269,7 @@ export class GitLabForge implements Forge {
     const seen = new Set<string>();
     const nodes: MergeRequestNode[] = [];
     targets.forEach((_, index) => {
-      for (const node of (data?.[`p${index}`]?.mergeRequests?.nodes ?? []) as MergeRequestNode[]) {
+      for (const node of data[`p${index}`]?.mergeRequests?.nodes ?? []) {
         // Another project's branch with the same name must not be reported as this branch's MR.
         if (node.sourceProject?.fullPath.toLowerCase() !== sourcePath) continue;
         const key = `${node.targetProject.fullPath}!${node.iid}`;
@@ -275,11 +294,7 @@ export class GitLabForge implements Forge {
     );
 
     const sourcePath = source.path.toLowerCase();
-    const nodes: Array<{
-      iid: string;
-      updatedAt: string | null;
-      sourceProject: { fullPath: string } | null;
-    }> = targets.flatMap((_, index) => data?.[`p${index}`]?.mergeRequests?.nodes ?? []);
+    const nodes = targets.flatMap((_, index) => data[`p${index}`]?.mergeRequests?.nodes ?? []);
     return (
       nodes
         // Another project's branch with the same name must not name this branch's MR.
@@ -293,7 +308,7 @@ export class GitLabForge implements Forge {
       project: ref.project,
       iid: ref.iid,
     });
-    const branch = data?.project?.mergeRequest?.sourceBranch;
+    const branch = data.project?.mergeRequest?.sourceBranch;
     return typeof branch === 'string' && branch ? branch : undefined;
   }
 
@@ -307,7 +322,7 @@ export class GitLabForge implements Forge {
     projects.forEach((project, index) => (variables[`p${index}`] = project.path));
     const data = await this.graphql(host, mergeRequestQuery(projects.length), variables);
     for (let index = 0; index < projects.length; index++) {
-      const node: MergeRequestNode | undefined = data?.[`p${index}`]?.mergeRequest ?? undefined;
+      const node = data[`p${index}`]?.mergeRequest;
       if (node) return this.normalize(host, node);
     }
     return undefined;
@@ -323,7 +338,7 @@ export class GitLabForge implements Forge {
         iid: node.iid,
         after: page.endCursor,
       });
-      const next: DiscussionPage | undefined = data?.project?.mergeRequest?.discussions;
+      const next = data.project?.mergeRequest?.discussions;
       if (!next) break;
       count += countUnresolved(next);
       page = next.pageInfo;
