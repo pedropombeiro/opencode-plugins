@@ -13,6 +13,7 @@ The plugins target OpenCode 2. The last OpenCode 1 versions live on the
 | [terminal-progress](packages/terminal-progress/) | Shows agent progress in terminal tabs (Ghostty, iTerm2, WezTerm, Windows Terminal) | [![npm](https://img.shields.io/npm/v/opencode-terminal-progress)](https://www.npmjs.com/package/opencode-terminal-progress) |
 | [homeassistant](packages/homeassistant/) | Sends agent status to Home Assistant via webhooks | [![npm](https://img.shields.io/npm/v/opencode-homeassistant)](https://www.npmjs.com/package/opencode-homeassistant) |
 | [forge-session-title](packages/forge-session-title/) | Prefixes session titles with forge issue/PR/MR references | [![npm](https://img.shields.io/npm/v/opencode-forge-session-title)](https://www.npmjs.com/package/opencode-forge-session-title) |
+| [forge-session](packages/forge-session/) | Tracks each session's issues and PRs/MRs: title prefixes, a PR/MR status footer, and review notifications | [![npm](https://img.shields.io/npm/v/opencode-forge-session)](https://www.npmjs.com/package/opencode-forge-session) |
 | [atuin-history](packages/atuin-history/) | Records agent shell commands in Atuin shell history | [![npm](https://img.shields.io/npm/v/opencode-atuin-history)](https://www.npmjs.com/package/opencode-atuin-history) |
 | [tmux-indicator](packages/tmux-indicator/) | Sets a tmux window option when the agent is waiting for input | [![npm](https://img.shields.io/npm/v/opencode-tmux-indicator)](https://www.npmjs.com/package/opencode-tmux-indicator) |
 

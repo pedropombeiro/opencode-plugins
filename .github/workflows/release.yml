@@ -1,6 +1,6 @@
 name: Release
 
-on:
+'on':
   push:
     branches:
       - main
@@ -20,6 +20,7 @@ jobs:
       terminal-progress--release_created: ${{ steps.release.outputs['packages/terminal-progress--release_created'] }}
       homeassistant--release_created: ${{ steps.release.outputs['packages/homeassistant--release_created'] }}
       forge-session-title--release_created: ${{ steps.release.outputs['packages/forge-session-title--release_created'] }}
+      forge-session--release_created: ${{ steps.release.outputs['packages/forge-session--release_created'] }}
       atuin-history--release_created: ${{ steps.release.outputs['packages/atuin-history--release_created'] }}
       tmux-indicator--release_created: ${{ steps.release.outputs['packages/tmux-indicator--release_created'] }}
     steps:
@@ -42,6 +43,8 @@ jobs:
             enabled: ${{ needs.release-please.outputs['homeassistant--release_created'] }}
           - package: forge-session-title
             enabled: ${{ needs.release-please.outputs['forge-session-title--release_created'] }}
+          - package: forge-session
+            enabled: ${{ needs.release-please.outputs['forge-session--release_created'] }}
           - package: atuin-history
             enabled: ${{ needs.release-please.outputs['atuin-history--release_created'] }}
           - package: tmux-indicator
