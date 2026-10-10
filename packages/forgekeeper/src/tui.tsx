@@ -11,15 +11,19 @@ import { exec } from './exec';
 import {
   detailsMessage,
   footerSegments,
+  pipelineTone,
   responsiveFooterSegments,
   segmentsWidth,
   type Tone,
 } from './format';
-import type { ReviewRequest } from './forge';
-import { reference } from './forges';
+import { yesNo, type ReviewRequest } from './forge';
+import { reference, traitsOf } from './forges';
+import { automatedReview } from './automated-review-watch';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
 import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
+import type { Repository } from './git';
+import type { Lookup } from './store';
 
 export default {
   id: 'pedropombeiro.forgekeeper',
@@ -185,6 +189,195 @@ export default {
       return true;
     };
 
+    function DetailField(props: { label: string; value: string; tone?: Tone; url?: string }) {
+      const foreground = () => (props.tone ? color(props.tone) : context.theme.text.base);
+      return (
+        <text fg={context.theme.text.muted} onMouseUp={() => props.url && openUrl(props.url)}>
+          {props.label}
+          {': '}
+          <span style={{ fg: foreground() }}>
+            <Show when={props.url} fallback={<b>{props.value}</b>}>
+              {(url: () => string) => (
+                <a href={url()}>
+                  <u>
+                    <b>{props.value}</b>
+                  </u>
+                </a>
+              )}
+            </Show>
+          </span>
+        </text>
+      );
+    }
+
+    function RequestDetails(props: { request: ReviewRequest; head?: string }) {
+      const request = () => props.request;
+      const traits = () => traitsOf(request());
+      const review = () => automatedReview(request());
+      return (
+        <box gap={1} flexShrink={0}>
+          <text fg={context.theme.text.base} onMouseUp={() => openUrl(request().url)}>
+            <a href={request().url}>
+              <u>
+                <b>
+                  {reference(request())} {request().title}
+                </b>
+              </u>
+            </a>
+          </text>
+          <box flexShrink={0}>
+            <DetailField
+              label="State"
+              value={request().state}
+              tone={request().state === 'merged' ? 'success' : undefined}
+            />
+            <DetailField
+              label="Target"
+              value={`${request().targetProject} → ${request().targetBranch}`}
+            />
+            <DetailField
+              label={traits().ci.charAt(0).toUpperCase() + traits().ci.slice(1)}
+              value={request().pipeline?.label ?? 'none'}
+              tone={pipelineTone(request().pipeline)}
+              url={request().pipeline?.url}
+            />
+            <DetailField
+              label="Unresolved threads"
+              value={`${request().unresolvedThreads}${request().threadsComplete ? '' : '+'}`}
+              tone={
+                request().unresolvedThreads || !request().threadsComplete ? 'warning' : undefined
+              }
+            />
+            <DetailField
+              label="Draft"
+              value={yesNo(request().draft)}
+              tone={request().draft ? 'warning' : undefined}
+            />
+            <DetailField
+              label="Conflicts"
+              value={request().conflictsKnown ? yesNo(request().conflicts) : 'unknown'}
+              tone={request().conflicts ? 'error' : undefined}
+            />
+          </box>
+          <box flexShrink={0}>
+            <text fg={context.theme.text.base}>
+              <b>Review and approval</b>
+            </text>
+            <For each={traits().details(request())}>
+              {(line) => {
+                const separator = line.indexOf(': ');
+                return separator < 0 ? (
+                  <text fg={context.theme.text.base}>{line}</text>
+                ) : (
+                  <DetailField label={line.slice(0, separator)} value={line.slice(separator + 2)} />
+                );
+              }}
+            </For>
+            <Show when={review()}>
+              {(value: () => NonNullable<ReturnType<typeof automatedReview>>) => (
+                <DetailField
+                  label={`${value().name} review`}
+                  value={value().label}
+                  tone={value().state === 'running' ? 'warning' : undefined}
+                />
+              )}
+            </Show>
+            <Show when={request().awaitingReviewers.length}>
+              <DetailField
+                label="Awaiting review"
+                value={request()
+                  .awaitingReviewers.map((username) => `@${username}`)
+                  .join(', ')}
+              />
+            </Show>
+          </box>
+          <Show when={!request().reviewersComplete}>
+            <text fg={color('warning')}>Reviewer list is partial</text>
+          </Show>
+          <Show when={props.head && request().headSha && props.head !== request().headSha}>
+            <text fg={color('warning')}>
+              Local HEAD differs from the {traits().noun} head commit (unpushed or not fetched)
+            </text>
+          </Show>
+        </box>
+      );
+    }
+
+    function StatusDetails(props: { snapshot: Snapshot }) {
+      const lookup = () => {
+        const value = props.snapshot.lookup;
+        return value?.kind === 'found' ? value : undefined;
+      };
+      return (
+        <box gap={1} flexShrink={0}>
+          <Show
+            when={lookup()}
+            fallback={
+              <text fg={props.snapshot.error ? color('error') : context.theme.text.muted}>
+                {detailsMessage(props.snapshot)}
+              </text>
+            }
+          >
+            {(found: () => Extract<Lookup, { kind: 'found' }>) => (
+              <>
+                <Show when={found().repository}>
+                  {(repository: () => Repository) => (
+                    <box flexShrink={0}>
+                      <DetailField label="Repository" value={repository().source.path} />
+                      <DetailField
+                        label="Branch"
+                        value={
+                          repository().branch === repository().sourceBranch
+                            ? repository().branch
+                            : `${repository().branch} (pushes to ${repository().sourceBranch})`
+                        }
+                      />
+                    </box>
+                  )}
+                </Show>
+                <Show when={!found().repository && found().sessionTarget}>
+                  <DetailField label="Session target" value={found().sessionTarget!} />
+                </Show>
+                <For each={found().failed ?? []}>
+                  {(failure) => (
+                    <text fg={color('warning')}>
+                      <b>Unavailable</b>
+                      {'\n'}
+                      {failure.url}
+                      {'\n'}
+                      {failure.reason}
+                    </text>
+                  )}
+                </For>
+                <Show when={found().requests.length === 0}>
+                  <text fg={context.theme.text.muted}>No PR/MR status available.</text>
+                </Show>
+                <For each={found().requests}>
+                  {(request) => (
+                    <RequestDetails request={request} head={found().repository?.head} />
+                  )}
+                </For>
+                <Show when={props.snapshot.error}>
+                  {(error: () => NonNullable<Snapshot['error']>) => (
+                    <text fg={color('error')}>
+                      <b>Last refresh failed at {new Date(error().at).toLocaleTimeString()}</b>
+                      {'\n'}
+                      {error().message}
+                    </text>
+                  )}
+                </Show>
+                <Show when={props.snapshot.fetchedAt !== undefined}>
+                  <text fg={context.theme.text.muted}>
+                    Last fetched: {new Date(props.snapshot.fetchedAt!).toLocaleTimeString()}
+                  </text>
+                </Show>
+              </>
+            )}
+          </Show>
+        </box>
+      );
+    }
+
     function StatusDialog(props: { place: Place }) {
       const [terminalHeight, setTerminalHeight] = createSignal(context.renderer.height);
       const onResize = () => setTerminalHeight(context.renderer.height);
@@ -253,7 +446,7 @@ export default {
             scrollX={false}
             contentOptions={{ flexShrink: 0 }}
           >
-            <text fg={context.theme.text.base}>{detailsMessage(snapshot())}</text>
+            <StatusDetails snapshot={snapshot()} />
           </scrollbox>
           <box height={1} flexShrink={0} flexDirection="row" justifyContent="flex-end">
             <For each={['close', 'refresh'] as const}>
