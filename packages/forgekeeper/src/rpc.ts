@@ -1,7 +1,6 @@
 // Contract between the server, which stores each session's targets and
-// watches their PRs/MRs, and the CLI, which renders their status. The ID is
-// the one that opencode-forge-session-title registered, so callers written
-// for that package keep working.
+// watches their PRs/MRs, and the CLI, which renders their status. Other
+// plugins can call `target` and listen for `targetChanged` too.
 //
 // Status keys are session IDs, or "" for the checkout outside a session. A
 // key is relative to the location the call or event names, because each
@@ -36,7 +35,7 @@ const status = {
 } as const;
 
 export const ForgeSessionRpc = {
-  id: 'opencode-forge-session-title',
+  id: 'opencode-forgekeeper',
   methods: {
     // The session's explicit targets, or `{}` in automatic branch mode.
     target: {
