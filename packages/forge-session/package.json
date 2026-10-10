@@ -1,0 +1,49 @@
+{
+  "name": "opencode-forge-session",
+  "version": "0.0.0",
+  "description": "OpenCode plugin that tracks each session's GitHub and GitLab issues and PRs/MRs: title prefixes, a PR/MR status footer, and review notifications",
+  "author": {
+    "name": "Pedro Pombeiro",
+    "email": "pedropombeiro@users.noreply.github.com"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "default": "./dist/index.js"
+    },
+    "./tui": {
+      "default": "./dist/tui.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
+    "directory": "packages/forge-session"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "session",
+    "title",
+    "github",
+    "gitlab",
+    "forge",
+    "merge-request",
+    "pull-request",
+    "code-review"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.26",
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "solid-js": ">=1.9.0"
+  }
+}

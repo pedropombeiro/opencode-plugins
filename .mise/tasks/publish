@@ -3,6 +3,7 @@
 #USAGE arg "<package>" help="Package to publish (e.g. terminal-progress)"
 #USAGE arg "[tag]" help="npm dist-tag" default="latest"
 set -euo pipefail
+# shellcheck disable=SC2154 # mise sets usage_* from the #USAGE lines
 pkg="packages/${usage_package}"
 if [ ! -d "$pkg" ]; then
   echo "Package not found: $pkg" >&2
