@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.0.0...opencode-forgekeeper-2.1.0) (2026-10-10)
+
+
+### Features
+
+* **forgekeeper:** style the review status dialog ([3b49cb2](https://github.com/pedropombeiro/opencode-plugins/commit/3b49cb2f985ad74fa7153bb865425fb266a3637e))
+
 ## [2.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-1.0.0...opencode-forgekeeper-2.0.0) (2026-10-10)
 
 
