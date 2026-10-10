@@ -14,6 +14,7 @@ import {
   type FeedbackLog,
   type SeenComments,
 } from './human-review-watch';
+import { until } from './testing';
 
 const MINUTE = 60_000;
 const mr = {
@@ -381,7 +382,7 @@ describe('createFeedbackWatcher', () => {
       now: () => clock,
     });
     const first = watcher.check('ses_1', mr);
-    await Bun.sleep(0);
+    await until(() => sent.length === 1);
     clock += FETCH_INTERVAL;
     await watcher.check('ses_1', mr);
     release();

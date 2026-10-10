@@ -14,6 +14,7 @@ import type { TitleLookups } from './lookups';
 import { FETCH_INTERVAL, SETTLE_TIME } from './human-review-watch';
 import { setupServer } from './server';
 import type { Snapshot } from './store';
+import { flush } from './testing';
 
 type Tool = { execute: (input: unknown, context: { sessionID: string }) => Promise<unknown> };
 type Hook = (event: {
@@ -131,9 +132,9 @@ const defaultSessions = () =>
     ],
   ]);
 
-const settle = async () => {
-  for (let index = 0; index < 5; index++) await Bun.sleep(1);
-};
+// Lets the plugin finish the work that the doubles' promises release. None of
+// that work waits for a timer, so one turn of the event loop is enough.
+const settle = flush;
 
 // Where the server stores a pending automated-review notification.
 const pendingRecord = (sessionID: string, url: string) =>
