@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-1.0.0...opencode-forgekeeper-2.0.0) (2026-10-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forgekeeper:** Nothing stored under opencode-forge-session-title carries over. Sessions return to branch-based naming until their targets are set again, each PR/MR records a new review baseline, and RPC callers need the opencode-forgekeeper ID.
+
+### Features
+
+* **forgekeeper:** use opencode-forgekeeper as the server and RPC ID ([#90](https://github.com/pedropombeiro/opencode-plugins/issues/90)) ([5bd183c](https://github.com/pedropombeiro/opencode-plugins/commit/5bd183c0d29a877481e6c7ab1bc00c96e235fa38))
+
 ## 1.0.0 (2026-10-10)
 
 
