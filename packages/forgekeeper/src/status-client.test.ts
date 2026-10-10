@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { HOME } from './rpc';
+import { HOME, type Output } from './rpc';
 import { createStatusClient } from './status-client';
 import type { Snapshot } from './store';
 
@@ -28,7 +28,7 @@ function harness() {
     },
     refresh: async (directory, key) => ({
       enabled: enabled.get(directory) ?? true,
-      snapshot: statuses.get(directory)?.[key],
+      snapshot: statuses.get(directory)?.[key] ?? { loading: false },
     }),
     release: async (directory) => void released.push(directory),
     onChange: () => {},
@@ -126,7 +126,7 @@ describe('createStatusClient', () => {
   });
 
   test('keeps the newest snapshot when an older RPC response arrives after an event', async () => {
-    let answer = (_value: { enabled: boolean; statuses: Record<string, unknown> }) => {};
+    let answer = (_value: Output<'watch'>) => {};
     const client = createStatusClient({
       clientID: 'cli',
       watch: () => new Promise((resolve) => (answer = resolve)),

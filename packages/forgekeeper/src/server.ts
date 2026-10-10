@@ -2,7 +2,7 @@ import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
 import { statusOptions } from './options';
-import { ForgeSessionRpc } from './rpc';
+import { ForgeSessionRpc, implement } from './rpc';
 import { setupStatus, type Status, type StatusDependencies } from './status-server';
 import type { Snapshot } from './store';
 import {
@@ -68,7 +68,7 @@ async function drain(tasks: Promise<unknown>[], limit: number) {
 }
 
 // RPC values must be JSON, which has no `undefined`, such as a cleared error.
-const json = (value: unknown) => JSON.parse(JSON.stringify(value)) as never;
+const json = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 // Stores each root session's targets, keeps its title prefix current, serves
 // the targets to the CLI over RPC, and, given `status`, watches the PRs/MRs
@@ -119,32 +119,22 @@ export async function setupServer(
   };
 
   let watcher: Status | undefined;
-  const rpc = await ctx.rpc.register(ForgeSessionRpc, {
-    target: async (input) => {
-      const { sessionID } = input as { sessionID: string };
-      return targetOutput((await stateFor(sessionID)).targets);
-    },
-    watch: async (input) => {
-      const { clientID, keys, visible } = input as {
-        clientID: string;
-        keys: string[];
-        visible?: string;
-      };
-      return watcher
-        ? { enabled: true, statuses: json(watcher.service.watch(clientID, keys, visible)) }
-        : { enabled: false, statuses: {} };
-    },
-    release: async (input) => {
-      watcher?.service.release((input as { clientID: string }).clientID);
-      return {};
-    },
-    refresh: async (input) => {
-      const { key } = input as { key: string };
-      return watcher
-        ? { enabled: true, snapshot: json(await watcher.service.refresh(key)) }
-        : DISABLED;
-    },
-  });
+  const rpc = await ctx.rpc.register(
+    ForgeSessionRpc,
+    implement({
+      target: async ({ sessionID }) => targetOutput((await stateFor(sessionID)).targets),
+      watch: async ({ clientID, keys, visible }) =>
+        watcher
+          ? { enabled: true, statuses: json(watcher.service.watch(clientID, keys, visible)) }
+          : { enabled: false, statuses: {} },
+      release: async ({ clientID }) => {
+        watcher?.service.release(clientID);
+        return {};
+      },
+      refresh: async ({ key }) =>
+        watcher ? { enabled: true, snapshot: json(await watcher.service.refresh(key)) } : DISABLED,
+    }),
+  );
 
   const settings = statusOptions(ctx.options);
   if (status && settings.enabled) {
