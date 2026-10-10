@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { GitLabMergeRequest, ReviewRequest } from './forge';
 import { createStatusService, HOME } from './status-service';
 import type { Lookup } from './store';
+import { flush } from './testing';
 
 const mr = (overrides: Partial<GitLabMergeRequest> = {}): GitLabMergeRequest =>
   ({
@@ -79,10 +80,10 @@ function harness({
         clock = due[1].at;
         timers.delete(due[0]);
         due[1].callback();
-        await Bun.sleep(0);
+        await flush();
       }
       clock = end;
-      await Bun.sleep(0);
+      await flush();
     },
   };
 }

@@ -1,4 +1,4 @@
-import { HEARTBEAT, HOME } from './rpc';
+import { HEARTBEAT, HOME, type Input, type Output } from './rpc';
 import type { Snapshot } from './store';
 
 // Where a status lives: the server plugin instance of `directory`, and a
@@ -13,11 +13,8 @@ const placeID = (place: Place) => JSON.stringify([place.directory, place.key]);
 
 export interface StatusClientOptions {
   clientID: string;
-  watch: (
-    directory: string,
-    input: { clientID: string; keys: string[]; visible?: string },
-  ) => Promise<{ enabled: boolean; statuses: Record<string, unknown> }>;
-  refresh: (directory: string, key: string) => Promise<{ enabled: boolean; snapshot: unknown }>;
+  watch: (directory: string, input: Input<'watch'>) => Promise<Output<'watch'>>;
+  refresh: (directory: string, key: string) => Promise<Output<'refresh'>>;
   release: (directory: string, clientID: string) => Promise<unknown>;
   // Called after any snapshot or setting changes, so the UI can render again.
   onChange: () => void;
@@ -107,7 +104,7 @@ export function createStatusClient(options: StatusClientOptions) {
       failures.delete(directory);
       enabled.set(directory, result.enabled);
       for (const [key, snapshot] of Object.entries(result.statuses)) {
-        if (isShown({ directory, key })) apply({ directory, key }, snapshot as Snapshot);
+        if (isShown({ directory, key })) apply({ directory, key }, snapshot);
       }
       options.onChange();
     } catch (error) {
@@ -161,7 +158,7 @@ export function createStatusClient(options: StatusClientOptions) {
       try {
         const result = await options.refresh(place.directory, place.key);
         enabled.set(place.directory, result.enabled);
-        apply(place, result.snapshot as Snapshot);
+        apply(place, result.snapshot);
         options.onChange();
       } catch (error) {
         unavailable(place.directory, error);

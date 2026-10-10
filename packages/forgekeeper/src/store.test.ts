@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Repository } from './git';
 import { ForgeError, type ReviewRequest } from './forge';
 import { createStatusStore, type Lookup } from './store';
+import { flush } from './testing';
 
 const repository = {
   head: '',
@@ -53,7 +54,7 @@ function harness(
         timers.delete(id);
         timer.callback();
       }
-      await Bun.sleep(0);
+      await flush();
     },
   };
 }
@@ -293,7 +294,7 @@ describe('createStatusStore', () => {
     const first = store.refresh('/a');
     store.invalidate('/a');
     resolvers[0](found(2));
-    await Bun.sleep(0);
+    await flush();
     expect(loaded).toEqual([]);
     expect(store.get('/a').lookup).toBeUndefined();
     resolvers[1](found());
@@ -342,7 +343,7 @@ describe('createStatusStore', () => {
     const first = store.refresh('/a');
     store.invalidate('/a');
     resolve(found());
-    await Bun.sleep(0);
+    await flush();
     expect(calls).toBe(2);
     resolve({ kind: 'none', reason: 'Detached HEAD' });
     await first;

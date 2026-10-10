@@ -399,6 +399,16 @@ describe('glabGraphQL', () => {
     (stdout: string, stderr = '', code = 0): Exec =>
     async () => ({ stdout, stderr, code });
 
+  // The error that the lookup throws.
+  const failure = async (exec: Exec): Promise<ForgeError> => {
+    try {
+      await glabGraphQL(exec, '/repo')('gitlab.com', 'q', {});
+    } catch (error) {
+      return error as ForgeError;
+    }
+    throw new Error('Expected the lookup to fail');
+  };
+
   test('passes variables as raw strings', async () => {
     let seen: string[] = [];
     const exec: Exec = async (_file, args) => {
@@ -421,30 +431,28 @@ describe('glabGraphQL', () => {
   });
 
   test('classifies failures', async () => {
-    const fail = (exec: Exec) =>
-      glabGraphQL(exec, '/repo')('gitlab.com', 'q', {}).catch((error) => error);
-    expect((await fail(run('', 'glab: 401 Unauthorized', 1))).kind).toBe('auth');
-    expect((await fail(run('', 'spawn glab ENOENT', -1))).kind).toBe('missing-glab');
-    expect((await fail(run('', 'glab: 429 Too Many Requests', 1))).kind).toBe('rate-limit');
-    const graphqlError = await fail(run('{"errors":[{"message":"Field missing"}]}', '', 1));
+    expect((await failure(run('', 'glab: 401 Unauthorized', 1))).kind).toBe('auth');
+    expect((await failure(run('', 'spawn glab ENOENT', -1))).kind).toBe('missing-glab');
+    expect((await failure(run('', 'glab: 429 Too Many Requests', 1))).kind).toBe('rate-limit');
+    const graphqlError = await failure(run('{"errors":[{"message":"Field missing"}]}', '', 1));
     expect(graphqlError).toBeInstanceOf(ForgeError);
     expect(graphqlError.message).toBe('Field missing');
   });
 
   test('fails the lookup when a field errored, even next to data', async () => {
-    const fail = (exec: Exec) =>
-      glabGraphQL(exec, '/repo')('gitlab.com', 'q', {}).catch((error) => error);
     // A timed-out field is `null` next to its error, which isn't a missing MR.
     const partial = '{"data":{"p0":null},"errors":[{"message":"request timed out","path":["p0"]}]}';
-    expect(await fail(run(partial))).toMatchObject({
+    expect(await failure(run(partial))).toMatchObject({
       kind: 'request',
       message: 'request timed out',
     });
-    expect(await fail(run('{"data":{"p0":null}}', 'glab: connection reset', 1))).toMatchObject({
+    expect(await failure(run('{"data":{"p0":null}}', 'glab: connection reset', 1))).toMatchObject({
       message: 'connection reset',
     });
-    expect(await fail(run('{"data":null}'))).toMatchObject({ message: 'GitLab returned no data' });
-    expect(await fail(run('[1, 2]'))).toBeInstanceOf(ForgeError);
+    expect(await failure(run('{"data":null}'))).toMatchObject({
+      message: 'GitLab returned no data',
+    });
+    expect(await failure(run('[1, 2]'))).toBeInstanceOf(ForgeError);
     // A project or MR that doesn't exist is `null` without an error.
     expect(await glabGraphQL(run('{"data":{"p0":null}}'), '/repo')('gitlab.com', 'q', {})).toEqual({
       p0: null,

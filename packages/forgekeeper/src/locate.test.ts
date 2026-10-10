@@ -10,6 +10,7 @@ import { kinds, traits, type ForgeCatalog } from './forges';
 import type { RemoteProject, Repository, RepositoryLookup } from './git';
 import { locate } from './locate';
 import { classifyTargets } from './target';
+import { deferred, until, type Deferred } from './testing';
 
 // Finds `found` by its own number only, like a forge that has just that PR/MR.
 class FakeForge implements Forge {
@@ -99,10 +100,13 @@ const mergeOf = (iid: string, overrides: Partial<GitLabMergeRequest> = {}) =>
   }) as GitLabMergeRequest;
 
 // Finds requests by number, fails for the numbers in `failing`, and records
-// how many lookups ran at once.
+// how many lookups ran at once. With `hold` set, each lookup waits in `gates`
+// until the test releases it.
 class FailingForge extends FakeForge {
   peak = 0;
-  private running = 0;
+  hold = false;
+  readonly gates: Deferred[] = [];
+  running = 0;
 
   constructor(
     private readonly requests: Map<string, ReviewRequest>,
@@ -113,7 +117,11 @@ class FailingForge extends FakeForge {
 
   override async findByNumber(_projects: readonly RemoteProject[], number: string) {
     this.peak = Math.max(this.peak, ++this.running);
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    if (this.hold) {
+      const gate = deferred();
+      this.gates.push(gate);
+      await gate.promise;
+    }
     this.running--;
     if (this.failing.has(number)) throw new Error('glab failed');
     return this.requests.get(number);
@@ -250,7 +258,15 @@ describe('locate', () => {
       new Map(Array.from({ length: 10 }, (_, index) => [`${index + 1}`, mergeOf(`${index + 1}`)])),
     );
     const urls = targets(...Array.from({ length: 10 }, (_, index) => mergeOf(`${index + 1}`).url));
-    const lookup = await locate(catalog({ gitlab }), { directory: '/repo', targets: urls });
+    gitlab.hold = true;
+    const located = locate(catalog({ gitlab }), { directory: '/repo', targets: urls });
+    // The lookups fill the limit, and the rest wait for slots.
+    await until(() => gitlab.running === 4);
+    for (let released = 0; released < 10; released++) {
+      await until(() => gitlab.gates.length > released);
+      gitlab.gates[released].resolve();
+    }
+    const lookup = await located;
     expect(lookup).toMatchObject({ kind: 'found' });
     expect(lookup.kind === 'found' && lookup.requests.map((request) => request.iid)).toEqual([
       '1',

@@ -13,6 +13,7 @@ import {
 } from './forge';
 import type { RemoteProject, Repository } from './git';
 import { gitlabTraits } from './gitlab';
+import { query, typed, type Transport, type Typed } from './graphql';
 
 interface Connection<T> {
   nodes: T[];
@@ -61,11 +62,12 @@ const fields = `number title url state isDraft mergeable reviewDecision headRefO
 // Pagination stops after this many pages; results are then marked partial.
 const MAX_PAGES = 50;
 
-export type GraphQL = (
-  host: string,
-  query: string,
-  variables: Record<string, string | number>,
-) => Promise<Record<string, unknown>>;
+type Variables = Record<string, string | number>;
+export type GraphQL = Transport<Variables>;
+
+// Every query selects fields of one repository. A repository that doesn't
+// exist, or that the viewer can't see, is null.
+type RepositoryData<T> = { repository?: T | null };
 
 export function ghGraphQL(run: Exec, cwd: string): GraphQL {
   return async (host, query, variables) => {
@@ -74,7 +76,7 @@ export function ghGraphQL(run: Exec, cwd: string): GraphQL {
       args.push(typeof value === 'number' ? '-F' : '-f', `${name}=${value}`);
     const result = await run('gh', args, cwd);
     let body: {
-      data?: Record<string, unknown>;
+      data?: object;
       errors?: Array<{ type?: string; message: string }>;
     };
     try {
@@ -188,7 +190,11 @@ export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
 export class GitHubForge implements Forge {
   readonly traits = githubTraits;
 
-  constructor(readonly graphql: GraphQL) {}
+  private readonly graphql: Typed<Variables>;
+
+  constructor(graphql: GraphQL) {
+    this.graphql = typed(graphql);
+  }
 
   async findByNumber(
     projects: readonly RemoteProject[],
@@ -198,12 +204,14 @@ export class GitHubForge implements Forge {
       const [owner, repo] = project.path.split('/');
       const data = await this.graphql(
         project.host,
-        `query($owner:String!,$repo:String!,$number:Int!) {
+        query<RepositoryData<{ pullRequest?: Pull | null }>>(
+          `query($owner:String!,$repo:String!,$number:Int!) {
         repository(owner:$owner,name:$repo) { pullRequest(number:$number) { ${fields} } }
       }`,
+        ),
         { owner, repo, number: Number(number) },
       );
-      const node = (data.repository as { pullRequest?: Pull } | undefined)?.pullRequest;
+      const node = data.repository?.pullRequest;
       if (node) return this.normalize(project.host, node);
     }
     return undefined;
@@ -215,18 +223,17 @@ export class GitHubForge implements Forge {
       const [owner, repo] = target.path.split('/');
       const data = await this.graphql(
         target.host,
-        `query($owner:String!,$repo:String!,$branch:String!) {
+        query<
+          RepositoryData<{
+            pullRequests?: Connection<Pick<Pull, 'number' | 'updatedAt' | 'headRepository'>> | null;
+          }>
+        >(`query($owner:String!,$repo:String!,$branch:String!) {
         repository(owner:$owner,name:$repo) { pullRequests(first:100,states:OPEN,headRefName:$branch,orderBy:{field:UPDATED_AT,direction:DESC}) {
           nodes { number updatedAt headRepository { nameWithOwner } }
-        } } }`,
+        } } }`),
         { owner, repo, branch: repository.sourceBranch },
       );
-      const nodes =
-        (
-          data.repository as
-            | { pullRequests?: Connection<Pick<Pull, 'number' | 'updatedAt' | 'headRepository'>> }
-            | undefined
-        )?.pullRequests?.nodes ?? [];
+      const nodes = data.repository?.pullRequests?.nodes ?? [];
       for (const node of nodes) {
         // A fork's branch with the same name must not name this branch's PR.
         if (
@@ -243,15 +250,14 @@ export class GitHubForge implements Forge {
     const [owner, repo] = ref.project.split('/');
     const data = await this.graphql(
       ref.host,
-      `query($owner:String!,$repo:String!,$number:Int!) {
+      query<RepositoryData<{ pullRequest?: { headRefName?: string | null } | null }>>(
+        `query($owner:String!,$repo:String!,$number:Int!) {
       repository(owner:$owner,name:$repo) { pullRequest(number:$number) { headRefName } }
     }`,
+      ),
       { owner, repo, number: Number(ref.iid) },
     );
-    const branch = (
-      data.repository as { pullRequest?: { headRefName?: unknown } | null } | undefined
-    )?.pullRequest?.headRefName;
-    return typeof branch === 'string' && branch ? branch : undefined;
+    return data.repository?.pullRequest?.headRefName || undefined;
   }
 
   async findByBranch(repository: Repository): Promise<GitHubPullRequest[]> {
@@ -263,14 +269,15 @@ export class GitHubForge implements Forge {
       for (let page = 0; page < MAX_PAGES; page++) {
         const data = await this.graphql(
           target.host,
-          `query($owner:String!,$repo:String!,$branch:String!${after ? ',$after:String!' : ''}) {
+          query<RepositoryData<{ pullRequests?: Connection<Pull> | null }>>(
+            `query($owner:String!,$repo:String!,$branch:String!${after ? ',$after:String!' : ''}) {
           repository(owner:$owner,name:$repo) { pullRequests(first:100,states:OPEN,headRefName:$branch${after ? ',after:$after' : ''}) {
             nodes { ${fields} } pageInfo { hasNextPage endCursor }
           } } }`,
+          ),
           { owner, repo, branch: repository.sourceBranch, ...(after ? { after } : {}) },
         );
-        const pulls = (data.repository as { pullRequests?: Connection<Pull> } | undefined)
-          ?.pullRequests;
+        const pulls = data.repository?.pullRequests;
         if (!pulls) throw new ForgeError('request', 'GitHub repository unavailable');
         for (const node of pulls.nodes) {
           // A fork's branch with the same name must not be reported as this branch's PR.
@@ -301,15 +308,17 @@ export class GitHubForge implements Forge {
     for (let count = 1; page?.hasNextPage && page.endCursor && count < MAX_PAGES; count++) {
       const data = await this.graphql(
         host,
-        `query($owner:String!,$repo:String!,$number:Int!,$after:String!) {
+        query<
+          RepositoryData<{ pullRequest?: { reviewThreads?: Pull['reviewThreads'] | null } | null }>
+        >(
+          `query($owner:String!,$repo:String!,$number:Int!,$after:String!) {
         repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
           reviewThreads(first:100,after:$after) { nodes { isResolved } pageInfo { hasNextPage endCursor } }
         } } }`,
+        ),
         { owner, repo, number: node.number, after: page.endCursor },
       );
-      const next = (
-        data.repository as { pullRequest?: { reviewThreads?: Pull['reviewThreads'] } } | undefined
-      )?.pullRequest?.reviewThreads;
+      const next = data.repository?.pullRequest?.reviewThreads;
       if (!next) break;
       threads.push(...next.nodes);
       page = next.pageInfo;
@@ -328,17 +337,17 @@ export class GitHubForge implements Forge {
     for (let count = 1; cursor?.hasNextPage && cursor.endCursor && count < MAX_PAGES; count++) {
       const data = await this.graphql(
         host,
-        `query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String!) {
+        query<
+          RepositoryData<{
+            object?: { statusCheckRollup?: { contexts?: Connection<Check> | null } | null } | null;
+          }>
+        >(`query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String!) {
         repository(owner:$owner,name:$repo) { object(oid:$oid) { ... on Commit { statusCheckRollup {
           contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { status conclusion detailsUrl } ... on StatusContext { state targetUrl } } pageInfo { hasNextPage endCursor } }
-        } } } } }`,
+        } } } } }`),
         { owner, repo, oid: node.headRefOid, after: cursor.endCursor },
       );
-      const next = (
-        data.repository as
-          | { object?: { statusCheckRollup?: { contexts?: Connection<Check> } } }
-          | undefined
-      )?.object?.statusCheckRollup?.contexts;
+      const next = data.repository?.object?.statusCheckRollup?.contexts;
       if (!next) break;
       contexts.push(...next.nodes);
       cursor = next.pageInfo;

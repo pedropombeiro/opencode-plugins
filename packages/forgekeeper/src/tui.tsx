@@ -17,7 +17,7 @@ import {
 } from './format';
 import type { ReviewRequest } from './forge';
 import { reference } from './forges';
-import { ForgeSessionRpc, HEARTBEAT, HOME, type Notice } from './rpc';
+import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
 import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
 
@@ -29,16 +29,12 @@ export default {
     const [version, setVersion] = createSignal(0);
     const client = createStatusClient({
       clientID: crypto.randomUUID(),
+      // OpenCode types the results as `unknown`; the server returns what the
+      // schemas in rpc.ts describe.
       watch: async (directory, input) =>
-        (await rpc.watch(input, { location: { directory } })) as {
-          enabled: boolean;
-          statuses: Record<string, unknown>;
-        },
+        (await rpc.watch(input, { location: { directory } })) as Output<'watch'>,
       refresh: async (directory, key) =>
-        (await rpc.refresh({ key }, { location: { directory } })) as {
-          enabled: boolean;
-          snapshot: unknown;
-        },
+        (await rpc.refresh({ key }, { location: { directory } })) as Output<'refresh'>,
       release: (directory, clientID) => rpc.release({ clientID }, { location: { directory } }),
       onChange: () => setVersion((value) => value + 1),
     });
@@ -382,16 +378,12 @@ export default {
 
     const stops = [
       rpc.events.on('status', (event) => {
-        const { directory, key, snapshot } = event.data as {
-          directory: string;
-          key: string;
-          snapshot: Snapshot;
-        };
+        const { directory, key, snapshot } = event.data as EventData<'status'>;
         client.receive(directory, key, snapshot);
       }),
       // Notices about a session go to the CLIs that have shown it.
       rpc.events.on('notice', (event) => {
-        const notice = event.data as Notice;
+        const notice = event.data as EventData<'notice'>;
         if (notice.sessionID && !client.hasShown(notice.sessionID)) return;
         context.ui.toast.show({
           ...(notice.title ? { title: notice.title } : {}),

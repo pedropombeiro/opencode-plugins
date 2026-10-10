@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { HOME } from './rpc';
+import { HOME, type Output } from './rpc';
 import { createStatusClient } from './status-client';
 import type { Snapshot } from './store';
+import { flush } from './testing';
 
 const found = (iid: string): Snapshot => ({
   loading: false,
@@ -28,7 +29,7 @@ function harness() {
     },
     refresh: async (directory, key) => ({
       enabled: enabled.get(directory) ?? true,
-      snapshot: statuses.get(directory)?.[key],
+      snapshot: statuses.get(directory)?.[key] ?? { loading: false },
     }),
     release: async (directory) => void released.push(directory),
     onChange: () => {},
@@ -43,7 +44,7 @@ function harness() {
     released,
     timers,
     fail: (value: boolean) => void (failing = value),
-    settle: () => Bun.sleep(0),
+    settle: () => flush(),
   };
 }
 
@@ -126,7 +127,7 @@ describe('createStatusClient', () => {
   });
 
   test('keeps the newest snapshot when an older RPC response arrives after an event', async () => {
-    let answer = (_value: { enabled: boolean; statuses: Record<string, unknown> }) => {};
+    let answer = (_value: Output<'watch'>) => {};
     const client = createStatusClient({
       clientID: 'cli',
       watch: () => new Promise((resolve) => (answer = resolve)),
@@ -136,11 +137,11 @@ describe('createStatusClient', () => {
     });
     const place = { directory: '/a', key: 'ses_1' };
     client.show(place);
-    await Bun.sleep(0);
+    await flush();
     const done = { ...found('1'), revision: 12 };
     client.receive('/a', 'ses_1', done);
     answer({ enabled: true, statuses: { ses_1: { loading: true, revision: 11 } } });
-    await Bun.sleep(0);
+    await flush();
     expect(client.snapshot(place)).toEqual(done);
     // A newer response replaces it, and one without a revision never does.
     client.receive('/a', 'ses_1', { loading: false });

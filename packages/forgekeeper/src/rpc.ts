@@ -5,6 +5,13 @@
 // Status keys are session IDs, or "" for the checkout outside a session. A
 // key is relative to the location the call or event names, because each
 // checkout's server plugin instance watches its own sessions.
+//
+// The schemas are plain JSON Schema, so OpenCode types their values as
+// `unknown`. The types at the bottom of this file derive from them instead,
+// so the schemas stay the single description of what crosses the RPC.
+import type { FromSchema, JSONSchema } from 'json-schema-to-ts';
+import type { Snapshot } from './store';
+
 const urls = {
   url: { type: 'string' },
   issueUrl: { type: 'string' },
@@ -25,13 +32,15 @@ const target = {
 } as const;
 
 const key = { type: 'string' } as const;
-// A `Snapshot` from src/store.ts.
-const snapshot = { type: 'object' } as const;
+// A `Snapshot` from src/store.ts. Its title lets `Deserialize` map it to that
+// type, so the schema doesn't repeat the lookup's shape.
+const snapshot = { type: 'object', title: 'Snapshot' } as const;
 // `enabled` is false when the plugin's `reviewStatus` option is off.
 const status = {
   type: 'object',
   properties: { enabled: { type: 'boolean' }, snapshot },
   required: ['enabled', 'snapshot'],
+  additionalProperties: false,
 } as const;
 
 export const ForgeSessionRpc = {
@@ -63,8 +72,12 @@ export const ForgeSessionRpc = {
       },
       output: {
         type: 'object',
-        properties: { enabled: { type: 'boolean' }, statuses: { type: 'object' } },
+        properties: {
+          enabled: { type: 'boolean' },
+          statuses: { type: 'object', additionalProperties: snapshot },
+        },
         required: ['enabled', 'statuses'],
+        additionalProperties: false,
       },
     },
     // Drops every lease the CLI holds, when it exits.
@@ -75,7 +88,7 @@ export const ForgeSessionRpc = {
         required: ['clientID'],
         additionalProperties: false,
       },
-      output: { type: 'object' },
+      output: { type: 'object', additionalProperties: false },
     },
     // Looks the key up now and returns the result.
     refresh: {
@@ -104,6 +117,7 @@ export const ForgeSessionRpc = {
         type: 'object',
         properties: { directory: { type: 'string' }, key, snapshot },
         required: ['directory', 'key', 'snapshot'],
+        additionalProperties: false,
       },
     },
     // A toast for the CLIs, such as after telling a session about a review.
@@ -118,6 +132,7 @@ export const ForgeSessionRpc = {
           variant: { type: 'string', enum: ['info', 'error'] },
         },
         required: ['message', 'variant'],
+        additionalProperties: false,
       },
     },
   },
@@ -130,11 +145,28 @@ export const HOME = '';
 export const HEARTBEAT = 60_000;
 export const LEASE_TIME = 3 * HEARTBEAT;
 
-export type TargetUrls = { url: string; issueUrl?: string };
-export type TargetOutput = { url?: string; issueUrl?: string; targets?: TargetUrls[] };
-export type Notice = {
-  sessionID?: string;
-  title?: string;
-  message: string;
-  variant: 'info' | 'error';
-};
+type Methods = typeof ForgeSessionRpc.methods;
+type Events = typeof ForgeSessionRpc.events;
+type Deserialize = { pattern: { type: 'object'; title: 'Snapshot' }; output: Snapshot };
+type Typed<S extends JSONSchema> = FromSchema<S, { deserialize: [Deserialize] }>;
+
+export type MethodName = keyof Methods;
+export type EventName = keyof Events;
+export type Input<M extends MethodName> = Typed<Methods[M]['input']>;
+export type Output<M extends MethodName> = Typed<Methods[M]['output']>;
+export type EventData<E extends EventName> = Typed<Events[E]['schema']>;
+
+export type TargetOutput = Output<'target'>;
+export type TargetUrls = NonNullable<TargetOutput['targets']>[number];
+export type Notice = EventData<'notice'>;
+
+export type Handlers = { [M in MethodName]: (input: Input<M>) => Promise<Output<M>> };
+
+// OpenCode checks each call against the schemas before it reaches a handler,
+// and types the input as `unknown`. This is the one place that narrows it.
+export const implement = (handlers: Handlers) => ({
+  target: (input: unknown) => handlers.target(input as Input<'target'>),
+  watch: (input: unknown) => handlers.watch(input as Input<'watch'>),
+  release: (input: unknown) => handlers.release(input as Input<'release'>),
+  refresh: (input: unknown) => handlers.refresh(input as Input<'refresh'>),
+});
