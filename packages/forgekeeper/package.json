@@ -1,6 +1,6 @@
 {
   "name": "opencode-forgekeeper",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "OpenCode plugin that tracks each session's GitHub and GitLab issues and PRs/MRs: title prefixes, a PR/MR status footer, and review notifications",
   "author": {
     "name": "Pedro Pombeiro",
