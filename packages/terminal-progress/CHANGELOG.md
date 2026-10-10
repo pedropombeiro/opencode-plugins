@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-1.0.2...opencode-terminal-progress-1.1.0) (2026-10-10)
+
+
+### Features
+
+* **terminal-progress:** add kitty support (0.47+) ([3a410b8](https://github.com/pedropombeiro/opencode-plugins/commit/3a410b86f31e2407e2b6cca7a2aacbc7df262a4e))
+
 ## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-terminal-progress-1.0.1...opencode-terminal-progress-1.0.2) (2026-09-24)
 
 
