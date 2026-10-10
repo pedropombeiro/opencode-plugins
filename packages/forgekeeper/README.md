@@ -1,4 +1,4 @@
-# opencode-forge-session
+# opencode-forgekeeper
 
 An [OpenCode](https://opencode.ai) plugin that tracks the issues or PRs/MRs a session works on.
 It prefixes the session title with their references, shows the PR/MR status in the prompt
@@ -12,7 +12,7 @@ Requires OpenCode 2. It replaces
 ## Installation
 
 ```bash
-opencode plugin add opencode-forge-session
+opencode plugin add opencode-forgekeeper
 ```
 
 This adds the plugin to your `opencode.json`:
@@ -20,7 +20,7 @@ This adds the plugin to your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-forge-session"]
+  "plugins": ["opencode-forgekeeper"]
 }
 ```
 
@@ -262,7 +262,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 
 ```json
 {
-  "plugins": [{ "package": "opencode-forge-session", "options": { "notifyHumanReviews": false } }]
+  "plugins": [{ "package": "opencode-forgekeeper", "options": { "notifyHumanReviews": false } }]
 }
 ```
 
@@ -286,7 +286,7 @@ To keep the behavior of `opencode-forge-session-title` alone, turn off review st
 
 ```json
 {
-  "plugins": [{ "package": "opencode-forge-session", "options": { "reviewStatus": false } }]
+  "plugins": [{ "package": "opencode-forgekeeper", "options": { "reviewStatus": false } }]
 }
 ```
 
@@ -318,14 +318,14 @@ plugin instance watches its own sessions.
 
 ## Migrating from opencode-forge-session-title
 
-Replace `opencode-forge-session-title` with `opencode-forge-session` in `opencode.json`. Never
+Replace `opencode-forge-session-title` with `opencode-forgekeeper` in `opencode.json`. Never
 load both: the server keeps `opencode-forge-session-title`'s plugin and RPC IDs, so the two
 would collide.
 
 | Entry point | Plugin ID                      | Stored state                                                                             |
 | ----------- | ------------------------------ | ---------------------------------------------------------------------------------------- |
 | Server      | `opencode-forge-session-title` | Session targets, owned title prefixes, human-review baselines, and pending notifications |
-| CLI         | `pedropombeiro.forge-session`  | None                                                                                     |
+| CLI         | `pedropombeiro.forgekeeper`    | None                                                                                     |
 
 Because the IDs match, stored targets carry over, and callers of the `target` RPC keep working.
 The server reads a session's single stored `target` as a list of one, and writes `targets` from
@@ -379,7 +379,7 @@ From the repository root:
 mise run test
 mise run typecheck
 mise run lint
-mise run build forge-session
+mise run build forgekeeper
 ```
 
 ## License

@@ -10,8 +10,8 @@
     "packages/forge-session-title": {
       "component": "opencode-forge-session-title"
     },
-    "packages/forge-session": {
-      "component": "opencode-forge-session"
+    "packages/forgekeeper": {
+      "component": "opencode-forgekeeper"
     },
     "packages/atuin-history": {
       "component": "opencode-atuin-history"

@@ -22,7 +22,7 @@ import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
 
 export default {
-  id: 'pedropombeiro.forge-session',
+  id: 'pedropombeiro.forgekeeper',
   async setup(context) {
     const rpc = context.client.rpc(ForgeSessionRpc);
 

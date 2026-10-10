@@ -1,6 +1,6 @@
 {
-  "name": "opencode-forge-session",
-  "version": "1.0.0",
+  "name": "opencode-forgekeeper",
+  "version": "0.0.0",
   "description": "OpenCode plugin that tracks each session's GitHub and GitLab issues and PRs/MRs: title prefixes, a PR/MR status footer, and review notifications",
   "author": {
     "name": "Pedro Pombeiro",
@@ -19,7 +19,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
-    "directory": "packages/forge-session"
+    "directory": "packages/forgekeeper"
   },
   "publishConfig": {
     "access": "public"

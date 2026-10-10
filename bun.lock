@@ -40,6 +40,16 @@
         "@opencode/plugin": "^2.0.0",
       },
     },
+    "packages/forgekeeper": {
+      "name": "opencode-forgekeeper",
+      "version": "0.0.0",
+      "peerDependencies": {
+        "@opencode/plugin": "^2.0.26",
+        "@opentui/core": ">=0.5.8",
+        "@opentui/solid": ">=0.5.8",
+        "solid-js": ">=1.9.0",
+      },
+    },
     "packages/homeassistant": {
       "name": "opencode-homeassistant",
       "version": "1.0.2",
@@ -758,6 +768,8 @@
     "opencode-atuin-history": ["opencode-atuin-history@workspace:packages/atuin-history"],
 
     "opencode-forge-session-title": ["opencode-forge-session-title@workspace:packages/forge-session-title"],
+
+    "opencode-forgekeeper": ["opencode-forgekeeper@workspace:packages/forgekeeper"],
 
     "opencode-homeassistant": ["opencode-homeassistant@workspace:packages/homeassistant"],
 
