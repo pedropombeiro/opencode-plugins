@@ -107,12 +107,38 @@ describe('footerSegments', () => {
     expect(footerSegments({ loading: true })).toEqual([]);
   });
 
-  test('distinguishes a failed lookup from no MR', () => {
+  test('warns about missing status only for explicit targets', () => {
     const error = { kind: 'auth' as const, message: 'GitLab authentication failed', at: 0 };
-    expect(text({ loading: false, error })).toBe('PR/MR status unavailable');
+    expect(footerSegments({ loading: false, error })).toEqual([]);
+    expect(
+      footerSegments({ lookup: { kind: 'none', reason: 'Detached HEAD' }, loading: false, error }),
+    ).toEqual([]);
+    expect(text({ loading: false, error, targeted: true })).toBe('PR/MR status unavailable');
+    expect(text({ loading: true, error, targeted: true })).toBe('PR/MR status unavailable');
+    const unresolved = { kind: 'none' as const, reason: 'Not found', explicitTarget: true };
+    expect(text({ lookup: unresolved, loading: false, targeted: true })).toBe(
+      'PR/MR status unavailable',
+    );
+    expect(text({ lookup: unresolved, loading: true, targeted: true })).toBe(
+      'PR/MR status unavailable',
+    );
     expect(text(snapshot([mr()], { error }))).toBe(
       '!4281 · CI failed · 2 unresolved threads · stale',
     );
+  });
+
+  test('keeps an explicit target quiet until its first lookup finishes', () => {
+    for (const loading of [false, true]) {
+      expect(footerSegments({ loading, targeted: true })).toEqual([]);
+      expect(footerSegments(snapshot([], { loading, targeted: true }))).toEqual([]);
+      expect(
+        footerSegments({
+          lookup: { kind: 'none', reason: 'Detached HEAD' },
+          loading,
+          targeted: true,
+        }),
+      ).toEqual([]);
+    }
   });
 
   test('does not pick one of several MRs', () => {

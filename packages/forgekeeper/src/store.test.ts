@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { Repository } from './git';
 import { ForgeError, type ReviewRequest } from './forge';
-import { createStatusStore, type Lookup } from './store';
+import { createStatusStore, TargetLookupError, type Lookup } from './store';
 import { flush } from './testing';
 
 const repository = {
@@ -165,6 +165,65 @@ describe('createStatusStore', () => {
     await store.refresh('/a');
     expect(store.get('/a').error).toBeUndefined();
     expect(store.get('/a').lookup).toEqual(found());
+    store.dispose();
+  });
+
+  test('marks failed lookups of explicit targets, keeping the cause', async () => {
+    let attempt = 0;
+    const { store } = harness(async () => {
+      if (++attempt === 1)
+        throw new TargetLookupError(new ForgeError('auth', 'GitLab authentication failed'));
+      throw new Error('Session read failed');
+    });
+    await store.refresh('/a');
+    expect(store.get('/a')).toMatchObject({
+      error: { kind: 'auth', message: 'GitLab authentication failed' },
+      targeted: true,
+    });
+    // A failure before the targets are known keeps the mark.
+    await store.refresh('/a');
+    expect(store.get('/a')).toMatchObject({
+      error: { message: 'Session read failed' },
+      targeted: true,
+    });
+    store.dispose();
+  });
+
+  test('marks explicit targets from the lookup, and keeps the mark through invalidation', async () => {
+    let lookup: Lookup = { kind: 'none', reason: 'Not found', explicitTarget: true };
+    let fail = false;
+    const { store } = harness(async () => {
+      if (fail) throw new Error('Session read failed');
+      return lookup;
+    });
+    await store.refresh('/a');
+    expect(store.get('/a').targeted).toBe(true);
+    fail = true;
+    store.invalidate('/a');
+    await store.refresh('/a');
+    expect(store.get('/a').targeted).toBe(true);
+    fail = false;
+    lookup = { kind: 'none', reason: 'Detached HEAD' };
+    await store.refresh('/a');
+    expect(store.get('/a').targeted).toBeUndefined();
+    store.dispose();
+  });
+
+  test('publishes a target change as a new revision', async () => {
+    const { store, changes } = harness(async () => found());
+    await store.refresh('/a');
+    const revision = store.get('/a').revision ?? 0;
+    const published = changes();
+    store.setTargeted('/a', true);
+    expect(store.get('/a').targeted).toBe(true);
+    expect(store.get('/a').revision).toBeGreaterThan(revision);
+    expect(changes()).toBe(published + 1);
+    // An unchanged mark publishes nothing.
+    store.setTargeted('/a', true);
+    expect(changes()).toBe(published + 1);
+    store.setTargeted('/a', false);
+    expect(store.get('/a').targeted).toBeUndefined();
+    expect(changes()).toBe(published + 2);
     store.dispose();
   });
 

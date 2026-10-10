@@ -126,6 +126,23 @@ describe('createStatusClient', () => {
     expect(app.client.snapshot({ directory: '/a', key: 'ses_1' })).toEqual(found('1'));
   });
 
+  test('keeps whether a failure concerns explicit targets while the server is unavailable', async () => {
+    const app = harness();
+    const error = { kind: 'auth' as const, message: 'GitLab authentication failed', at: 0 };
+    app.statuses.set('/a', {
+      ses_1: { loading: false, error, targeted: true },
+      ses_2: { loading: false, error },
+    });
+    app.client.show({ directory: '/a', key: 'ses_1' });
+    app.client.show({ directory: '/a', key: 'ses_2' });
+    await app.settle();
+    app.fail(true);
+    app.client.heartbeat();
+    await app.settle();
+    expect(app.client.snapshot({ directory: '/a', key: 'ses_1' }).targeted).toBe(true);
+    expect(app.client.snapshot({ directory: '/a', key: 'ses_2' }).targeted).toBeUndefined();
+  });
+
   test('keeps the newest snapshot when an older RPC response arrives after an event', async () => {
     let answer = (_value: Output<'watch'>) => {};
     const client = createStatusClient({

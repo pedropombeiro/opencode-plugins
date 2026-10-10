@@ -1,8 +1,10 @@
 import { ForgeError, type ErrorKind, type ReviewRequest } from './forge';
 import type { Repository } from './git';
 
+// `explicitTarget` on `none` marks explicit PR/MR targets that couldn't be
+// resolved, unlike targets that aren't PRs/MRs, such as issues.
 export type Lookup =
-  | { kind: 'none'; reason: string }
+  | { kind: 'none'; reason: string; explicitTarget?: boolean }
   // `repository` is set for branch lookups. A session target lookup sets
   // `sessionTarget` instead, a display label for where the PR/MR came from,
   // because it ignores the checked-out branch.
@@ -18,14 +20,27 @@ export type Lookup =
       failed?: { url: string; reason: string }[];
     };
 
+// Thrown when no explicit PR/MR target could be looked up. The failure
+// concerns PRs/MRs that the session is known to work on, unlike a failed
+// branch lookup, which may concern no PR/MR at all.
+export class TargetLookupError extends Error {
+  constructor(readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
 // `revision` grows with every change, and across server reloads, so a client
 // that gets snapshots over several channels, such as RPC responses and
 // events, can keep the newest one.
+// `targeted` is set while the key has explicit PR/MR targets, as far as the
+// last lookup or target change knows. It outlasts failures that happen before
+// the targets are known, such as a failed session read.
 export interface Snapshot {
   revision?: number;
   lookup?: Lookup;
   fetchedAt?: number;
   error?: { kind: ErrorKind; message: string; at: number };
+  targeted?: boolean;
   loading: boolean;
 }
 
@@ -132,7 +147,13 @@ export function createStatusStore(options: StoreOptions) {
           if (disposed || value.invalidated) return;
           const previous = value.snapshot.lookup;
           value.failures = 0;
-          update(key, value, { lookup, fetchedAt: now(), error: undefined, loading: false });
+          update(key, value, {
+            lookup,
+            fetchedAt: now(),
+            error: undefined,
+            targeted: lookup.explicitTarget === true ? true : undefined,
+            loading: false,
+          });
           // A failing callback must not leave the load in flight forever.
           try {
             if (!disposed) options.onLoad?.(key, previous, lookup);
@@ -147,14 +168,16 @@ export function createStatusStore(options: StoreOptions) {
         (error: unknown) => {
           if (disposed || value.invalidated) return;
           value.failures++;
-          const known = error instanceof ForgeError;
+          const target = error instanceof TargetLookupError;
+          const cause = target ? error.cause : error;
           update(key, value, {
             loading: false,
             error: {
-              kind: known ? error.kind : 'request',
-              message: error instanceof Error ? error.message : String(error),
+              kind: cause instanceof ForgeError ? cause.kind : 'request',
+              message: cause instanceof Error ? cause.message : String(cause),
               at: now(),
             },
+            ...(target ? { targeted: true } : {}),
           });
         },
       )
@@ -213,6 +236,13 @@ export function createStatusStore(options: StoreOptions) {
       if (value.inflight) value.invalidated = true;
       else if (value.refs > 0) void refresh(key);
       else value.stale = true;
+    },
+    // Records whether the key has explicit PR/MR targets, such as after a
+    // target change, before the next lookup confirms it.
+    setTargeted(key: string, targeted: boolean) {
+      const value = entries.get(key);
+      if (!value || disposed || (value.snapshot.targeted === true) === targeted) return;
+      update(key, value, { targeted: targeted ? true : undefined });
     },
     dispose() {
       disposed = true;

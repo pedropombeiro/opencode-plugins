@@ -101,8 +101,13 @@ function targetsSummary(requests: ReviewRequest[]): Segment[] {
 export function footerSegments(snapshot: Snapshot): Segment[] {
   const { lookup, error } = snapshot;
   const stale: Segment[] = error ? [{ text: 'stale', tone: 'warning', essential: true }] : [];
+  // Without a PR/MR to show, only explicit PR/MR targets warn. A failed
+  // branch lookup, such as in a new session, may concern no PR/MR at all;
+  // /forge-status still explains it.
   if (!lookup || lookup.kind === 'none' || lookup.requests.length === 0) {
-    return error ? [{ text: 'PR/MR status unavailable', tone: 'warning' }] : [];
+    return snapshot.targeted && (error || lookup?.explicitTarget)
+      ? [{ text: 'PR/MR status unavailable', tone: 'warning' }]
+      : [];
   }
   if (lookup.failed?.length) {
     stale.unshift({

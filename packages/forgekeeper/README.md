@@ -148,6 +148,11 @@ reuses a branch's PR/MR number for up to 10 minutes.
 Explicit targets that aren't PRs/MRs, such as issues, show no status. Unresolved explicit
 PRs/MRs never fall back to the branch.
 
+Without a PR/MR to show, the footer stays empty, even when a lookup fails, such as in a new
+session before the server answers. It shows `PR/MR status unavailable` only when none of
+the session's explicit PR/MR targets can be looked up or found. `/forge-status` explains
+why.
+
 The server runs at most four `glab` or `gh` commands at once for status and review
 feedback, across all sessions. When some target lookups fail, the footer shows the others
 and counts the failures as `N unavailable`. A target whose lookup failed with an error

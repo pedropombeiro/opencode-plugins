@@ -1,7 +1,7 @@
 import type { ReviewRequest } from './forge';
 import { parseUrl, traits, type ForgeCatalog } from './forges';
 import { CONCURRENCY, mapLimit } from './limit';
-import type { Lookup } from './store';
+import { TargetLookupError, type Lookup } from './store';
 import { sameRef, type SessionTarget } from './target';
 
 export interface Hints {
@@ -78,13 +78,15 @@ async function locateTargets(
     });
   });
 
-  if (error !== undefined && !outcomes.some((outcome) => 'request' in outcome)) throw error;
+  if (error !== undefined && !outcomes.some((outcome) => 'request' in outcome))
+    throw new TargetLookupError(error);
   // Never fall back to the branch, which may have a different PR/MR.
   if (found.length === 0)
     return {
       kind: 'none',
       reason:
         requests.length === 1 ? failed[0].reason : 'No session target PR/MR could be resolved',
+      explicitTarget: true,
     };
   return {
     kind: 'found',

@@ -254,7 +254,7 @@ export async function setupServer(
             targets: result.targets,
             ...(state.prefix ? { prefix: state.prefix } : {}),
           });
-          watcher?.targetsChanged(sessionID);
+          watcher?.targetsChanged(sessionID, result.targets);
           await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
           await update(sessionID);
         });

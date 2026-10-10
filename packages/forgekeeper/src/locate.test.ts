@@ -9,6 +9,7 @@ import type {
 import { kinds, traits, type ForgeCatalog } from './forges';
 import type { RemoteProject, Repository, RepositoryLookup } from './git';
 import { locate } from './locate';
+import { TargetLookupError } from './store';
 import { classifyTargets } from './target';
 import { deferred, until, type Deferred } from './testing';
 
@@ -161,6 +162,7 @@ describe('locate', () => {
     ).toEqual({
       kind: 'none',
       reason: 'Unsupported session target host',
+      explicitTarget: true,
     });
   });
 
@@ -170,13 +172,14 @@ describe('locate', () => {
     expect(await locate(forges, { directory: '/repo', targets: target(merge.url) })).toEqual({
       kind: 'none',
       reason: 'Explicit PR/MR target could not be resolved',
+      explicitTarget: true,
     });
-    expect(
-      await locate(forges, {
-        directory: '/repo',
-        targets: target('https://gitlab.com/g/p/-/issues/3'),
-      }),
-    ).toMatchObject({ kind: 'none' });
+    const issue = await locate(forges, {
+      directory: '/repo',
+      targets: target('https://gitlab.com/g/p/-/issues/3'),
+    });
+    expect(issue).toMatchObject({ kind: 'none' });
+    expect(issue.kind === 'none' && issue.explicitTarget).toBeFalsy();
     expect(gitlab.calls).toEqual(['number g/p 45']);
   });
 
@@ -233,9 +236,9 @@ describe('locate', () => {
   test('throws when every lookup of several targets fails, and explains when none resolves', async () => {
     const failing = new FailingForge(new Map(), new Set(['1', '2']));
     const urls = targets(mergeOf('1').url, mergeOf('2').url);
-    await expect(
-      locate(catalog({ gitlab: failing }), { directory: '/repo', targets: urls }),
-    ).rejects.toThrow('glab failed');
+    const rejection = locate(catalog({ gitlab: failing }), { directory: '/repo', targets: urls });
+    await expect(rejection).rejects.toThrow('glab failed');
+    await expect(rejection).rejects.toBeInstanceOf(TargetLookupError);
     expect(
       await locate(catalog({ gitlab: new FailingForge(new Map()) }), {
         directory: '/repo',
@@ -244,6 +247,7 @@ describe('locate', () => {
     ).toEqual({
       kind: 'none',
       reason: 'No session target PR/MR could be resolved',
+      explicitTarget: true,
     });
     expect(
       await locate(catalog({}), {

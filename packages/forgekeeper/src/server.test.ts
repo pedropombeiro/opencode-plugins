@@ -9,6 +9,7 @@ import type {
   ReviewRequest,
 } from './forge';
 import { kinds, traits, type ForgeCatalog } from './forges';
+import { footerSegments } from './format';
 import type { RemoteProject } from './git';
 import type { TitleLookups } from './lookups';
 import { FETCH_INTERVAL, SETTLE_TIME } from './human-review-watch';
@@ -650,6 +651,28 @@ describe('PR/MR status', () => {
     expect((await app.watch(['one'], 'one')).statuses.one.lookup).toMatchObject({
       requests: [{ title: 'Add things' }],
     });
+    await app.cleanup();
+  });
+
+  test('publishes whether the targets include a PR/MR before looking them up', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.watch(['one'], 'one');
+    await settle();
+    expect(app.lastStatus()?.snapshot.targeted).toBeUndefined();
+
+    forge.gated = true;
+    await app.set({ target: projectA });
+    await settle();
+    expect(app.lastStatus()?.snapshot).toMatchObject({ loading: true, targeted: true });
+    expect(footerSegments(app.lastStatus()!.snapshot)).toEqual([]);
+    forge.open();
+    await settle();
+
+    await app.set({ target: 'https://gitlab.com/group/a/-/issues/2' });
+    await settle();
+    expect(app.lastStatus()?.snapshot.targeted).toBeUndefined();
     await app.cleanup();
   });
 

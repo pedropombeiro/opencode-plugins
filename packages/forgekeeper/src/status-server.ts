@@ -306,7 +306,16 @@ export async function setupStatus(
   return {
     service,
     // Discards lookups of the old targets and looks the session up again.
-    targetsChanged: (sessionID: string) => service.invalidate(sessionID),
+    // Whether the new targets include a PR/MR is known now, so the footer
+    // doesn't depend on that lookup succeeding.
+    targetsChanged(sessionID: string, targets: readonly Target[]) {
+      const classified = classifyTargets(targetOutput(targets)) ?? [];
+      service.setTargeted(
+        sessionID,
+        classified.some((target) => target.kind === 'merge-request'),
+      );
+      service.invalidate(sessionID);
+    },
     // A title reference only counts without targets.
     async titleChanged(sessionID: string) {
       if (!service.keys().includes(sessionID)) return;

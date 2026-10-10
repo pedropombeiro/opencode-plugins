@@ -205,6 +205,7 @@ export function createStatusService(options: StatusServiceOptions) {
       store.invalidate(key);
       if (!disposed && !holds.has(key) && liveLeases(key).length > 0) void store.refresh(key);
     },
+    setTargeted: (key: string, targeted: boolean) => store.setTargeted(key, targeted),
     // After an event that may have changed the PRs/MRs, such as a turn ending.
     notify: (key: string) => store.notify(key),
     keys: () => store.keys(),
