@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.1.0...opencode-forgekeeper-2.1.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **forgekeeper:** show unavailable status only for established targets ([54ecb9b](https://github.com/pedropombeiro/opencode-plugins/commit/54ecb9b4c919837c26572ecdfc50a09d091b25fd))
+
 ## [2.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.0.0...opencode-forgekeeper-2.1.0) (2026-10-10)
 
 
