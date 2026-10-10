@@ -29,8 +29,13 @@ There are no npm scripts. Do not add a `"scripts"` key to any `package.json`.
 Plugins target the OpenCode 2 plugin API (`@opencode/plugin`). See
 <https://opencode.ai/v2/docs/build/plugins>.
 
-- Server plugins live in `src/index.ts`; CLI (TUI) plugins live in `src/tui.ts`. The build compiles
-  whichever exist, and packages export them as `.` and `./tui`.
+- Server plugins live in `src/index.ts`; CLI (TUI) plugins live in `src/tui.ts`, or `src/tui.tsx`
+  when they render JSX. `.mise/bundle.ts` compiles whichever exist, and packages export them as `.`
+  and `./tui`.
+- JSX goes through OpenTUI's Solid transform. The bundle keeps `solid-js` and `@opentui/*` external,
+  because OpenCode provides them at runtime. A package that renders JSX lists `@opentui/core`,
+  `@opentui/solid`, and `solid-js` as peer dependencies, and sets `"jsx": "preserve"` and
+  `"jsxImportSource": "@opentui/solid"` in its `tsconfig.json`.
 - Import `@opencode/plugin` and `@opencode/plugin/tui` with `import type` only, and default-export
   `{ id, setup } satisfies Plugin.Plugin` (or `Plugin.Definition` for TUI). `Plugin.define` is an
   identity function, so no runtime dependency is needed. The build marks the package as external as
@@ -46,7 +51,8 @@ Plugins target the OpenCode 2 plugin API (`@opencode/plugin`). See
 - Each package has its own `package.json` with name, version, description, and a peerDependency on
   `@opencode/plugin`
 - Each package extends `../../tsconfig.base.json` via its own `tsconfig.json`
-- Internal shared code lives in `packages/_shared/` without a `package.json`; it is bundled into each plugin
+- Internal shared code lives in `packages/_shared/` without a `package.json`; it is bundled into
+  each plugin
 
 ## Adding a new plugin
 
@@ -60,9 +66,11 @@ Verify by running `mise run test`, `mise run build`, and `mise run typecheck` su
 
 ## Releasing
 
-Releases are fully automated via [release-please](https://github.com/googleapis/release-please) and GitHub Actions. **Do NOT manually bump versions.**
+Releases are fully automated via [release-please](https://github.com/googleapis/release-please)
+and GitHub Actions. **Do NOT manually bump versions.**
 
-1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `fix:`, `feat:`, `chore:`).
+1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/)
+   (e.g. `fix:`, `feat:`, `chore:`).
 2. Release-please creates separate release PRs per package.
 3. Merge the release PR — this creates a GitHub Release and triggers npm publish.
 
