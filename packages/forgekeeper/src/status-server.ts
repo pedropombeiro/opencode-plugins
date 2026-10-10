@@ -63,9 +63,6 @@ const pendingPrefix = (sessionID: string) => `${PENDING_PREFIX}${encodeURICompon
 const pendingKey = (sessionID: string, url: string) =>
   `${pendingPrefix(sessionID)}${encodeURIComponent(url)}`;
 const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
-// Whole logs from before records had their own keys. They're removed, so the
-// first look at each PR/MR records a new baseline instead of replaying.
-const LEGACY_KEYS = ['status/humanReviewFeedback', 'status/automatedReviewPending'];
 
 // The title without the prefix this plugin wrote.
 export function userTitle(
@@ -297,10 +294,9 @@ export async function setupStatus(
   });
   invalidate = (sessionID) => service.invalidate(sessionID);
 
-  // Housekeeping, on the write queue so it doesn't hold up setup: removes the
-  // former whole logs, and feedback records not seen for a long time.
+  // Housekeeping, on the write queue so it doesn't hold up setup: removes
+  // feedback records not seen for a long time.
   write(async () => {
-    for (const key of LEGACY_KEYS) await ctx.storage.remove(key);
     const at = (deps.now ?? Date.now)();
     for (const { key, value } of await scanAll(FEEDBACK_PREFIX)) {
       if (isExpired(value as FeedbackRecord, at)) await ctx.storage.remove(key);

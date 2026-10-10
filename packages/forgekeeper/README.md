@@ -296,8 +296,9 @@ title prefix. It doesn't poll or send review notifications, and the CLI shows no
 
 ## RPC
 
-The server registers an [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) that the CLI
-uses, defined in `src/rpc.ts`:
+The server registers an [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) with the ID
+`opencode-forgekeeper`, defined in `src/rpc.ts`. The CLI uses it, and other plugins can call
+`target` and listen for `targetChanged`:
 
 - `target({ sessionID })` returns `{ url, issueUrl?, targets }` for explicit targets, and
   `{}` in branch mode. `targets` lists every target as `{ url, issueUrl? }`. `url` and
@@ -318,18 +319,25 @@ plugin instance watches its own sessions.
 
 ## Migrating from opencode-forge-session-title
 
-Replace `opencode-forge-session-title` with `opencode-forgekeeper` in `opencode.json`. Never
-load both: the server keeps `opencode-forge-session-title`'s plugin and RPC IDs, so the two
-would collide.
+Replace `opencode-forge-session-title` with `opencode-forgekeeper` in `opencode.json`. Upgrading
+from `opencode-forgekeeper` 1.x works the same way, because 1.x used the same IDs as
+`opencode-forge-session-title`.
 
-| Entry point | Plugin ID                      | Stored state                                                                             |
-| ----------- | ------------------------------ | ---------------------------------------------------------------------------------------- |
-| Server      | `opencode-forge-session-title` | Session targets, owned title prefixes, human-review baselines, and pending notifications |
-| CLI         | `pedropombeiro.forgekeeper`    | None                                                                                     |
+| Entry point | Plugin ID                   | Stored state                                                                             |
+| ----------- | --------------------------- | ---------------------------------------------------------------------------------------- |
+| Server      | `opencode-forgekeeper`      | Session targets, owned title prefixes, human-review baselines, and pending notifications |
+| CLI         | `pedropombeiro.forgekeeper` | None                                                                                     |
 
-Because the IDs match, stored targets carry over, and callers of the `target` RPC keep working.
-The server reads a session's single stored `target` as a list of one, and writes `targets` from
-the next change on.
+OpenCode scopes plugin storage by plugin ID, so nothing stored under the former ID,
+`opencode-forge-session-title`, carries over:
+
+- Sessions start in branch-based naming. Ask the agent to set their targets again.
+- A title that kept a single-reference prefix from before, such as `[!456] Review`, can get a
+  second prefix, such as `[#12, !45] [!456] Review`. Remove the older one by hand. Older prefixes
+  with two references, such as `[#12, !45]`, are replaced automatically.
+- The first look at each PR/MR records a new review baseline, so comments posted before then
+  aren't announced.
+- Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
 With default options, the new footer and review notifications start right away, and
 notifications resume the session. Set `reviewStatus` to `false` to keep only titles, or

@@ -22,7 +22,7 @@ const SKIP_BRANCHES = new Set(['master', 'main', 'HEAD', 'develop']);
 // Stored per session. `prefix` is the title prefix this plugin last wrote, so
 // it can be replaced without touching text the user added. Before sessions
 // could have several targets, the state held a single `target`.
-type StoredState = { target?: Target; targets?: Target[]; prefix?: string };
+type StoredState = { targets?: Target[]; prefix?: string };
 type SessionState = { targets: Target[]; prefix?: string };
 
 const GUIDANCE = [
@@ -97,11 +97,7 @@ export async function setupServer(
     const started = revision(sessionID);
     const stored =
       ((await ctx.storage.get(`sessions/${sessionID}`)) as StoredState | undefined) ?? {};
-    const targets = Array.isArray(stored.targets)
-      ? stored.targets
-      : stored.target
-        ? [stored.target]
-        : [];
+    const targets = Array.isArray(stored.targets) ? stored.targets : [];
     if (revision(sessionID) === started) known.set(sessionID, targets);
     return { targets, ...(stored.prefix ? { prefix: stored.prefix } : {}) };
   }

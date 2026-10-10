@@ -462,9 +462,9 @@ describe('session targets', () => {
     await reloaded.cleanup();
   });
 
-  test('reads a single target stored before sessions could have several', async () => {
+  test('keeps the inferred issue of a stored target when adding another', async () => {
     const storage = new Map<string, unknown>([
-      ['sessions/one', { target: { url: mr, branchIssue: '123' }, prefix: '[#123, !45]' }],
+      ['sessions/one', { targets: [{ url: mr, branchIssue: '123' }], prefix: '[#123, !45]' }],
     ]);
     const app = await harness({ storage, sourceBranches: new Map([['456', '999-other']]) });
     expect(await app.target()).toEqual({ url: mr, targets: [{ url: mr }] });

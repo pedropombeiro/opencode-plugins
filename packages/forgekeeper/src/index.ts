@@ -1,11 +1,8 @@
-// Merges opencode-forge-session-title and forge-review-status. This server
-// entry point owns each session's targets: the `set_session_target` tool, the
-// agent guidance, and the title prefix. It also watches the PRs/MRs of the
-// sessions that CLIs show and tells sessions about their reviews.
-// opencode.json loads this directory through a path entry; OpenCode then loads
-// tui.tsx, which renders the status that this entry point serves, in the CLI.
-//
-// The ID is opencode-forge-session-title's, so stored targets carry over.
+// This server entry point owns each session's targets: the
+// `set_session_target` tool, the agent guidance, and the title prefix. It
+// also watches the PRs/MRs of the sessions that CLIs show and tells sessions
+// about their reviews. OpenCode loads the package's CLI entry point, tui.tsx,
+// which renders the status that this entry point serves.
 import type { Plugin } from '@opencode/plugin';
 import { exec, execWithTimeout } from './exec';
 import { Forges, hostsFrom } from './forges';
@@ -14,7 +11,7 @@ import { createTitleLookups } from './lookups';
 import { setupServer } from './server';
 
 export default {
-  id: 'opencode-forge-session-title',
+  id: 'opencode-forgekeeper',
   async setup(ctx) {
     const hosts = hostsFrom((ctx.options ?? {}) as Record<string, unknown>);
     // Status polling and feedback fetches share one limit across sessions,
