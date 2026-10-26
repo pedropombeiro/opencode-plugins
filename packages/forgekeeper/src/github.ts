@@ -1,5 +1,7 @@
 import type { Exec } from './exec';
 import {
+  type CopilotReview,
+  type AutomatedReviewStatus,
   ForgeError,
   humanize,
   ownedBy,
@@ -12,6 +14,7 @@ import {
   type ReviewRef,
 } from './forge';
 import type { RemoteProject, Repository } from './git';
+import { fetchComments } from './github-feedback';
 import { gitlabTraits } from './gitlab';
 import { query, typed, type Transport, type Typed } from './graphql';
 
@@ -44,16 +47,24 @@ interface Pull {
   baseRefName: string;
   updatedAt: string;
   reviewThreads: Connection<{ isResolved: boolean }>;
-  reviewRequests: Connection<{ requestedReviewer?: { login?: string; name?: string } }>;
+  reviewRequests: Connection<{
+    requestedReviewer?: { __typename?: string; login?: string; name?: string } | null;
+  }>;
+  copilotReviews?: {
+    nodes?: Array<{ id: string; state: string; comments: { totalCount: number } } | null> | null;
+  } | null;
   commits: {
     nodes: Array<{ commit: { statusCheckRollup?: { contexts: Connection<Check> } | null } }>;
   };
 }
 
+const COPILOT_AUTHOR = 'copilot-pull-request-reviewer[bot]';
+
 const fields = `number title url state isDraft mergeable reviewDecision headRefOid headRefName
   headRepository { nameWithOwner } baseRepository { nameWithOwner } baseRefName updatedAt
   reviewThreads(first:100) { nodes { isResolved } pageInfo { hasNextPage endCursor } }
-  reviewRequests(first:100) { nodes { requestedReviewer { ... on User { login } ... on Team { name } } } pageInfo { hasNextPage } }
+  reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
+  copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
   commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
     nodes { __typename ... on CheckRun { status conclusion detailsUrl } ... on StatusContext { state targetUrl } }
     pageInfo { hasNextPage endCursor }
@@ -184,7 +195,47 @@ export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
   details: (request) => [
     `Review decision: ${request.reviewDecision ? humanize(request.reviewDecision) : 'not reported'}`,
   ],
+  automatedReview: {
+    name: 'GitHub Copilot',
+    status: (request) => copilotStatus(request.copilotReview),
+  },
+  feedback: {
+    async fetch(run, directory, request) {
+      const ref = githubTraits.parseUrl(request.url);
+      return ref
+        ? fetchComments(ghGraphQL(run, directory), ref.host, ref.project, ref.iid)
+        : undefined;
+    },
+  },
 };
+
+function copilotStatus(review: CopilotReview | undefined): AutomatedReviewStatus | undefined {
+  if (!review) return undefined;
+  const feedback = review.comments > 0 && !review.dismissed;
+  const label = review.dismissed ? 'dismissed' : feedback ? 'commented' : 'no comments';
+  const completed = review.reviewID ? { id: review.reviewID, feedback, label } : undefined;
+
+  if (review.requested) return { state: 'running', label: 'reviewing', completed };
+  if (!completed) return undefined;
+  return { state: feedback ? 'feedback' : 'settled', label, completed };
+}
+
+const isCopilotReviewer = (login: string | undefined) =>
+  /^copilot-pull-request-reviewer(\[bot\])?$/i.test(login ?? '');
+
+function copilotReview(node: Pull): CopilotReview | undefined {
+  const requested = node.reviewRequests.nodes.some((request) =>
+    isCopilotReviewer(request.requestedReviewer?.login),
+  );
+  const latest = node.copilotReviews?.nodes?.find((review) => review);
+  if (!requested && !latest) return undefined;
+  return {
+    requested,
+    reviewID: latest?.id,
+    comments: latest?.comments.totalCount ?? 0,
+    ...(latest?.state === 'DISMISSED' ? { dismissed: true } : {}),
+  };
+}
 
 // Reads GitHub pull requests through `gh api graphql`, using gh's login.
 export class GitHubForge implements Forge {
@@ -355,7 +406,39 @@ export class GitHubForge implements Forge {
     return { nodes: contexts, complete: !cursor?.hasNextPage };
   }
 
+  private async reviewers(host: string, node: Pull): Promise<Pull['reviewRequests']> {
+    const nodes = [...node.reviewRequests.nodes];
+    let reviewerPage = node.reviewRequests.pageInfo;
+    for (let count = 1; reviewerPage?.hasNextPage && count < MAX_PAGES; count++) {
+      if (!reviewerPage.endCursor)
+        throw new ForgeError('request', 'GitHub reviewer pagination cursor missing');
+      const [owner, repo] = node.baseRepository.nameWithOwner.split('/');
+      const data = await this.graphql(
+        host,
+        query<RepositoryData<{ pullRequest?: { reviewRequests: Pull['reviewRequests'] } | null }>>(
+          `query($owner:String!,$repo:String!,$number:Int!,$after:String!) {
+            repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
+              reviewRequests(first:100,after:$after) {
+                nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            } }
+          }`,
+        ),
+        { owner, repo, number: node.number, after: reviewerPage.endCursor },
+      );
+      const next = data.repository?.pullRequest?.reviewRequests;
+      if (!next) throw new ForgeError('request', 'GitHub reviewers unavailable');
+      nodes.push(...next.nodes);
+      reviewerPage = next.pageInfo;
+    }
+    if (reviewerPage?.hasNextPage)
+      throw new ForgeError('request', 'GitHub reviewers exceeded the pagination limit');
+    return { nodes, pageInfo: reviewerPage };
+  }
+
   private async normalize(host: string, node: Pull): Promise<GitHubPullRequest> {
+    const reviewers = await this.reviewers(host, node);
     const [threads, contexts] = [await this.threads(host, node), await this.contexts(host, node)];
     return {
       forge: 'github',
@@ -368,11 +451,13 @@ export class GitHubForge implements Forge {
       conflictsKnown: node.mergeable !== 'UNKNOWN',
       approved: node.reviewDecision === 'APPROVED',
       reviewDecision: node.reviewDecision ?? undefined,
-      awaitingReviewers: node.reviewRequests.nodes.flatMap((request) => {
+      copilotReview: copilotReview({ ...node, reviewRequests: reviewers }),
+      awaitingReviewers: reviewers.nodes.flatMap((request) => {
         const reviewer = request.requestedReviewer;
+        if (reviewer?.__typename === 'Bot') return [];
         return reviewer?.login ? [reviewer.login] : reviewer?.name ? [reviewer.name] : [];
       }),
-      reviewersComplete: !node.reviewRequests.pageInfo?.hasNextPage,
+      reviewersComplete: !reviewers.pageInfo?.hasNextPage,
       targetProject: node.baseRepository.nameWithOwner,
       targetBranch: node.baseRefName,
       headSha: node.headRefOid,

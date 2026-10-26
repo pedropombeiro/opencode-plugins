@@ -25,6 +25,24 @@ const mr = (duoReviewState?: string, iid = '4281', state = 'opened'): GitLabMerg
     duoReviewState,
   }) as GitLabMergeRequest;
 
+const pr = (
+  copilotReview?: GitHubPullRequest['copilotReview'],
+  iid = '7',
+  state = 'opened',
+): GitHubPullRequest =>
+  ({
+    forge: 'github',
+    iid,
+    url: `https://github.com/owner/repo/pull/${iid}`,
+    state,
+    copilotReview,
+  }) as GitHubPullRequest;
+
+const requested = pr({ requested: true, comments: 0 });
+const commented = (id: string, iid = '7') =>
+  pr({ requested: false, reviewID: id, comments: 2 }, iid);
+const clean = (id: string) => pr({ requested: false, reviewID: id, comments: 0 });
+
 const found = (...requests: ReviewRequest[]): Lookup => ({
   kind: 'found',
   explicitTarget: true,
@@ -47,6 +65,17 @@ describe('isReviewRunning', () => {
 });
 
 describe('finishedReviews', () => {
+  test('detects a completed review while the next request remains pending', () => {
+    const pending = pr({ requested: true, reviewID: 'R_2', comments: 2 });
+    expect(finishedReviews(found(commented('R_1')), found(pending))).toEqual([pending]);
+    expect(finishedReviews(found(pending), found(commented('R_2')))).toEqual([]);
+  });
+
+  test('ignores a dismissed latest review instead of announcing an older one', () => {
+    const dismissed = pr({ requested: false, reviewID: 'R_2', comments: 2, dismissed: true });
+    expect(finishedReviews(found(commented('R_1')), found(dismissed))).toEqual([]);
+    expect(automatedReview(dismissed)?.state).toBe('settled');
+  });
   test.each(['REVIEWED', 'REQUESTED_CHANGES'])('reports a review that finished as %s', (state) => {
     expect(finishedReviews(found(mr('REVIEW_STARTED')), found(mr(state)))).toEqual([mr(state)]);
   });
@@ -61,6 +90,44 @@ describe('finishedReviews', () => {
   test('ignores a review that was already finished on the first load', () => {
     expect(finishedReviews(undefined, found(mr('REVIEWED')))).toEqual([]);
     expect(finishedReviews(found(mr('REVIEWED')), found(mr('REVIEWED')))).toEqual([]);
+  });
+
+  test('reports a Copilot review that finished with inline comments', () => {
+    expect(finishedReviews(found(requested), found(commented('R_1')))).toEqual([commented('R_1')]);
+  });
+
+  test('reports a Copilot review that started and finished between two polls', () => {
+    expect(finishedReviews(found(pr()), found(commented('R_1')))).toEqual([commented('R_1')]);
+    expect(finishedReviews(found(commented('R_1')), found(commented('R_2')))).toEqual([
+      commented('R_2'),
+    ]);
+    expect(finishedReviews(found(clean('R_1')), found(commented('R_2')))).toEqual([
+      commented('R_2'),
+    ]);
+  });
+
+  test("doesn't report a Copilot review that was already there", () => {
+    expect(finishedReviews(found(commented('R_1')), found(commented('R_1')))).toEqual([]);
+    expect(finishedReviews(undefined, found(commented('R_1')))).toEqual([]);
+    expect(
+      finishedReviews({ kind: 'none', reason: 'Detached HEAD' }, found(commented('R_1'))),
+    ).toEqual([]);
+  });
+
+  test("doesn't report a Copilot review of a PR that the previous lookup lacked", () => {
+    expect(finishedReviews(found(commented('R_1', '8')), found(commented('R_1')))).toEqual([]);
+  });
+
+  test("doesn't report a review again when a new request is canceled", () => {
+    const again = pr({ requested: true, reviewID: 'R_1', comments: 2 });
+    expect(finishedReviews(found(again), found(commented('R_1')))).toEqual([]);
+    expect(finishedReviews(found(again), found(commented('R_2')))).toEqual([commented('R_2')]);
+  });
+
+  test("ignores a Copilot review without inline comments or one that's still running", () => {
+    expect(finishedReviews(found(requested), found(clean('R_1')))).toEqual([]);
+    expect(finishedReviews(found(pr()), found(clean('R_1')))).toEqual([]);
+    expect(finishedReviews(found(commented('R_1')), found(requested))).toEqual([]);
   });
 
   test('matches MRs by URL', () => {
@@ -156,6 +223,59 @@ describe('createAutomatedReviewWatcher', () => {
     // The same feedback without a new transition sends nothing.
     await watcher.observe('ses_1', found(mr('REQUESTED_CHANGES')), found(mr('REQUESTED_CHANGES')));
     expect(sent).toHaveLength(1);
+  });
+
+  test('notifies about a Copilot review that finished between two polls, once', async () => {
+    const { watcher, sent } = harness();
+    await watcher.observe('ses_1', found(pr()), found(commented('R_1')));
+    expect(sent).toEqual([['ses_1', ['7 commented']]]);
+    await watcher.observe('ses_1', found(commented('R_1')), found(commented('R_1')));
+    expect(sent).toHaveLength(1);
+    await watcher.observe('ses_1', found(commented('R_1')), found(commented('R_2')));
+    expect(sent).toHaveLength(2);
+  });
+
+  test('does not replay a previously observed review when it reappears', async () => {
+    const { watcher, sent } = harness();
+    await watcher.observe('ses_1', undefined, found(commented('R_1')));
+    await watcher.observe('ses_1', found(commented('R_1')), found(commented('R_2')));
+    await watcher.observe('ses_1', found(commented('R_2')), found(commented('R_1')));
+    expect(sent).toEqual([['ses_1', ['7 commented']]]);
+  });
+
+  test('restores completed-review history across restarts', async () => {
+    const histories = new Map<string, { observed: string[]; delivered: string[] }>();
+    const sent: string[] = [];
+    const create = () =>
+      createAutomatedReviewWatcher({
+        isTarget: () => true,
+        readHistory: async (_sessionID, url) => histories.get(url),
+        writeHistory: (_sessionID, url, history) => histories.set(url, structuredClone(history)),
+        send: async (_sessionID, requests) => {
+          for (const request of requests) sent.push(automatedReview(request)!.completed!.id);
+        },
+      });
+    const first = create();
+    await first.observe('ses_1', undefined, found(commented('R_1')));
+    await first.observe('ses_1', found(commented('R_1')), found(commented('R_2')));
+    const restarted = create();
+    await restarted.observe('ses_1', undefined, found(commented('R_2')));
+    await restarted.observe('ses_1', undefined, found(commented('R_3')));
+    expect(sent).toEqual(['R_2', 'R_3']);
+    expect(histories.get(pr().url)?.delivered).toEqual(['R_2', 'R_3']);
+  });
+
+  test('describes completed feedback even while another review is requested', () => {
+    const pending = pr({ requested: true, reviewID: 'R_2', comments: 2 });
+    expect(reviewMessage([pending])).toContain('the state "commented"');
+    expect(reviewToast([pending]).message).toBe('Commented. Sent to the agent.');
+  });
+
+  test('describes a Copilot review in its notification', () => {
+    const message = reviewMessage([commented('R_1')]);
+    expect(message).toStartWith('GitHub Copilot finished reviewing #7');
+    expect(message).toContain("GitHub Copilot's new comments and discussion threads on the PR");
+    expect(reviewToast([commented('R_1')]).message).toBe('Commented. Sent to the agent.');
   });
 
   test('sends reviews of several targets that finished in one poll together', async () => {
@@ -290,14 +410,33 @@ describe('automated review capability', () => {
     expect(automatedReview(mr())).toBeUndefined();
   });
 
-  test('ignores forges without the capability', () => {
-    const pull = {
-      forge: 'github',
-      iid: '1',
-      url: 'https://github.com/o/r/pull/1',
-    } as GitHubPullRequest;
+  test('maps GitHub Copilot states', () => {
+    expect(automatedReview(requested)).toEqual({
+      name: 'GitHub Copilot',
+      state: 'running',
+      label: 'reviewing',
+    });
+    expect(automatedReview(commented('R_1'))).toEqual({
+      completed: { id: 'R_1', feedback: true, label: 'commented' },
+      name: 'GitHub Copilot',
+      state: 'feedback',
+      label: 'commented',
+    });
+    expect(automatedReview(clean('R_1'))).toMatchObject({ state: 'settled', label: 'no comments' });
+    expect(automatedReview(pr({ requested: true, reviewID: 'R_1', comments: 3 }))?.state).toBe(
+      'running',
+    );
+  });
+
+  test('ignores a PR that Copilot never reviewed', () => {
+    const pull = pr();
     expect(automatedReview(pull)).toBeUndefined();
     expect(isReviewRunning(found(pull))).toBe(false);
     expect(finishedReviews(found(pull), found(pull))).toEqual([]);
+  });
+
+  test('detects a running Copilot review', () => {
+    expect(isReviewRunning(found(requested))).toBe(true);
+    expect(isReviewRunning(found(commented('R_1')))).toBe(false);
   });
 });

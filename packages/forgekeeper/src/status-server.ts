@@ -8,6 +8,7 @@ import {
   notificationKey,
   type PendingDeliveries,
   type PendingDelivery,
+  type ReviewHistory,
 } from './automated-review-watch';
 import type { Exec } from './exec';
 import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
@@ -63,6 +64,8 @@ const pendingPrefix = (sessionID: string) => `${PENDING_PREFIX}${encodeURICompon
 const pendingKey = (sessionID: string, url: string) =>
   `${pendingPrefix(sessionID)}${encodeURIComponent(url)}`;
 const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
+const reviewHistoryKey = (sessionID: string, url: string) =>
+  `status/reviews/${encodeURIComponent(sessionID)}/${encodeURIComponent(url)}`;
 
 // The title without the prefix this plugin wrote.
 export function userTitle(
@@ -192,6 +195,12 @@ export async function setupStatus(
     ? createAutomatedReviewWatcher({
         isTarget,
         now: deps.now,
+        readHistory: async (sessionID, url) =>
+          (await ctx.storage.get(reviewHistoryKey(sessionID, url))) as ReviewHistory | undefined,
+        writeHistory: (sessionID, url, history) => {
+          const snapshot = { observed: [...history.observed], delivered: [...history.delivered] };
+          write(() => ctx.storage.set(reviewHistoryKey(sessionID, url), snapshot));
+        },
         async read(sessionID) {
           const deliveries: PendingDeliveries = {};
           for (const { value } of await scanAll(pendingPrefix(sessionID))) {

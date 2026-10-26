@@ -47,6 +47,15 @@ const seen = (baseline = 0, ...announced: string[]): SeenComments => ({
 });
 
 describe('eligibleFeedback', () => {
+  test('recognizes unseen IDs at the baseline timestamp', () => {
+    const comments = snapshot(comment('1', { order: 100 }), comment('2', { order: 100 }));
+    expect(
+      eligibleFeedback(comments, { ...seen(100), baselineIDs: ['1'] }, SETTLE_TIME).map(
+        (item) => item.id,
+      ),
+    ).toEqual(['2']);
+    expect(eligibleFeedback(comments, seen(100), SETTLE_TIME)).toEqual([]);
+  });
   test('requires a comment to stay unchanged for the settle time', () => {
     const comments = snapshot(comment('1', { editedAt: 0 }));
     expect(eligibleFeedback(comments, seen(), SETTLE_TIME - 1)).toEqual([]);

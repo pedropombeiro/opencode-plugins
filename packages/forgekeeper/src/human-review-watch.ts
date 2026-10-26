@@ -17,10 +17,9 @@ const TOUCH_INTERVAL = 24 * 60 * 60_000;
 const MAX_LINKS = 20;
 
 export interface FeedbackRecord {
-  // The highest comment order in the first complete snapshot. Comments at or
-  // below it predate watching, even if deleted comments later shift them into
-  // the window of newest comments that the forge reads.
+  // The highest comment order in the first complete snapshot.
   baseline: number;
+  baselineIDs?: string[];
   // IDs of comments already announced to the session.
   announced: string[];
   seenAt: number;
@@ -29,6 +28,7 @@ export interface FeedbackRecord {
 export interface FeedbackChange {
   // Only used when the record is created.
   baseline?: number;
+  baselineIDs?: string[];
   announced?: string[];
 }
 
@@ -48,7 +48,13 @@ export function applyFeedback(
 ): FeedbackRecord {
   const announced = [...(record?.announced ?? [])];
   for (const id of change.announced ?? []) if (!announced.includes(id)) announced.push(id);
-  return { baseline: record?.baseline ?? change.baseline ?? 0, announced, seenAt: now };
+  const baselineIDs = record?.baselineIDs ?? change.baselineIDs;
+  return {
+    baseline: record?.baseline ?? change.baseline ?? 0,
+    ...(baselineIDs ? { baselineIDs } : {}),
+    announced,
+    seenAt: now,
+  };
 }
 
 // Whether a record is old enough to drop. The next observation starts a fresh
@@ -66,6 +72,7 @@ export function recordFeedback(log: FeedbackLog, key: string, change: FeedbackCh
 
 export interface SeenComments {
   baseline: number;
+  baselineIDs?: string[];
   announced: Set<string>;
 }
 
@@ -74,7 +81,11 @@ export const baselineOf = (snapshot: FeedbackSnapshot) =>
   snapshot.comments.reduce((highest, comment) => Math.max(highest, comment.order), 0);
 
 const isNew = (comment: ReviewComment, seen: SeenComments) =>
-  comment.order > seen.baseline && !seen.announced.has(comment.id);
+  (comment.order > seen.baseline ||
+    (comment.order === seen.baseline &&
+      seen.baselineIDs !== undefined &&
+      !seen.baselineIDs.includes(comment.id))) &&
+  !seen.announced.has(comment.id);
 
 // Unresolved comments from people other than the viewer.
 const humanFeedback = (snapshot: FeedbackSnapshot) =>
@@ -155,14 +166,20 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
   const seen = (key: string, shared: FeedbackRecord | undefined): SeenComments | undefined => {
     const mine = local.get(key);
     if (!shared && !mine) return undefined;
+    const latest = (mine?.baseline ?? -1) >= (shared?.baseline ?? -1) ? mine : shared;
     return {
       baseline: Math.max(shared?.baseline ?? 0, mine?.baseline ?? 0),
+      baselineIDs: latest?.baselineIDs,
       announced: new Set([...(shared?.announced ?? []), ...(mine?.announced ?? [])]),
     };
   };
 
   const remember = (key: string, change: FeedbackChange, at: number) => {
-    const mine = local.get(key) ?? { baseline: change.baseline ?? 0, announced: new Set<string>() };
+    const mine = local.get(key) ?? {
+      baseline: change.baseline ?? 0,
+      baselineIDs: change.baselineIDs,
+      announced: new Set<string>(),
+    };
     for (const id of change.announced ?? []) mine.announced.add(id);
     local.set(key, mine);
     options.persist(key, change, at);
@@ -174,7 +191,13 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
     const stored = await options.record(key);
     const at = now();
     const previous = seen(key, stored);
-    if (!previous) return remember(key, { baseline: baselineOf(snapshot) }, at);
+    if (!previous) {
+      const baseline = baselineOf(snapshot);
+      const baselineIDs = snapshot.comments
+        .filter((comment) => comment.order === baseline)
+        .map((comment) => comment.id);
+      return remember(key, { baseline, baselineIDs }, at);
+    }
     if (at < (retryAt.get(key) ?? 0)) return;
     const comments = eligibleFeedback(snapshot, previous, at).filter(
       (comment) => !reserved.has(`${key} ${comment.id}`),

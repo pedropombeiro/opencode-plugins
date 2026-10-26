@@ -168,8 +168,8 @@ With several PR/MR targets, the footer shows counts instead of one PR/MR's statu
 status dialog, which lists each PR/MR.
 
 The footer shows checks or the pipeline, unresolved threads, conflicts, approval, and a
-running GitLab Duo review. GitHub also shows a requested change. Unknown mergeability stays
-unknown rather than appearing conflict-free.
+running automated review, from GitLab Duo or GitHub Copilot. GitHub also shows a requested
+change. Unknown mergeability stays unknown rather than appearing conflict-free.
 
 The footer shows `approved` only when GitLab reports that approval requirements are met,
 at least one person approved, and every human reviewer approved. Bot approvals, such as
@@ -232,16 +232,23 @@ Before it sends a notification, the server checks that the PR/MR is still one of
 session's targets. A lookup that started before the targets changed is discarded, so a
 removed target never triggers a notification.
 
-| Notification                               | GitLab      | GitHub        |
-| ------------------------------------------ | ----------- | ------------- |
-| An automated review finished with feedback | GitLab Duo  | Not supported |
-| New human review feedback                  | MR comments | Not supported |
+| Notification                               | GitLab      | GitHub         |
+| ------------------------------------------ | ----------- | -------------- |
+| An automated review finished with feedback | GitLab Duo  | GitHub Copilot |
+| New human review feedback                  | MR comments | PR comments    |
 
-- **Automated reviews**: Duo's final state of `REVIEWED` or `REQUESTED_CHANGES` asks the
-  agent to read its comments. Other final states, such as `APPROVED`, send nothing. The
-  server notifies only when it sees a review go from running to finished, so a review that
-  finished before the server first saw it running isn't announced. Reviews that finish in
-  the same poll share one message.
+- **Automated reviews**: for GitLab, Duo's final state of `REVIEWED` or `REQUESTED_CHANGES`
+  asks the agent to read its comments. Other final states, such as `APPROVED`, send nothing.
+  The server notifies when it sees a review go from running to finished, so a Duo review
+  that finished before the server first saw it running isn't announced. Reviews that finish
+  in the same poll share one message.
+- **Copilot reviews**: the server notifies when a submitted, undismissed review has at least
+  one inline comment. A review without inline comments, such as one that
+  found nothing or couldn't run for lack of quota, sends nothing. Copilot reviews are
+  identified, so a review that started and finished between two polls is announced too. A
+  review that the server finds on a PR's first look isn't announced. Observed and delivered
+  review IDs persist across restarts. A completed review can be announced while another
+  review is requested.
 - **Human reviews**: new comments and replies from people other than you and bots are
   announced once none of their unresolved comments has changed for 5 minutes. Expect one
   message 5 to 7 minutes after the review goes quiet. Resolved threads are skipped.
@@ -260,6 +267,17 @@ records. A failed storage write shows an error toast once.
 
 On GitLab, the server reads the newest 2,000 comments. On busier MRs, edits to older
 comments don't count as activity.
+
+On GitHub, the server reads three lists: conversation comments, the text of submitted
+reviews, and the inline comments of review threads. It keeps the newest 2,000 of each.
+It scans every thread to include recent replies in old threads, within a limit of 200 API
+requests per fetch. If it cannot complete that scan, it defers notifications until a complete
+fetch succeeds. Review text counts when it isn't empty, whether the
+review approves, requests changes, or only comments. Comments from GitHub Apps, such as
+Copilot, count as bots. Hidden comments and unsubmitted review comments are skipped.
+The baseline also records comment IDs at its timestamp, so a new comment posted in the same
+second can still be announced. Baselines stored by older plugin versions retain their
+timestamp-only behavior until a new baseline is created.
 
 ## Options
 
@@ -368,6 +386,8 @@ notifications resume the session. Set `reviewStatus` to `false` to keep only tit
   `src/tui.tsx` connects it to the RPC and renders the footer, dialog, commands, and notices.
 - `src/forge.ts` defines the forge-neutral types, the `Forge` adapter interface, and
   `ForgeTraits` with its optional `automatedReview` and `feedback` capabilities.
+- `src/gitlab-feedback.ts` and `src/github-feedback.ts` read each forge's comments for its
+  `feedback` capability.
 - `src/gitlab.ts` and `src/github.ts` provide each forge's adapter and traits. Adapters own
   API calls, pagination, error classification, and status normalization. Traits cover
   everything else: hosts, URL parsing, reference syntax, vocabulary, and forge-specific
@@ -378,8 +398,8 @@ notifications resume the session. Set `reviewStatus` to `false` to keep only tit
 - `src/locate.ts` picks each key's PRs/MRs. `src/store.ts` caches lookups, polls, backs off
   after failures, and discards lookups that started before a change. `src/format.ts`
   renders the footer and dialog.
-- `src/automated-review-watch.ts`, `src/human-review-watch.ts`, and
-  `src/gitlab-feedback.ts` decide when to notify the agent.
+- `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
+  agent.
 
 Shared code never compares a forge against a specific name. It asks the forge's traits, or
 checks for a capability, instead. To add a forge, add its kind to `ForgeKind` and

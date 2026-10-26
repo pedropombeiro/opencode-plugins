@@ -307,3 +307,87 @@ test('loads check pages and distinguishes authentication from rate limits', asyn
     await expect(gh('github.com', 'query', {})).rejects.toMatchObject({ kind });
   }
 });
+
+const copilot = { __typename: 'Bot', login: 'copilot-pull-request-reviewer' };
+const copilotReviewOf = (requested: boolean, review?: { id: string; comments: number }) => {
+  const node = pull();
+  node.reviewRequests.nodes = [
+    { requestedReviewer: { login: 'human' } },
+    ...(requested ? [{ requestedReviewer: copilot }] : []),
+  ];
+  return {
+    ...node,
+    copilotReviews: {
+      nodes: review ? [{ id: review.id, comments: { totalCount: review.comments } }] : [],
+    },
+  };
+};
+
+test("reads Copilot's review from the pending reviewers and its newest review", async () => {
+  const read = async (node: ReturnType<typeof copilotReviewOf>) =>
+    (await byNumber(async () => ({ repository: { pullRequest: node } })))?.copilotReview;
+  expect(await read(copilotReviewOf(false))).toBeUndefined();
+  expect(await read(copilotReviewOf(true))).toEqual({
+    requested: true,
+    reviewID: undefined,
+    comments: 0,
+  });
+  expect(await read(copilotReviewOf(false, { id: 'R_1', comments: 2 }))).toEqual({
+    requested: false,
+    reviewID: 'R_1',
+    comments: 2,
+  });
+  expect(await read(copilotReviewOf(true, { id: 'R_1', comments: 2 }))).toEqual({
+    requested: true,
+    reviewID: 'R_1',
+    comments: 2,
+  });
+});
+
+test('never lists a bot reviewer as awaiting review', async () => {
+  const pr = await byNumber(async () => ({
+    repository: { pullRequest: copilotReviewOf(true) },
+  }));
+  expect(pr?.awaitingReviewers).toEqual(['human']);
+});
+
+test('finds Copilot on a later page of pending reviewers', async () => {
+  const node = pull();
+  const first = {
+    ...node,
+    reviewRequests: {
+      nodes: node.reviewRequests.nodes,
+      pageInfo: { hasNextPage: true, endCursor: 'reviewers' },
+    },
+  };
+  const pr = await byNumber(async (_host, text) => ({
+    repository: {
+      pullRequest: text.includes('reviewRequests(first:100,after:')
+        ? {
+            reviewRequests: {
+              nodes: [{ requestedReviewer: copilot }],
+              pageInfo: { hasNextPage: false },
+            },
+          }
+        : first,
+    },
+  }));
+  expect(pr?.copilotReview?.requested).toBe(true);
+  expect(pr?.awaitingReviewers).toEqual(['human']);
+  expect(pr?.reviewersComplete).toBe(true);
+});
+
+test('copes with a response that has no Copilot reviews', async () => {
+  const pr = await byNumber(async () => ({ repository: { pullRequest: pull() } }));
+  expect(pr?.copilotReview).toBeUndefined();
+});
+
+test("asks for Copilot's newest submitted review by its author login", async () => {
+  const queries: string[] = [];
+  await byNumber(async (_host, query) => {
+    queries.push(query);
+    return { repository: { pullRequest: pull() } };
+  });
+  expect(queries[0]).toContain('author:"copilot-pull-request-reviewer[bot]"');
+  expect(queries[0]).toContain('reviews(last:1');
+});

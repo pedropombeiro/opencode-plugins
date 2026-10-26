@@ -1,4 +1,4 @@
-import type { ReviewRequest } from './forge';
+import type { AutomatedReviewStatus, ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import type { Lookup } from './store';
 
@@ -14,21 +14,32 @@ export function automatedReview(request: ReviewRequest) {
 export const isReviewRunning = (lookup: Lookup | undefined) =>
   requests(lookup).some((request) => automatedReview(request)?.state === 'running');
 
-// Requests whose automated review was running in `previous` and finished with
-// feedback in `next`.
+function hasFeedback(review: AutomatedReviewStatus | undefined): boolean {
+  if (!review) return false;
+  if (review.completed) return review.completed.feedback;
+  return review.state === 'feedback';
+}
+
 export function finishedReviews(previous: Lookup | undefined, next: Lookup): ReviewRequest[] {
-  const running = new Set(
-    requests(previous)
-      .filter((request) => automatedReview(request)?.state === 'running')
-      .map((request) => request.url),
-  );
-  return requests(next).filter(
-    (request) => running.has(request.url) && automatedReview(request)?.state === 'feedback',
-  );
+  const before = new Map(requests(previous).map((request) => [request.url, request]));
+  return requests(next).filter((request) => {
+    const review = automatedReview(request);
+    if (!hasFeedback(review)) return false;
+    const earlier = before.get(request.url);
+    if (!earlier) return false;
+    const was = automatedReview(earlier);
+    if (review?.completed) return review.completed.id !== was?.completed?.id;
+    return was?.state === 'running';
+  });
 }
 
 const reviewer = (request: ReviewRequest) =>
   automatedReview(request)?.name ?? 'The automated reviewer';
+
+function outcomeLabel(request: ReviewRequest): string {
+  const review = automatedReview(request);
+  return review?.completed?.label ?? review?.label ?? '';
+}
 
 // The one value that every request shares, or `fallback` when they differ.
 const shared = (
@@ -46,7 +57,7 @@ const nouns = (requests: ReviewRequest[]) =>
 
 // A short sentence-case outcome for notifications, such as "Requested changes".
 export function reviewOutcome(request: ReviewRequest): string {
-  const label = automatedReview(request)?.label ?? '';
+  const label = outcomeLabel(request);
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
@@ -59,7 +70,7 @@ export function reviewTitle(requests: ReviewRequest[]): string {
 // Reviews that finish in the same poll share one message, so the agent
 // works through them in one turn.
 export function reviewMessage(requests: ReviewRequest[]): string {
-  const state = (request: ReviewRequest) => `the state "${automatedReview(request)?.label ?? ''}"`;
+  const state = (request: ReviewRequest) => `the state "${outcomeLabel(request)}"`;
   if (requests.length === 1) {
     const [request] = requests;
     const name = reviewer(request);
@@ -80,9 +91,7 @@ export function reviewToast(requests: ReviewRequest[]) {
   const outcome =
     requests.length === 1
       ? reviewOutcome(requests[0])
-      : requests
-          .map((request) => `${reference(request)}: ${automatedReview(request)?.label ?? ''}`)
-          .join(', ');
+      : requests.map((request) => `${reference(request)}: ${outcomeLabel(request)}`).join(', ');
   return { title: reviewTitle(requests), message: `${outcome}. Sent to the agent.` };
 }
 
@@ -100,10 +109,16 @@ export interface PendingDelivery {
   url: string;
   since: number;
   retryAt: number;
+  reviewID?: string;
 }
 
 // Pending deliveries keyed by `notificationKey`.
 export type PendingDeliveries = Record<string, PendingDelivery>;
+
+export interface ReviewHistory {
+  observed: string[];
+  delivered: string[];
+}
 
 export interface AutomatedReviewWatcherOptions {
   // Whether the PR/MR is one of the session's targets right now.
@@ -119,6 +134,8 @@ export interface AutomatedReviewWatcherOptions {
   // delivery is its own record, so instances that share storage never
   // overwrite each other's.
   write?: (sessionID: string, url: string, delivery: PendingDelivery | undefined) => void;
+  readHistory?: (sessionID: string, url: string) => Promise<ReviewHistory | undefined>;
+  writeHistory?: (sessionID: string, url: string, history: ReviewHistory) => void;
   now?: () => number;
 }
 
@@ -135,9 +152,26 @@ export function createAutomatedReviewWatcher(options: AutomatedReviewWatcherOpti
   // The pending deliveries of each session this instance has observed.
   const known = new Map<string, PendingDeliveries>();
   const sending = new Set<string>();
+  const histories = new Map<string, ReviewHistory>();
 
   const write = (sessionID: string, url: string, delivery?: PendingDelivery) =>
     options.write?.(sessionID, url, delivery);
+
+  async function observeCompletion(sessionID: string, request: ReviewRequest) {
+    const completed = automatedReview(request)?.completed;
+    if (!completed) return undefined;
+
+    const key = notificationKey(sessionID, request);
+    const history = histories.get(key) ?? (await options.readHistory?.(sessionID, request.url));
+    const alreadyObserved = history?.observed.includes(completed.id) === true;
+    const current = history ?? { observed: [], delivered: [] };
+    histories.set(key, current);
+    if (!alreadyObserved) {
+      current.observed.push(completed.id);
+      options.writeHistory?.(sessionID, request.url, current);
+    }
+    return { alreadyObserved, newFeedback: !!history && !alreadyObserved && completed.feedback };
+  }
 
   return {
     async observe(sessionID: string, previous: Lookup | undefined, next: Lookup): Promise<void> {
@@ -154,10 +188,12 @@ export function createAutomatedReviewWatcher(options: AutomatedReviewWatcherOpti
       // or it has failed for too long.
       for (const [key, entry] of Object.entries(pending)) {
         const request = targets.find((target) => target.url === entry.url);
+        const completed = request && automatedReview(request)?.completed;
         if (
           request &&
-          automatedReview(request)?.state === 'feedback' &&
-          at - entry.since < PENDING_RETENTION
+          hasFeedback(automatedReview(request)) &&
+          at - entry.since < PENDING_RETENTION &&
+          (!entry.reviewID || completed?.id === entry.reviewID)
         )
           continue;
         if (sending.has(key)) continue;
@@ -168,6 +204,13 @@ export function createAutomatedReviewWatcher(options: AutomatedReviewWatcherOpti
       const finished = finishedReviews(previous, next).filter(
         (request) => isOpen(request) && options.isTarget(sessionID, request.url),
       );
+      for (const request of targets) {
+        const observation = await observeCompletion(sessionID, request);
+        if (!observation) continue;
+        const index = finished.findIndex((item) => item.url === request.url);
+        if (observation.alreadyObserved && index >= 0) finished.splice(index, 1);
+        if (observation.newFeedback && index < 0) finished.push(request);
+      }
       const due = targets.filter(
         (request) => (pending[notificationKey(sessionID, request)]?.retryAt ?? Infinity) <= at,
       );
@@ -181,6 +224,12 @@ export function createAutomatedReviewWatcher(options: AutomatedReviewWatcherOpti
       try {
         await options.send(sessionID, batch);
         batch.forEach((request, index) => {
+          const history = histories.get(keys[index]);
+          const completed = automatedReview(request)?.completed;
+          if (history && completed && !history.delivered.includes(completed.id)) {
+            history.delivered.push(completed.id);
+            options.writeHistory?.(sessionID, request.url, history);
+          }
           delete pending[keys[index]];
           write(sessionID, request.url);
         });
@@ -188,7 +237,14 @@ export function createAutomatedReviewWatcher(options: AutomatedReviewWatcherOpti
         const retryAt = now() + RETRY_DELAY;
         batch.forEach((request, index) => {
           const key = keys[index];
-          pending[key] = { sessionID, url: request.url, since: pending[key]?.since ?? at, retryAt };
+          const reviewID = automatedReview(request)?.completed?.id;
+          pending[key] = {
+            sessionID,
+            url: request.url,
+            since: pending[key]?.since ?? at,
+            retryAt,
+            ...(reviewID ? { reviewID } : {}),
+          };
           write(sessionID, request.url, pending[key]);
         });
         options.onSendError?.(error, sessionID, batch);
@@ -200,6 +256,11 @@ export function createAutomatedReviewWatcher(options: AutomatedReviewWatcherOpti
     hasPending: (sessionID: string) => Object.keys(known.get(sessionID) ?? {}).length > 0,
     // Drops what this instance knows about a session that moved away, so its
     // deliveries are read again if it comes back.
-    forget: (sessionID: string) => void known.delete(sessionID),
+    forget(sessionID: string) {
+      known.delete(sessionID);
+      for (const key of histories.keys()) {
+        if (key.startsWith(`${sessionID} `)) histories.delete(key);
+      }
+    },
   };
 }

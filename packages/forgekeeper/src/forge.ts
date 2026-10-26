@@ -51,6 +51,14 @@ export interface GitHubPullRequest extends Common {
   forge: 'github';
   // GitHub's review decision. It doesn't cover every branch protection rule.
   reviewDecision?: string;
+  copilotReview?: CopilotReview;
+}
+
+export interface CopilotReview {
+  requested: boolean;
+  reviewID?: string;
+  comments: number;
+  dismissed?: boolean;
 }
 
 export type ReviewRequest = GitLabMergeRequest | GitHubPullRequest;
@@ -119,11 +127,23 @@ export interface ForgeTraits<
 // as an approval, are `settled`.
 export type AutomatedReviewState = 'running' | 'feedback' | 'settled';
 
-// A forge's automated code reviewer, such as GitLab Duo.
+export interface AutomatedReviewStatus {
+  state: AutomatedReviewState;
+  label: string;
+  completed?: CompletedReview;
+}
+
+export interface CompletedReview {
+  id: string;
+  feedback: boolean;
+  label: string;
+}
+
+// A forge's automated code reviewer, such as GitLab Duo or GitHub Copilot.
 export interface AutomatedReview<Request extends ReviewRequest = ReviewRequest> {
   readonly name: string;
   // The reviewer's review of a request, or undefined without one.
-  status(request: Request): { state: AutomatedReviewState; label: string } | undefined;
+  status(request: Request): AutomatedReviewStatus | undefined;
 }
 
 // A comment on a PR/MR, as read by a forge's `feedback` capability. The forge
@@ -131,9 +151,7 @@ export interface AutomatedReview<Request extends ReviewRequest = ReviewRequest> 
 export interface ReviewComment {
   // Identifies the comment, for remembering which comments were announced.
   id: string;
-  // Orders comments by when they were posted. The forge guarantees that a
-  // comment posted later has a higher order than every earlier comment on the
-  // same request, across all of the forge's comment types.
+  // Orders comments by when they were posted, across all comment types.
   order: number;
   url: string;
   // When the comment was last written, in milliseconds.
