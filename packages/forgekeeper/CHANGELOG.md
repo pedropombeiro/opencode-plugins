@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.1.1...opencode-forgekeeper-2.2.0) (2026-10-26)
+
+
+### Features
+
+* **forgekeeper:** monitor GitHub PR feedback and Copilot reviews ([c556f6a](https://github.com/pedropombeiro/opencode-plugins/commit/c556f6a1166d2724b01b9879da3bd7ad852ab742))
+
 ## [2.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.1.0...opencode-forgekeeper-2.1.1) (2026-10-10)
 
 
