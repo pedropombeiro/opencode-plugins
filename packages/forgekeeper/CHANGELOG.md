@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.2.0...opencode-forgekeeper-2.2.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **forgekeeper:** open links once and clarify CI check counts ([#100](https://github.com/pedropombeiro/opencode-plugins/issues/100)) ([3524e3d](https://github.com/pedropombeiro/opencode-plugins/commit/3524e3d07367bb1dfaca431087106aa98eff04d6))
+
 ## [2.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.1.1...opencode-forgekeeper-2.2.0) (2026-10-26)
 
 
