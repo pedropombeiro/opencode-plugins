@@ -130,7 +130,7 @@ test('check rollup prioritizes failures and never marks partial checks green', (
       true,
       'url',
     ),
-  ).toMatchObject({ status: 'FAILED', label: '1 failed, 1 pending' });
+  ).toMatchObject({ status: 'FAILED', label: '1 check failed, 1 check pending' });
   expect(
     checks([{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SKIPPED' }], true, 'url')
       .status,
@@ -143,6 +143,32 @@ test('check rollup prioritizes failures and never marks partial checks green', (
       'url',
     ).status,
   ).toBe('PENDING');
+});
+
+test('check rollup distinguishes passed, skipped, and neutral checks', () => {
+  const passed = [
+    { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    { __typename: 'StatusContext', state: 'SUCCESS' },
+  ];
+  expect(checks(passed, true, 'url')).toEqual({
+    status: 'SUCCESS',
+    label: '2 checks passed',
+    url: 'url',
+  });
+  expect(
+    checks(
+      [
+        ...passed,
+        { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SKIPPED' },
+        { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'NEUTRAL' },
+      ],
+      true,
+      'url',
+    ),
+  ).toMatchObject({
+    status: 'SUCCESS',
+    label: '2 checks passed, 1 check skipped, 1 check neutral',
+  });
 });
 
 test('filters same-named branches from other forks and deduplicates remotes', async () => {
@@ -295,7 +321,7 @@ test('loads check pages and distinguishes authentication from rate limits', asyn
         }
       : { repository: { pullRequest: first } },
   );
-  expect(pr?.pipeline).toMatchObject({ status: 'PENDING', label: '1 pending' });
+  expect(pr?.pipeline).toMatchObject({ status: 'PENDING', label: '1 check pending' });
   for (const [message, kind] of [
     ['API rate limit exceeded', 'rate-limit'],
     ['401 authentication failed', 'auth'],
