@@ -141,6 +141,7 @@ const STATES = ['SUCCESS', 'FAILURE', 'ERROR', 'PENDING', 'EXPECTED'];
 // Summarizes the head commit's checks. Failures win over pending checks, and
 // partial or unrecognized results never report success.
 export function checks(nodes: Check[], complete: boolean, url: string): Pipeline {
+  const count = (value: number) => `${value} check${value === 1 ? '' : 's'}`;
   const failed = nodes.filter((node) =>
     FAILED.includes(node.conclusion ?? node.state ?? ''),
   ).length;
@@ -155,16 +156,26 @@ export function checks(nodes: Check[], complete: boolean, url: string): Pipeline
   if (failed)
     return {
       status: 'FAILED',
-      label: `${failed} failed${pending ? `, ${pending} pending` : ''}${complete ? '' : ' (partial)'}`,
+      label: `${count(failed)} failed${pending ? `, ${count(pending)} pending` : ''}${complete ? '' : ' (partial)'}`,
       url,
     };
   if (pending || !complete || unknown)
     return {
       status: 'PENDING',
-      label: `${pending ? `${pending} pending` : 'unknown'}${complete ? '' : ' (partial)'}`,
+      label: `${pending ? `${count(pending)} pending` : 'unknown'}${complete ? '' : ' (partial)'}`,
       url,
     };
-  return { status: 'SUCCESS', label: `${nodes.length} passed or skipped`, url };
+  const label = [
+    ['SUCCESS', 'passed'],
+    ['SKIPPED', 'skipped'],
+    ['NEUTRAL', 'neutral'],
+  ]
+    .flatMap(([result, text]) => {
+      const total = nodes.filter((node) => (node.conclusion ?? node.state) === result).length;
+      return total ? [`${count(total)} ${text}`] : [];
+    })
+    .join(', ');
+  return { status: 'SUCCESS', label: label || '0 checks', url };
 }
 
 // GitHub URLs are accepted on any host, for GitHub Enterprise, except GitLab

@@ -142,19 +142,13 @@ export default {
                     }
                   >
                     {(url: () => string) => (
-                      // OSC 8 makes the text a terminal hyperlink where supported; the
-                      // click handler covers terminals and multiplexers that drop it.
-                      // The underline marks the segment as a link, because terminals
-                      // don't style OSC 8 links consistently.
                       <text
                         wrapMode="none"
                         flexShrink={0}
                         fg={color(segment.tone)}
                         onMouseUp={() => openUrl(url())}
                       >
-                        <a href={url()}>
-                          <u>{segment.text}</u>
-                        </a>
+                        <u>{segment.text}</u>
                       </text>
                     )}
                   </Show>
@@ -197,13 +191,9 @@ export default {
           {': '}
           <span style={{ fg: foreground() }}>
             <Show when={props.url} fallback={<b>{props.value}</b>}>
-              {(url: () => string) => (
-                <a href={url()}>
-                  <u>
-                    <b>{props.value}</b>
-                  </u>
-                </a>
-              )}
+              <u>
+                <b>{props.value}</b>
+              </u>
             </Show>
           </span>
         </text>
@@ -217,13 +207,11 @@ export default {
       return (
         <box gap={1} flexShrink={0}>
           <text fg={context.theme.text.base} onMouseUp={() => openUrl(request().url)}>
-            <a href={request().url}>
-              <u>
-                <b>
-                  {reference(request())} {request().title}
-                </b>
-              </u>
-            </a>
+            <u>
+              <b>
+                {reference(request())} {request().title}
+              </b>
+            </u>
           </text>
           <box flexShrink={0}>
             <DetailField
