@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.2.1...opencode-forgekeeper-2.3.0) (2026-10-27)
+
+
+### Features
+
+* **forgekeeper:** use OpenCode 2.2 session target instructions ([#105](https://github.com/pedropombeiro/opencode-plugins/issues/105)) ([a4e3e82](https://github.com/pedropombeiro/opencode-plugins/commit/a4e3e822ffbfb2853fc2353149ca8b8252700f57))
+
 ## [2.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.2.0...opencode-forgekeeper-2.2.1) (2026-10-26)
 
 
