@@ -7,9 +7,6 @@
     "packages/homeassistant": {
       "component": "opencode-homeassistant"
     },
-    "packages/forge-session-title": {
-      "component": "opencode-forge-session-title"
-    },
     "packages/forgekeeper": {
       "component": "opencode-forgekeeper"
     },
