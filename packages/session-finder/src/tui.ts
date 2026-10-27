@@ -15,7 +15,7 @@ import { SessionSearchRpc, type OpenRequest } from './rpc.ts';
 const SEARCH_TIMEOUT_MS = 120_000;
 
 export default {
-  id: 'opencode-session-search',
+  id: 'opencode-session-finder',
   setup(context) {
     const rpc = context.client.rpc(SessionSearchRpc);
     const toast = context.ui.toast.show;
@@ -98,7 +98,7 @@ export default {
           mode: 'global',
           commands: [
             {
-              id: 'opencode-session-search.search',
+              id: 'opencode-session-finder.search',
               title: 'Search sessions',
               group: 'Session',
               bind: '<leader>f',

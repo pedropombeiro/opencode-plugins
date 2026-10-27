@@ -1,4 +1,4 @@
-# opencode-session-search
+# opencode-session-finder
 
 An [OpenCode](https://opencode.ai) plugin that searches the text of previous sessions. It adds
 a **Search sessions** command to the terminal interface, and gives the agent a `search_sessions`
@@ -77,7 +77,7 @@ must match the case of the query.
 ## Installation
 
 ```bash
-opencode plugin add opencode-session-search
+opencode plugin add opencode-session-finder
 ```
 
 This adds the plugin to `~/.config/opencode/opencode.json`. OpenCode loads the terminal
@@ -85,7 +85,7 @@ interface part along with it:
 
 ```json
 {
-  "plugins": ["opencode-session-search"]
+  "plugins": ["opencode-session-finder"]
 }
 ```
 
@@ -98,7 +98,7 @@ interface part along with it:
 ```json
 {
   "plugins": [
-    { "package": "opencode-session-search", "options": { "database": "/path/to/opencode.db" } }
+    { "package": "opencode-session-finder", "options": { "database": "/path/to/opencode.db" } }
   ]
 }
 ```

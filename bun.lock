@@ -36,7 +36,7 @@
     },
     "packages/forgekeeper": {
       "name": "opencode-forgekeeper",
-      "version": "2.2.1",
+      "version": "2.3.0",
       "peerDependencies": {
         "@opencode/plugin": "^2.2.0",
         "@opentui/core": ">=0.7.0",
@@ -47,6 +47,13 @@
     "packages/homeassistant": {
       "name": "opencode-homeassistant",
       "version": "1.1.0",
+      "peerDependencies": {
+        "@opencode/plugin": "^2.2.0",
+      },
+    },
+    "packages/session-finder": {
+      "name": "opencode-session-finder",
+      "version": "0.1.0",
       "peerDependencies": {
         "@opencode/plugin": "^2.2.0",
       },
@@ -744,6 +751,8 @@
     "opencode-forgekeeper": ["opencode-forgekeeper@workspace:packages/forgekeeper"],
 
     "opencode-homeassistant": ["opencode-homeassistant@workspace:packages/homeassistant"],
+
+    "opencode-session-finder": ["opencode-session-finder@workspace:packages/session-finder"],
 
     "opencode-terminal-progress": ["opencode-terminal-progress@workspace:packages/terminal-progress"],
 

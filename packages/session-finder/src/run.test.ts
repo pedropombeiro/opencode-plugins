@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runSearch, workerURL } from './run.ts';
 
-const dir = mkdtempSync(join(tmpdir(), 'session-search-run-'));
+const dir = mkdtempSync(join(tmpdir(), 'session-finder-run-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function database() {

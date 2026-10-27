@@ -1,6 +1,6 @@
 {
-  "name": "opencode-session-search",
-  "version": "1.0.0",
+  "name": "opencode-session-finder",
+  "version": "0.1.0",
   "description": "OpenCode plugin that searches previous sessions from the command palette and gives the agent search_sessions and open_session tools",
   "author": {
     "name": "Pedro Pombeiro",
@@ -19,7 +19,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
-    "directory": "packages/session-search"
+    "directory": "packages/session-finder"
   },
   "publishConfig": {
     "access": "public"

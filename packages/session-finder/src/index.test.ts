@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import plugin from './index.ts';
 import type { Result } from './db.ts';
 
-const dir = mkdtempSync(join(tmpdir(), 'session-search-index-'));
+const dir = mkdtempSync(join(tmpdir(), 'session-finder-index-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 type Tool = {

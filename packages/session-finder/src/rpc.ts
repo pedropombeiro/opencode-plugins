@@ -35,7 +35,7 @@ const searchSchema = {
 } as const;
 
 export const SessionSearchRpc = {
-  id: 'opencode-session-search',
+  id: 'opencode-session-finder',
   methods: {
     handled: { input: handledSchema, output: { type: 'object', additionalProperties: false } },
     search: { input: searchSchema, output: { type: 'object' } },
