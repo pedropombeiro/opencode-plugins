@@ -16,8 +16,8 @@
     "packages/tmux-indicator": {
       "component": "opencode-tmux-indicator"
     },
-    "packages/session-search": {
-      "component": "opencode-session-search"
+    "packages/session-finder": {
+      "component": "opencode-session-finder"
     }
   },
   "include-v-in-tag": false,

@@ -40,7 +40,7 @@ function databaseOption(options: unknown): string | undefined {
 }
 
 export default {
-  id: 'opencode-session-search',
+  id: 'opencode-session-finder',
   async setup(ctx) {
     const get = ctx.session.get as unknown as SessionGet;
     const database = databaseOption(ctx.options);

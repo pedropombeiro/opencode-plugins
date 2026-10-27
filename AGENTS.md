@@ -34,7 +34,7 @@ Plugins target the OpenCode 2 plugin API (`@opencode/plugin`). See
   and `./tui`.
 - `.mise/bundle.ts` also compiles `src/worker.ts` into `dist/worker.js`, next to `dist/index.js`, for
   work that must not block the server. Resolve it from `import.meta.url`; see
-  `packages/session-search/src/run.ts`.
+  `packages/session-finder/src/run.ts`.
 - JSX goes through OpenTUI's Solid transform. The bundle keeps `solid-js` and `@opentui/*` external,
   because OpenCode provides them at runtime. A package that renders JSX lists `@opentui/core`,
   `@opentui/solid`, and `solid-js` as peer dependencies, and sets `"jsx": "preserve"` and

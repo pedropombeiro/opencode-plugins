@@ -43,7 +43,7 @@ function fixture(
   messages: MessageRow[],
   options: { table?: 'session_v2' | 'session'; projects?: [string, string, string[]][] } = {},
 ) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'session-search-')));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'session-finder-')));
   dirs.push(dir);
   const path = join(dir, 'opencode.db');
   const db = new Database(path);
@@ -272,7 +272,7 @@ describe('searchSessions', () => {
   });
 
   test('takes the project from the directory without a current session', () => {
-    const base = realpathSync(mkdtempSync(join(tmpdir(), 'session-search-cwd-')));
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'session-finder-cwd-')));
     dirs.push(base);
     mkdirSync(join(base, 'repo', 'deep'), { recursive: true });
     mkdirSync(join(base, 'sandbox'));

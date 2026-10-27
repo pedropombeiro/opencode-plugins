@@ -15,7 +15,7 @@ The plugins target OpenCode 2. The last OpenCode 1 versions live on the
 | [forgekeeper](packages/forgekeeper/) | Tracks each session's issues and PRs/MRs: title prefixes, a PR/MR status footer, and review notifications | [![npm](https://img.shields.io/npm/v/opencode-forgekeeper)](https://www.npmjs.com/package/opencode-forgekeeper) |
 | [atuin-history](packages/atuin-history/) | Records agent shell commands in Atuin shell history | [![npm](https://img.shields.io/npm/v/opencode-atuin-history)](https://www.npmjs.com/package/opencode-atuin-history) |
 | [tmux-indicator](packages/tmux-indicator/) | Sets a tmux window option when the agent is waiting for input | [![npm](https://img.shields.io/npm/v/opencode-tmux-indicator)](https://www.npmjs.com/package/opencode-tmux-indicator) |
-| [session-search](packages/session-search/) | Searches previous sessions from the command palette, and gives the agent tools to search and open them | [![npm](https://img.shields.io/npm/v/opencode-session-search)](https://www.npmjs.com/package/opencode-session-search) |
+| [session-finder](packages/session-finder/) | Searches previous sessions from the command palette, and gives the agent tools to search and open them | [![npm](https://img.shields.io/npm/v/opencode-session-finder)](https://www.npmjs.com/package/opencode-session-finder) |
 
 ## Development
 
