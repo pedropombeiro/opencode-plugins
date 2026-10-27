@@ -25,6 +25,8 @@ const SKIP_BRANCHES = new Set(['master', 'main', 'HEAD', 'develop']);
 type StoredState = { targets?: Target[]; prefix?: string };
 type SessionState = { targets: Target[]; prefix?: string };
 
+const TARGET_KEY = 'forgekeeper-session-target';
+
 const GUIDANCE = [
   'When the user establishes or changes the primary issue, PR, or MR for this session, call set_session_target with its full URL before starting that work.',
   'When the user asks you to work on several issues, PRs, or MRs together, call set_session_target with all of their full URLs in targets. If the user describes them instead of linking them, find them first, then set them before starting that work. When they are all PRs/MRs for one established issue, pass it as issue_url.',
@@ -33,6 +35,7 @@ const GUIDANCE = [
   'Background references, comparisons, and dependencies do not change the target. Follow-ups without a new primary target keep the current target.',
   'Include issue_url only when its relationship to the target PRs/MRs is established. Never carry over the checked-out branch’s issue to another target.',
   'When the user explicitly returns to work on the checked-out branch, call set_session_target with target "branch".',
+  `The current session target is in the <context> entry "${TARGET_KEY}". The plugin updates it when it changes, so trust the latest value.`,
 ];
 
 function describeTargets(targets: readonly Target[]): string {
@@ -79,6 +82,7 @@ export async function setupServer(
   status?: StatusDependencies,
 ) {
   const pending = new Map<string, Promise<void>>();
+  const instructing = new Map<string, Promise<unknown>>();
   const controller = new AbortController();
   // Set when cleanup starts. No title update or target change starts after
   // it, and one that is running stops before it writes, so it can't
@@ -210,6 +214,7 @@ export async function setupServer(
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
       name: 'set_session_target',
+      options: { codemode: false },
       description:
         'Set the issues, PRs, or MRs this session works on, for its title and PR/MR status. Use target for one full URL, or "branch" to return to branch-based naming. Use targets for several full URLs. The default operation, "replace", sets exactly the given targets; "add" keeps the current targets, and "remove" drops the given ones. Call it after creating a PR/MR for the current task. Without issue_url, the related issue is inferred from the PR/MR source branch name. This only changes local session metadata.',
       input: {
@@ -255,6 +260,7 @@ export async function setupServer(
             ...(state.prefix ? { prefix: state.prefix } : {}),
           });
           watcher?.targetsChanged(sessionID, result.targets);
+          await instruct(sessionID).catch(() => {});
           await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
           await update(sessionID);
         });
@@ -263,25 +269,53 @@ export async function setupServer(
     });
   });
 
+  async function writeInstructions(sessionID: string): Promise<string[]> {
+    if (closing) return [];
+    const state = await stateFor(sessionID);
+    const value = `Current session target: ${describeTargets(state.targets)}.`;
+    const entries = await ctx.session.instructions.entry.list({ sessionID });
+    if (entries.some((entry) => entry.key === TARGET_KEY && entry.value === value)) return [];
+    if (closing) return [];
+    await ctx.session.instructions.entry.put({ sessionID, key: TARGET_KEY, value });
+    return [value];
+  }
+
+  function instruct(sessionID: string): Promise<string[]> {
+    const next = (instructing.get(sessionID) ?? Promise.resolve()).then(() =>
+      writeInstructions(sessionID),
+    );
+    const settled = next.catch(() => {});
+    instructing.set(sessionID, settled);
+    void settled.then(() => {
+      if (instructing.get(sessionID) === settled) instructing.delete(sessionID);
+    });
+    return next;
+  }
+
   // A failure here must not block the model request, so it only skips the guidance.
   await ctx.session.hook('context', async (event) => {
     try {
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (session.parentID || session.location.directory !== ctx.location.directory) return;
-      const state = await stateFor(event.sessionID);
-      event.system.push({
-        type: 'text',
-        text: [...GUIDANCE, `Current session target: ${describeTargets(state.targets)}.`].join(
-          '\n',
-        ),
-      });
+      event.system.push({ type: 'text', text: GUIDANCE.join('\n') });
+      const written = await instruct(event.sessionID);
+      if (written.length) event.system.push({ type: 'text', text: written.join('\n') });
     } catch {
       // The request goes ahead without the guidance.
     }
   });
 
   void (async () => {
-    for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+    for await (const event of ctx.event.subscribe({
+      types: [
+        'session.renamed',
+        'session.moved',
+        'session.execution.succeeded',
+        'session.execution.failed',
+        'vcs.branch.updated',
+      ],
+      signal: controller.signal,
+    })) {
       const { type } = event as { type: string };
       const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID;
       if ((type === 'session.renamed' || type === 'session.execution.succeeded') && sessionID) {
