@@ -26,6 +26,10 @@ export interface StatusServiceOptions {
   publish: (key: string, snapshot: Snapshot) => void;
   automated?: Pick<AutomatedReviewWatcher, 'observe' | 'hasPending'>;
   human?: { check: (sessionID: string, request: ReviewRequest) => unknown };
+  // Sessions that poll even without a CLI lease, such as while babysitting.
+  pinned?: (sessionID: string) => boolean;
+  // Receives each lookup of a pinned session's explicit targets.
+  babysit?: { observe: (sessionID: string, lookup: Lookup) => Promise<unknown> };
   onWatchError?: (error: unknown) => void;
   interval?: number;
   activeInterval?: number;
@@ -59,6 +63,7 @@ export function createStatusService(options: StatusServiceOptions) {
     void task.finally(() => tasks.delete(task));
   };
   const owns = (key: string) => key !== HOME && (options.owns?.(key) ?? true);
+  const pinned = (key: string) => owns(key) && (options.pinned?.(key) ?? false);
   let sweepTimer: unknown;
   let disposed = false;
 
@@ -119,7 +124,8 @@ export function createStatusService(options: StatusServiceOptions) {
     if (disposed) return;
     const live = liveLeases(key);
     const wanted =
-      live.length > 0 && (live.some((lease) => lease.visible) || unknown(key) || needsWatch(key));
+      pinned(key) ||
+      (live.length > 0 && (live.some((lease) => lease.visible) || unknown(key) || needsWatch(key)));
     const release = holds.get(key);
     if (wanted && !release) holds.set(key, store.acquire(key));
     else if (!wanted && release) {
@@ -133,6 +139,14 @@ export function createStatusService(options: StatusServiceOptions) {
       track(
         options.automated
           .observe(key, previous, next)
+          .catch(report)
+          .finally(() => sync(key)),
+      );
+    }
+    if (pinned(key) && options.babysit && next.kind === 'found' && next.explicitTarget) {
+      track(
+        options.babysit
+          .observe(key, next)
           .catch(report)
           .finally(() => sync(key)),
       );
@@ -206,6 +220,13 @@ export function createStatusService(options: StatusServiceOptions) {
       if (!disposed && !holds.has(key) && liveLeases(key).length > 0) void store.refresh(key);
     },
     setTargeted: (key: string, targeted: boolean) => store.setTargeted(key, targeted),
+    // After the key's pin changes, such as when babysitting starts or stops.
+    // A pinned key is looked up right away, so the babysitter records its
+    // baseline without waiting for the next poll.
+    resync(key: string) {
+      sync(key);
+      if (pinned(key) && !disposed) void store.refresh(key);
+    },
     // After an event that may have changed the PRs/MRs, such as a turn ending.
     notify: (key: string) => store.notify(key),
     keys: () => store.keys(),

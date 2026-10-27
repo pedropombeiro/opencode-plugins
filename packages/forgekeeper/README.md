@@ -47,8 +47,9 @@ what's missing, such as `glab is not installed`.
 
 The server registers the `set_session_target` tool and adds instructions to the agent's
 context. The current target is stored in the `forgekeeper-session-target` session instruction
-entry. Updates take effect at the next step without changing the system prompt.
-When you establish or change the primary issue, PR, or MR, the agent sets its full
+entry, and babysitting guidance is stored in `forgekeeper-babysitting`. Updates take effect at
+the next step without changing the system prompt. When you establish or change the primary
+issue, PR, or MR, the agent sets its full
 URL as the session target. Background references, comparisons, and dependencies keep the
 current target. After the agent creates a PR/MR for the current task, it sets the new PR/MR
 as the target, passing the current issue as `issue_url`.
@@ -281,6 +282,50 @@ The baseline also records comment IDs at its timestamp, so a new comment posted 
 second can still be announced. Baselines stored by older plugin versions retain their
 timestamp-only behavior until a new baseline is created.
 
+## Babysitting
+
+`/babysit` hands the session's PRs/MRs to the agent until they are ready for human review. The
+agent fixes and retries CI, works through review feedback, and pushes, while the server watches
+the PRs/MRs and resumes the session when one needs attention. The agent doesn't poll or sleep
+in the meantime.
+
+| Command                | Effect                                                                     |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `/babysit`             | Babysits every PR/MR target of the session.                                |
+| `/babysit <URL>...`    | Adds the PRs/MRs as session targets, then babysits them.                   |
+| `/babysit status`      | Shows what the session babysits and the CI status it last saw.             |
+| `/babysit stop [URL…]` | Stops babysitting the given PRs/MRs, or all of them. The targets stay set. |
+
+Starting sends the agent instructions: check each PR/MR's current state, retry transient CI
+failures at most twice per job, fix failures and in-scope feedback, push once per PR/MR per
+cycle, and ask the user about design decisions. It never force-pushes, merges, approves, or
+changes reviewers, and it follows the user's own rules about posting replies. The agent can also
+call the `babysit` tool, for example to stop babysitting a PR/MR that needs the user.
+
+While babysitting, the server polls the session's PRs/MRs even when no CLI shows it, and across
+restarts. Besides the [review notifications](#review-notifications), it resumes the session when:
+
+- CI fails or is canceled. Each result is reported once per head commit, so an old failure isn't
+  reported again after a push, but a retried job that fails again is.
+- A merge conflict appears.
+- A PR/MR looks ready: CI passed for the current head, mergeability is known and conflict-free,
+  no thread is unresolved, and no automated review is running. It stops babysitting that PR/MR.
+- A PR/MR merges or closes. It stops babysitting that PR/MR.
+
+The first lookup after `/babysit` records a baseline and reports only PRs/MRs that are already
+ready or closed. The instructions ask the agent to check everything else itself. A notification
+that can't be sent is retried on the next poll.
+
+A PR/MR that stops being a session target stops being babysat. Only one session can babysit a
+PR/MR at a time. Babysitting needs the PR/MR status, so `reviewStatus: false` turns it off.
+
+### Workflow-specific rules
+
+Set `babysitSkill` to the ID of a skill that adds your team's rules, such as how to classify CI
+failures. `/babysit` then tells the agent to load it and to rely on the notifications instead of
+any polling the skill describes. When the skill isn't installed, `/babysit` shows a warning and
+uses the built-in instructions.
+
 ## Options
 
 Set options with the object form of the `plugins` entry in `opencode.json`:
@@ -300,6 +345,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `notifyAutomatedReviews` | `true`           | Tell the agent when an automated review finishes with feedback. The former name, `notifyDuoReview`, still works.                   |
 | `notifyHumanReviews`     | `true`           | Tell the agent about new human review feedback.                                                                                    |
 | `resumeSession`          | `true`           | Resume the session when telling the agent about a review. Set to `false` to queue the message for the session's next turn instead. |
+| `babysitSkill`           | None             | A skill that `/babysit` tells the agent to load when it's installed. See [Babysitting](#babysitting).                              |
 
 The server entry point reads every option, so changing one takes effect when the server
 plugin reloads. The CLI has no options of its own. Each checkout's server reads the
@@ -402,6 +448,8 @@ notifications resume the session. Set `reviewStatus` to `false` to keep only tit
   renders the footer and dialog.
 - `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
   agent.
+- `src/babysit.ts` stores what each session babysits, compares each lookup with what it saw
+  last, and writes the `/babysit` instructions and updates.
 
 Shared code never compares a forge against a specific name. It asks the forge's traits, or
 checks for a capability, instead. To add a forge, add its kind to `ForgeKind` and
