@@ -1,9 +1,8 @@
-import type { Plugin } from '@opencode/plugin';
+import type { Plugin } from '@opencode/plugin/tui';
 
-export type OpenCodeEvent =
-  ReturnType<Plugin.Context['event']['subscribe']> extends AsyncIterable<infer Event>
-    ? Event
-    : never;
+export type OpenCodeEvent = Parameters<
+  Parameters<Plugin.Context['data']['listen']>[0]
+>[0]['details'];
 
 export type EventOf<Type extends OpenCodeEvent['type']> = Extract<OpenCodeEvent, { type: Type }>;
 
