@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-1.0.2...opencode-homeassistant-1.1.0) (2026-10-27)
+
+
+### Features
+
+* support OpenCode 2.2 and remove forge-session-title ([#103](https://github.com/pedropombeiro/opencode-plugins/issues/103)) ([d8c0a86](https://github.com/pedropombeiro/opencode-plugins/commit/d8c0a867b4044164d5a11e007d8f61f515bb2dcd))
+
 ## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-homeassistant-1.0.1...opencode-homeassistant-1.0.2) (2026-09-24)
 
 
