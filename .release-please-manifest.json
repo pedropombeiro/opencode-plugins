@@ -3,5 +3,6 @@
   "packages/homeassistant": "1.1.0",
   "packages/forgekeeper": "2.3.0",
   "packages/atuin-history": "1.0.1",
-  "packages/tmux-indicator": "1.0.2"
+  "packages/tmux-indicator": "1.0.2",
+  "packages/session-search": "0.1.0"
 }
