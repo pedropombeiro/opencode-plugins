@@ -5,7 +5,7 @@ It prefixes the session title with their references, shows the PR/MR status in t
 footer, and tells the agent about new review feedback. It supports GitLab and GitHub. The status
 and review notifications are optional; see [Keep only session titles](#keep-only-session-titles).
 
-Requires OpenCode 2. It replaces
+Requires OpenCode 2.2 or later. It replaces
 [`opencode-forge-session-title`](https://www.npmjs.com/package/opencode-forge-session-title); see
 [Migrating from opencode-forge-session-title](#migrating-from-opencode-forge-session-title).
 
@@ -46,7 +46,9 @@ what's missing, such as `glab is not installed`.
 ## Session targets
 
 The server registers the `set_session_target` tool and adds instructions to the agent's
-context. When you establish or change the primary issue, PR, or MR, the agent sets its full
+context. The current target is stored in the `forgekeeper-session-target` session instruction
+entry. Updates take effect at the next step without changing the system prompt.
+When you establish or change the primary issue, PR, or MR, the agent sets its full
 URL as the session target. Background references, comparisons, and dependencies keep the
 current target. After the agent creates a PR/MR for the current task, it sets the new PR/MR
 as the target, passing the current issue as `issue_url`.

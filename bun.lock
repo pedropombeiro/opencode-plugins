@@ -38,15 +38,15 @@
       "name": "opencode-forgekeeper",
       "version": "2.2.1",
       "peerDependencies": {
-        "@opencode/plugin": "^2.0.26",
-        "@opentui/core": ">=0.5.8",
-        "@opentui/solid": ">=0.5.8",
+        "@opencode/plugin": "^2.2.0",
+        "@opentui/core": ">=0.7.0",
+        "@opentui/solid": ">=0.7.0",
         "solid-js": ">=1.9.0",
       },
     },
     "packages/homeassistant": {
       "name": "opencode-homeassistant",
-      "version": "1.0.2",
+      "version": "1.1.0",
       "peerDependencies": {
         "@opencode/plugin": "^2.2.0",
       },

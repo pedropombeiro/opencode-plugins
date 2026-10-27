@@ -17,7 +17,10 @@ import { setupServer } from './server';
 import type { Snapshot } from './store';
 import { flush } from './testing';
 
-type Tool = { execute: (input: unknown, context: { sessionID: string }) => Promise<unknown> };
+type Tool = {
+  options?: { codemode?: boolean };
+  execute: (input: unknown, context: { sessionID: string }) => Promise<unknown>;
+};
 type Hook = (event: {
   sessionID: string;
   system: { type: string; text: string }[];
@@ -169,6 +172,12 @@ async function harness(options: Options = {}) {
     },
   };
   let tool!: Tool;
+  const entries = new Map<string, Map<string, string>>();
+  const entriesOf = (sessionID: string) => {
+    if (!entries.has(sessionID)) entries.set(sessionID, new Map());
+    return entries.get(sessionID)!;
+  };
+  const entryWrites: string[] = [];
   let hook!: Hook;
   let renames = 0;
   let handlers: Record<string, (input: unknown) => Promise<unknown>> = {};
@@ -221,6 +230,24 @@ async function harness(options: Options = {}) {
       }),
     },
     session: {
+      instructions: {
+        entry: {
+          list: async ({ sessionID }: { sessionID: string }) =>
+            [...entriesOf(sessionID)].map(([key, value]) => ({ key, value })),
+          put: async ({
+            sessionID,
+            key,
+            value,
+          }: {
+            sessionID: string;
+            key: string;
+            value: string;
+          }) => {
+            entryWrites.push(`put ${key}`);
+            entriesOf(sessionID).set(key, value);
+          },
+        },
+      },
       get: async ({ sessionID }: { sessionID: string }) => {
         if (options.failingSession) throw new Error('unavailable');
         const next = nextRead;
@@ -331,7 +358,17 @@ async function harness(options: Options = {}) {
         (event) => event.name === 'status' && (event.data as { key: string }).key === key,
       )?.data as { snapshot: Snapshot } | undefined,
     set: (input: unknown, sessionID = 'one') => tool.execute(input, { sessionID }),
+    toolOptions: () => tool.options,
+    entries: (sessionID = 'one') => Object.fromEntries(entriesOf(sessionID)),
+    entryWrites,
     context: async (sessionID = 'one') => {
+      const event = { sessionID, system: [] as { type: string; text: string }[] };
+      await hook(event);
+      return [...event.system.map((part) => part.text), ...entriesOf(sessionID).values()].join(
+        '\n',
+      );
+    },
+    system: async (sessionID = 'one') => {
       const event = { sessionID, system: [] as { type: string; text: string }[] };
       await hook(event);
       return event.system.map((part) => part.text).join('\n');
@@ -344,6 +381,31 @@ const nextMr = 'https://gitlab.com/group/project/-/merge_requests/789';
 const issue = 'https://gitlab.com/group/project/-/issues/42';
 
 describe('session targets', () => {
+  test('registers set_session_target as a direct tool', async () => {
+    const app = await harness();
+    expect(app.toolOptions()).toEqual({ codemode: false });
+    await app.cleanup();
+  });
+
+  test('updates the instruction entry without changing the steady-state system prompt', async () => {
+    const app = await harness();
+    expect(await app.system()).toContain('Current session target: checked-out branch (automatic).');
+    const stable = await app.system();
+    expect(stable).not.toContain('Current session target');
+    await app.set({ target: mr });
+    expect(app.entries()['forgekeeper-session-target']).toContain(mr);
+    expect(await app.system()).toBe(stable);
+    await app.set({ target: mr });
+    expect(app.entryWrites).toEqual([
+      'put forgekeeper-session-target',
+      'put forgekeeper-session-target',
+    ]);
+    await app.set({ target: 'branch' });
+    expect(app.entries()['forgekeeper-session-target']).toContain('checked-out branch (automatic)');
+    expect(await app.system()).toBe(stable);
+    await app.cleanup();
+  });
+
   test('registers guidance and replaces branch references even on main', async () => {
     const app = await harness();
     expect(await app.context()).toContain('call set_session_target');
