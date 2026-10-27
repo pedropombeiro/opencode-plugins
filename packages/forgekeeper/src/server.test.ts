@@ -15,11 +15,19 @@ import type { TitleLookups } from './lookups';
 import { FETCH_INTERVAL, SETTLE_TIME } from './human-review-watch';
 import { setupServer } from './server';
 import type { Snapshot } from './store';
-import { flush } from './testing';
+import { flush, until } from './testing';
 
 type Tool = {
   options?: { codemode?: boolean };
   execute: (input: unknown, context: { sessionID: string }) => Promise<unknown>;
+};
+type Command = {
+  name: string;
+  execute: (input: {
+    sessionID: string;
+    prompt: { text: string };
+    delivery: string;
+  }) => Promise<void>;
 };
 type Hook = (event: {
   sessionID: string;
@@ -27,6 +35,7 @@ type Hook = (event: {
 }) => Promise<void>;
 
 interface Options {
+  babysitScan?: Promise<void>;
   storage?: Map<string, unknown>;
   branch?: { current: string; default: string };
   // What the checkout's forge reports for the branch.
@@ -52,6 +61,8 @@ interface Options {
   directory?: string;
   // Branch lookups for titles wait for `releaseBranch()`.
   holdBranch?: boolean;
+  // The IDs of the installed skills.
+  skills?: string[];
 }
 
 // A GitLab forge whose PRs/MRs the test changes between lookups. A gated
@@ -171,13 +182,9 @@ async function harness(options: Options = {}) {
       return options.sourceBranches?.get(ref.iid);
     },
   };
-  let tool!: Tool;
-  const entries = new Map<string, Map<string, string>>();
-  const entriesOf = (sessionID: string) => {
-    if (!entries.has(sessionID)) entries.set(sessionID, new Map());
-    return entries.get(sessionID)!;
-  };
-  const entryWrites: string[] = [];
+  const tools = new Map<string, Tool>();
+  const commands = new Map<string, Command>();
+  const prompts: Array<{ sessionID: string; text: string }> = [];
   let hook!: Hook;
   let renames = 0;
   let handlers: Record<string, (input: unknown) => Promise<unknown>> = {};
@@ -197,6 +204,13 @@ async function harness(options: Options = {}) {
   // Events for the plugin's subscription, which ends when it aborts.
   const events: unknown[] = [];
   let wake = () => {};
+  // The session instruction entries, per session.
+  const entries = new Map<string, Map<string, string>>();
+  const entriesOf = (sessionID: string) => {
+    if (!entries.has(sessionID)) entries.set(sessionID, new Map());
+    return entries.get(sessionID)!;
+  };
+  const entryWrites: string[] = [];
   const ctx = {
     rpc: {
       register: async (_definition: unknown, implementation: typeof handlers) => {
@@ -223,31 +237,16 @@ async function harness(options: Options = {}) {
       },
       set: async (key: string, value: unknown) => void storage.set(key, structuredClone(value)),
       remove: async (key: string) => void storage.delete(key),
-      scan: async ({ prefix }: { prefix: string }) => ({
-        entries: [...storage]
-          .filter(([key]) => key.startsWith(prefix))
-          .map(([key, value]) => ({ key, value: structuredClone(value) })),
-      }),
+      scan: async ({ prefix }: { prefix: string }) => {
+        if (prefix === 'babysit/') await options.babysitScan;
+        return {
+          entries: [...storage]
+            .filter(([key]) => key.startsWith(prefix))
+            .map(([key, value]) => ({ key, value: structuredClone(value) })),
+        };
+      },
     },
     session: {
-      instructions: {
-        entry: {
-          list: async ({ sessionID }: { sessionID: string }) =>
-            [...entriesOf(sessionID)].map(([key, value]) => ({ key, value })),
-          put: async ({
-            sessionID,
-            key,
-            value,
-          }: {
-            sessionID: string;
-            key: string;
-            value: string;
-          }) => {
-            entryWrites.push(`put ${key}`);
-            entriesOf(sessionID).set(key, value);
-          },
-        },
-      },
       get: async ({ sessionID }: { sessionID: string }) => {
         if (options.failingSession) throw new Error('unavailable');
         const next = nextRead;
@@ -272,12 +271,46 @@ async function harness(options: Options = {}) {
         }
         synthetic.push(input);
       },
+      prompt: async (input: { sessionID: string; text: string }) => void prompts.push(input),
+      instructions: {
+        entry: {
+          list: async ({ sessionID }: { sessionID: string }) =>
+            [...entriesOf(sessionID)].map(([key, value]) => ({ key, value })),
+          put: async ({
+            sessionID,
+            key,
+            value,
+          }: {
+            sessionID: string;
+            key: string;
+            value: string;
+          }) => {
+            entryWrites.push(`put ${key}`);
+            entriesOf(sessionID).set(key, value);
+          },
+          remove: async ({ sessionID, key }: { sessionID: string; key: string }) => {
+            entryWrites.push(`remove ${key}`);
+            entriesOf(sessionID).delete(key);
+          },
+        },
+      },
     },
     tool: {
-      transform: async (callback: (editor: { add: (value: Tool) => void }) => void) => {
-        callback({ add: (value) => (tool = value) });
+      transform: async (
+        callback: (editor: { add: (value: Tool & { name: string }) => void }) => void,
+      ) => {
+        callback({ add: (value) => tools.set(value.name, value) });
         return { dispose: async () => void disposed.push('tool') };
       },
+    },
+    command: {
+      transform: async (callback: (editor: { add: (value: Command) => void }) => void) => {
+        callback({ add: (value) => commands.set(value.name, value) });
+        return { dispose: async () => void disposed.push('command') };
+      },
+    },
+    skill: {
+      list: async () => ({ data: (options.skills ?? []).map((id) => ({ id })) }),
     },
     vcs: {
       get: async () => ({
@@ -357,10 +390,15 @@ async function harness(options: Options = {}) {
       emitted.findLast(
         (event) => event.name === 'status' && (event.data as { key: string }).key === key,
       )?.data as { snapshot: Snapshot } | undefined,
-    set: (input: unknown, sessionID = 'one') => tool.execute(input, { sessionID }),
-    toolOptions: () => tool.options,
-    entries: (sessionID = 'one') => Object.fromEntries(entriesOf(sessionID)),
-    entryWrites,
+    set: (input: unknown, sessionID = 'one') =>
+      tools.get('set_session_target')!.execute(input, { sessionID }),
+    toolOptions: (name: string) => tools.get(name)?.options,
+    babysit: (input: unknown, sessionID = 'one') =>
+      tools.get('babysit')!.execute(input, { sessionID }) as Promise<{ content: string }>,
+    command: (text: string, sessionID = 'one') =>
+      commands.get('babysit')!.execute({ sessionID, prompt: { text }, delivery: 'steer' }),
+    prompts,
+    // What the model reads: the system prompt of one request, then the entries.
     context: async (sessionID = 'one') => {
       const event = { sessionID, system: [] as { type: string; text: string }[] };
       await hook(event);
@@ -368,11 +406,14 @@ async function harness(options: Options = {}) {
         '\n',
       );
     },
+    // Only the system prompt of one request.
     system: async (sessionID = 'one') => {
       const event = { sessionID, system: [] as { type: string; text: string }[] };
       await hook(event);
       return event.system.map((part) => part.text).join('\n');
     },
+    entries: (sessionID = 'one') => Object.fromEntries(entriesOf(sessionID)),
+    entryWrites,
   };
 }
 
@@ -381,31 +422,6 @@ const nextMr = 'https://gitlab.com/group/project/-/merge_requests/789';
 const issue = 'https://gitlab.com/group/project/-/issues/42';
 
 describe('session targets', () => {
-  test('registers set_session_target as a direct tool', async () => {
-    const app = await harness();
-    expect(app.toolOptions()).toEqual({ codemode: false });
-    await app.cleanup();
-  });
-
-  test('updates the instruction entry without changing the steady-state system prompt', async () => {
-    const app = await harness();
-    expect(await app.system()).toContain('Current session target: checked-out branch (automatic).');
-    const stable = await app.system();
-    expect(stable).not.toContain('Current session target');
-    await app.set({ target: mr });
-    expect(app.entries()['forgekeeper-session-target']).toContain(mr);
-    expect(await app.system()).toBe(stable);
-    await app.set({ target: mr });
-    expect(app.entryWrites).toEqual([
-      'put forgekeeper-session-target',
-      'put forgekeeper-session-target',
-    ]);
-    await app.set({ target: 'branch' });
-    expect(app.entries()['forgekeeper-session-target']).toContain('checked-out branch (automatic)');
-    expect(await app.system()).toBe(stable);
-    await app.cleanup();
-  });
-
   test('registers guidance and replaces branch references even on main', async () => {
     const app = await harness();
     expect(await app.context()).toContain('call set_session_target');
@@ -518,7 +534,7 @@ describe('session targets', () => {
       { name: 'targetChanged', data: { sessionID: 'one' } },
     ]);
     await app.cleanup();
-    expect(app.disposed).toEqual(['tool', 'rpc']);
+    expect(app.disposed).toEqual(['command', 'tool', 'rpc']);
 
     const reloaded = await harness({ storage });
     await reloaded.set({ target: nextMr });
@@ -622,10 +638,62 @@ describe('session targets', () => {
     await app.cleanup();
   });
 
+  test('registers its tools as direct tools, since the guidance names them', async () => {
+    const app = await harness();
+    expect(app.toolOptions('set_session_target')).toEqual({ codemode: false });
+    expect(app.toolOptions('babysit')).toEqual({ codemode: false });
+    await app.cleanup();
+  });
+
+  test('keeps the system prompt constant and puts the target in an instruction entry', async () => {
+    const app = await harness();
+    expect(await app.system()).toContain('Current session target: checked-out branch (automatic).');
+    const stable = await app.system();
+    expect(stable).toContain('call set_session_target');
+    expect(stable).not.toContain('Current session target');
+    expect(app.entries()).toEqual({
+      'forgekeeper-session-target': 'Current session target: checked-out branch (automatic).',
+    });
+
+    await app.set({ target: mr });
+    expect(app.entries()['forgekeeper-session-target']).toContain(mr);
+    expect(await app.system()).toBe(stable);
+    await app.set({ target: 'branch' });
+    expect(app.entries()['forgekeeper-session-target']).toContain('checked-out branch (automatic)');
+    await app.cleanup();
+  });
+
+  test('writes an instruction entry only when it changed', async () => {
+    const app = await harness();
+    await app.context();
+    await app.context();
+    expect(app.entryWrites).toEqual(['put forgekeeper-session-target']);
+    await app.set({ target: mr });
+    await app.set({ target: mr });
+    await app.context();
+    expect(app.entryWrites).toEqual([
+      'put forgekeeper-session-target',
+      'put forgekeeper-session-target',
+    ]);
+    await app.cleanup();
+  });
+
+  test('keeps entries for sessions of this location only', async () => {
+    const app = await harness();
+    await app.set({ target: mr });
+    expect(Object.keys(app.entries('one'))).toEqual(['forgekeeper-session-target']);
+    expect(app.entries('two')).toEqual({});
+    app.sessions.get('two')!.parentID = 'one';
+    await app.context('two');
+    expect(app.entries('two')).toEqual({});
+    await app.cleanup();
+  });
+
   test('skips child sessions and sessions in another location', async () => {
     const app = await harness();
     app.sessions.get('one')!.parentID = 'parent';
     expect(await app.context()).toBe('');
+    expect(app.entryWrites).toEqual([]);
     await expect(app.set({ target: mr })).rejects.toThrow('root session');
     app.sessions.get('two')!.location.directory = '/another/location';
     expect(await app.context('two')).toBe('');
@@ -1293,6 +1361,258 @@ describe('state shared across instances and reloads', () => {
     await app.refresh();
     await settle();
     expect(app.synthetic).toEqual([]);
+    await app.cleanup();
+  });
+});
+
+describe('babysitting', () => {
+  const projectA = 'https://gitlab.com/group/a/-/merge_requests/1';
+  const projectB = 'https://gitlab.com/group/b/-/merge_requests/1';
+  const quiet = { notifyHumanReviews: false };
+  const healthy = {
+    headSha: 'aaaa1111',
+    pipeline: { status: 'RUNNING', label: 'running' },
+    conflicts: false,
+    conflictsKnown: true,
+    unresolvedThreads: 0,
+    threadsComplete: true,
+  };
+  const babysat = (storage: Map<string, unknown>, sessionID = 'one') =>
+    Object.keys(
+      (storage.get(`babysit/${sessionID}`) as { items: Record<string, unknown> } | undefined)
+        ?.items ?? {},
+    );
+
+  test('/babysit adds the MR as a target and starts the agent with built-in instructions', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(projectA);
+    await settle();
+    expect(app.storage.get('sessions/one')).toMatchObject({ targets: [{ url: projectA }] });
+    expect(babysat(app.storage)).toEqual([projectA]);
+    expect(app.prompts).toHaveLength(1);
+    expect(app.prompts[0].text).toContain(projectA);
+    expect(app.prompts[0].text).toContain('Do not poll');
+    expect(app.prompts[0].text).not.toContain('skill');
+    expect(await app.context()).toContain(`This session babysits ${projectA}`);
+    await app.cleanup();
+  });
+
+  test('keeps a babysitting entry for as long as the session babysits', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(projectA);
+    await settle();
+    expect(app.entries()['forgekeeper-babysitting']).toContain(`This session babysits ${projectA}`);
+    expect(app.entries()['forgekeeper-babysitting']).toContain('do not poll');
+    expect(await app.system()).not.toContain('babysits');
+
+    await app.command('stop');
+    await settle();
+    expect(app.entries()).not.toHaveProperty('forgekeeper-babysitting');
+    expect(app.entries()).toHaveProperty('forgekeeper-session-target');
+    await app.cleanup();
+  });
+
+  test('removes the babysitting entry once the MR is ready', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(projectA);
+    await settle();
+    expect(app.entries()).toHaveProperty('forgekeeper-babysitting');
+
+    forge.set('group/a', '1', { ...healthy, pipeline: { status: 'SUCCESS', label: 'passed' } });
+    await app.refresh();
+    await settle();
+    expect(babysat(app.storage)).toEqual([]);
+    expect(app.entries()).not.toHaveProperty('forgekeeper-babysitting');
+    await app.cleanup();
+  });
+
+  test('polls without a CLI and reports each CI failure once per head commit', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(projectA);
+    await settle();
+    expect(forge.lookups.length).toBeGreaterThan(0);
+    expect(app.synthetic).toEqual([]);
+
+    forge.set('group/a', '1', { ...healthy, pipeline: { status: 'FAILED', label: 'failed' } });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(1);
+    expect(app.synthetic[0].text).toContain('pipeline failed at aaaa1111');
+
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(1);
+
+    // An old failure isn't reported after a push, but the new head's is.
+    forge.set('group/a', '1', { ...healthy, headSha: 'bbbb2222' });
+    await app.refresh();
+    await settle();
+    forge.set('group/a', '1', {
+      ...healthy,
+      headSha: 'bbbb2222',
+      pipeline: { status: 'FAILED', label: 'failed' },
+    });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(2);
+    expect(app.synthetic[1].text).toContain('bbbb2222');
+    await app.cleanup();
+  });
+
+  test('stops babysitting an MR once it is ready, and says when everything is done', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(projectA);
+    await settle();
+    forge.set('group/a', '1', {
+      ...healthy,
+      pipeline: { status: 'SUCCESS', label: 'passed' },
+      unresolvedThreads: 1,
+    });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toEqual([]);
+
+    forge.set('group/a', '1', { ...healthy, pipeline: { status: 'SUCCESS', label: 'passed' } });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(1);
+    expect(app.synthetic[0].text).toContain('ready for human review');
+    expect(app.synthetic[0].text).toContain('Babysitting is finished');
+    expect(babysat(app.storage)).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('reports merge conflicts and closed MRs', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    forge.set('group/b', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(`${projectA} ${projectB}`);
+    await settle();
+    forge.set('group/a', '1', { ...healthy, conflicts: true });
+    forge.set('group/b', '1', { ...healthy, state: 'merged' });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(1);
+    expect(app.synthetic[0].text).toContain('merge conflicts');
+    expect(app.synthetic[0].text).toContain('it was merged');
+    expect(babysat(app.storage)).toEqual([projectA]);
+    await app.cleanup();
+  });
+
+  test('retries an update that could not be sent', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet, failingSynthetic: 1 });
+    await app.command(projectA);
+    await settle();
+    forge.set('group/a', '1', { ...healthy, pipeline: { status: 'FAILED', label: 'failed' } });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toEqual([]);
+    expect(JSON.stringify(app.notices())).toContain('Retrying on the next poll');
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(1);
+    await app.cleanup();
+  });
+
+  test('loads the configured skill only when it is installed', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const pluginOptions = { ...quiet, babysitSkill: 'team-babysit' };
+    const missing = await harness({ status: forge, pluginOptions });
+    await missing.command(projectA);
+    expect(missing.prompts[0].text).not.toContain('team-babysit');
+    expect(missing.notices()).toMatchObject([
+      { message: expect.stringContaining('"team-babysit" is not installed') },
+    ]);
+    await missing.cleanup();
+
+    const installed = await harness({ status: forge, pluginOptions, skills: ['team-babysit'] });
+    await installed.command(projectA);
+    expect(installed.prompts[0].text).toContain('Load the `team-babysit` skill');
+    await installed.cleanup();
+  });
+
+  test('never lets two sessions babysit the same MR', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(projectA);
+    await app.command(projectA, 'two');
+    expect(app.prompts).toHaveLength(1);
+    expect(JSON.stringify(app.notices())).toContain('Another session already babysits');
+    expect(babysat(app.storage, 'two')).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('stops when the target is removed or on /babysit stop', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    forge.set('group/b', '1', healthy);
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.command(`${projectA} ${projectB}`);
+    await app.set({ targets: [projectB], operation: 'remove' });
+    expect(babysat(app.storage)).toEqual([projectA]);
+    expect((await app.babysit({ operation: 'status' })).content).toContain(projectA);
+    await app.command('stop');
+    expect(babysat(app.storage)).toEqual([]);
+    expect(JSON.stringify(app.notices())).toContain(`Stopped babysitting ${projectA}`);
+    await app.cleanup();
+  });
+
+  test('keeps babysitting after a reload, without a CLI', async () => {
+    const storage = new Map<string, unknown>();
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const first = await harness({ status: forge, storage, pluginOptions: quiet });
+    await first.command(projectA);
+    await settle();
+    await first.cleanup();
+
+    forge.set('group/a', '1', { ...healthy, pipeline: { status: 'FAILED', label: 'failed' } });
+    const second = await harness({ status: forge, storage, pluginOptions: quiet });
+    await until(() => second.synthetic.length === 1);
+    expect(second.synthetic[0].text).toContain('pipeline failed');
+    await second.cleanup();
+  });
+
+  test('loads babysitting instructions before background restoration finishes', async () => {
+    const storage = new Map<string, unknown>([
+      ['sessions/one', { targets: [{ url: projectA }] }],
+      ['babysit/one', { directory: '/repo', started: 1, items: { [projectA]: {} } }],
+    ]);
+    let release = () => {};
+    const babysitScan = new Promise<void>((resolve) => (release = resolve));
+    const forge = new StatusForge();
+    forge.set('group/a', '1', healthy);
+    const app = await harness({ storage, status: forge, pluginOptions: quiet, babysitScan });
+    try {
+      expect(await app.context()).toContain(`This session babysits ${projectA}`);
+      expect(app.entries()['forgekeeper-babysitting']).toContain(projectA);
+    } finally {
+      release();
+      await settle();
+      await app.cleanup();
+    }
+  });
+
+  test('explains that babysitting needs PR/MR status', async () => {
+    const app = await harness({ pluginOptions: { reviewStatus: false } });
+    await app.command(projectA);
+    expect(app.prompts).toEqual([]);
+    expect(app.notices()).toMatchObject([{ variant: 'error' }]);
     await app.cleanup();
   });
 });

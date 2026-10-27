@@ -9,6 +9,8 @@ export interface StatusOptions {
   // Whether a review notification resumes the session, or waits in its
   // queue for the next turn.
   resumeSession: boolean;
+  // A skill that /babysit tells the agent to load, when it's installed.
+  babysitSkill?: string;
 }
 
 export function statusOptions(options: unknown): StatusOptions {
@@ -21,5 +23,8 @@ export function statusOptions(options: unknown): StatusOptions {
     notifyAutomatedReviews: (source.notifyAutomatedReviews ?? source.notifyDuoReview) !== false,
     notifyHumanReviews: source.notifyHumanReviews !== false,
     resumeSession: source.resumeSession !== false,
+    ...(typeof source.babysitSkill === 'string' && source.babysitSkill.trim()
+      ? { babysitSkill: source.babysitSkill.trim() }
+      : {}),
   };
 }

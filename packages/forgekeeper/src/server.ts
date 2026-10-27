@@ -1,4 +1,5 @@
 import type { Plugin } from '@opencode/plugin';
+import { startPrompt } from './babysit';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
 import { statusOptions } from './options';
@@ -14,6 +15,7 @@ import {
   targetRequest,
   targetsPrefix,
   type Target,
+  type TargetChange,
 } from './target';
 import { branchPrefix, extractIssueNumber, reconcileTitle } from './title';
 
@@ -25,7 +27,10 @@ const SKIP_BRANCHES = new Set(['master', 'main', 'HEAD', 'develop']);
 type StoredState = { targets?: Target[]; prefix?: string };
 type SessionState = { targets: Target[]; prefix?: string };
 
+// Session instruction entries. Unlike the system prompt, changing one doesn't
+// invalidate the prompt cache, and the model sees it at the next step.
 const TARGET_KEY = 'forgekeeper-session-target';
+const BABYSIT_KEY = 'forgekeeper-babysitting';
 
 const GUIDANCE = [
   'When the user establishes or changes the primary issue, PR, or MR for this session, call set_session_target with its full URL before starting that work.',
@@ -35,7 +40,7 @@ const GUIDANCE = [
   'Background references, comparisons, and dependencies do not change the target. Follow-ups without a new primary target keep the current target.',
   'Include issue_url only when its relationship to the target PRs/MRs is established. Never carry over the checked-out branch’s issue to another target.',
   'When the user explicitly returns to work on the checked-out branch, call set_session_target with target "branch".',
-  `The current session target is in the <context> entry "${TARGET_KEY}". The plugin updates it when it changes, so trust the latest value.`,
+  `The current session target, and any babysitting, are in the <context> entries "${TARGET_KEY}" and "${BABYSIT_KEY}". The plugin updates them when they change, so trust the latest ones.`,
 ];
 
 function describeTargets(targets: readonly Target[]): string {
@@ -43,6 +48,9 @@ function describeTargets(targets: readonly Target[]): string {
   if (targets.length === 1) return JSON.stringify(targets[0]);
   return `${targets.length} targets: ${JSON.stringify(targets)}`;
 }
+
+const babysitNote = (urls: readonly string[]) =>
+  `This session babysits ${urls.join(', ')} until they are ready for human review. Handle each babysitting update and review notification, then end your turn; do not poll or sleep. Call babysit with operation "stop" when a PR/MR needs the user.`;
 
 function toolResult(targets: readonly Target[], missing: readonly string[]): string {
   const lines =
@@ -150,6 +158,7 @@ export async function setupServer(
           .emit('status', { directory: ctx.location.directory, key, snapshot: json(snapshot) })
           .catch(() => {}),
       notice: (notice) => void rpc.events.emit('notice', json(notice)).catch(() => {}),
+      babysitUpdated: (sessionID) => void instruct(sessionID).catch(() => {}),
     });
   }
 
@@ -212,6 +221,8 @@ export async function setupServer(
   }
 
   const tools = await ctx.tool.transform((editor) => {
+    // Guidance and prompts tell the agent to call these by name, so they are
+    // direct tools instead of reaching the agent only through Code Mode.
     editor.add({
       name: 'set_session_target',
       options: { codemode: false },
@@ -245,41 +256,217 @@ export async function setupServer(
         additionalProperties: false,
       },
       execute: async (input, { sessionID }) => {
-        const change = parseTargetChange(input);
-        let result: { targets: Target[]; missing: string[] } = { targets: [], missing: [] };
-        await schedule(sessionID, async () => {
-          const session = await ctx.session.get({ sessionID });
-          if (session.parentID || session.location.directory !== ctx.location.directory) {
-            throw new Error('Session targets can only be set in the current root session.');
-          }
-          const state = await stateFor(sessionID);
-          result = applyTargetChange(state.targets, change);
-          await inferIssues(result.targets, state.targets);
-          await save(sessionID, {
-            targets: result.targets,
-            ...(state.prefix ? { prefix: state.prefix } : {}),
-          });
-          watcher?.targetsChanged(sessionID, result.targets);
-          await instruct(sessionID).catch(() => {});
-          await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
-          await update(sessionID);
-        });
+        const result = await changeTargets(sessionID, parseTargetChange(input));
         return { content: toolResult(result.targets, result.missing) };
+      },
+    });
+    editor.add({
+      name: 'babysit',
+      options: { codemode: false },
+      description:
+        'Babysit PR/MR session targets until they are ready for human review: the plugin watches their CI, merge conflicts, and reviews, and resumes the session when one needs attention. Use operation "start" only when the user asks to babysit or watch PRs/MRs; it adds any given URLs as session targets, and without urls it babysits every PR/MR target. Use "stop" when a PR/MR needs the user or the user asks to stop, with urls to stop only some. Use "status" to list what is babysat.',
+      input: {
+        type: 'object',
+        properties: {
+          operation: { type: 'string', enum: ['start', 'stop', 'status'] },
+          urls: {
+            type: 'array',
+            items: { type: 'string' },
+            minItems: 1,
+            maxItems: MAX_TARGETS,
+            description: 'Full PR/MR URLs. Defaults to every babysat PR/MR or PR/MR target.',
+          },
+        },
+        required: ['operation'],
+        additionalProperties: false,
+      },
+      execute: async (input, { sessionID }) => {
+        const { operation, urls } = input as { operation: string; urls?: string[] };
+        if (operation === 'start') {
+          const started = await startBabysit(sessionID, urls);
+          return { content: [started.text, ...started.notes].join('\n\n') };
+        }
+        if (operation === 'stop') return { content: await stopBabysit(sessionID, urls) };
+        return { content: await babysitStatus(sessionID) };
       },
     });
   });
 
-  async function writeInstructions(sessionID: string): Promise<string[]> {
-    if (closing) return [];
-    const state = await stateFor(sessionID);
-    const value = `Current session target: ${describeTargets(state.targets)}.`;
-    const entries = await ctx.session.instructions.entry.list({ sessionID });
-    if (entries.some((entry) => entry.key === TARGET_KEY && entry.value === value)) return [];
-    if (closing) return [];
-    await ctx.session.instructions.entry.put({ sessionID, key: TARGET_KEY, value });
-    return [value];
+  const commands = await ctx.command.transform((editor) => {
+    editor.add({
+      name: 'babysit',
+      description:
+        'Babysit PRs/MRs until they are ready for human review. Usage: /babysit [URL...], /babysit status, /babysit stop [URL...]',
+      execute: async ({ sessionID, prompt, delivery }) => {
+        const words = prompt.text.trim().split(/\s+/).filter(Boolean);
+        const tell = (message: string, variant: 'info' | 'error' = 'info') =>
+          void rpc.events
+            .emit('notice', { sessionID, title: 'Babysit', message, variant })
+            .catch(() => {});
+        try {
+          if (words[0] === 'stop') return tell(await stopBabysit(sessionID, words.slice(1)));
+          if (words[0] === 'status') return tell(await babysitStatus(sessionID));
+          const started = await startBabysit(sessionID, words);
+          for (const note of started.notes) tell(note);
+          await ctx.session.prompt({ sessionID, text: started.text, delivery });
+        } catch (error) {
+          tell(error instanceof Error ? error.message : String(error), 'error');
+        }
+      },
+    });
+  });
+
+  async function rootSession(sessionID: string, what: string) {
+    const session = await ctx.session.get({ sessionID });
+    if (session.parentID || session.location.directory !== ctx.location.directory) {
+      throw new Error(`${what} only in the current root session.`);
+    }
   }
 
+  async function changeTargets(sessionID: string, change: TargetChange) {
+    let result: { targets: Target[]; missing: string[] } = { targets: [], missing: [] };
+    await schedule(sessionID, async () => {
+      await rootSession(sessionID, 'Session targets can be set');
+      const state = await stateFor(sessionID);
+      result = applyTargetChange(state.targets, change);
+      await inferIssues(result.targets, state.targets);
+      await save(sessionID, {
+        targets: result.targets,
+        ...(state.prefix ? { prefix: state.prefix } : {}),
+      });
+      // A PR/MR that is no longer a target is no longer babysat.
+      const kept = new Set(result.targets.map((target) => target.url));
+      await watcher?.babysitter.prune(sessionID, (url) => kept.has(url));
+      watcher?.targetsChanged(sessionID, result.targets);
+      watcher?.babysitChanged(sessionID);
+      await instruct(sessionID).catch(() => {});
+      await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
+      await update(sessionID);
+    });
+    return result;
+  }
+
+  function babysitting() {
+    if (!watcher)
+      throw new Error('Babysitting needs PR/MR status, which the reviewStatus option turned off.');
+    return watcher;
+  }
+
+  // The normalized URLs, as session targets store them.
+  const normalize = (urls: readonly string[]) => {
+    const change = parseTargetChange({ targets: urls, operation: 'add' });
+    return change.operation === 'branch' ? [] : change.targets.map((target) => target.url);
+  };
+
+  // The configured skill, if it's installed. A missing skill falls back to
+  // the built-in instructions.
+  async function babysitSkill(): Promise<{ skill?: string; missing?: string }> {
+    const name = settings.babysitSkill;
+    if (!name) return {};
+    try {
+      const skills = await ctx.skill.list();
+      if (skills.data.some((skill) => skill.id === name)) return { skill: name };
+    } catch {
+      // Treated as missing.
+    }
+    return { missing: name };
+  }
+
+  async function startBabysit(sessionID: string, urls?: readonly string[]) {
+    const status = babysitting();
+    await rootSession(sessionID, 'Babysitting can start');
+    const wanted = urls?.length ? normalize(urls) : undefined;
+    if (wanted)
+      await changeTargets(sessionID, parseTargetChange({ targets: wanted, operation: 'add' }));
+    const candidates = (await stateFor(sessionID)).targets
+      .filter((target) => targetRequest(target))
+      .map((target) => target.url)
+      .filter((url) => !wanted || wanted.includes(url));
+    if (candidates.length === 0)
+      throw new Error(
+        wanted
+          ? 'Only PRs/MRs can be babysat, not issues.'
+          : 'This session has no PR/MR targets. Pass their URLs: /babysit <URL>...',
+      );
+    const { added, claimed } = await status.babysitter.start(sessionID, candidates);
+    status.babysitChanged(sessionID);
+    const elsewhere = claimed.map((claim) => `${claim.url} (session ${claim.sessionID})`);
+    if (added.length === 0)
+      throw new Error(`Another session already babysits ${elsewhere.join(', ')}.`);
+    const skill = await babysitSkill();
+    const notes = [
+      ...(elsewhere.length ? [`Another session already babysits ${elsewhere.join(', ')}.`] : []),
+      ...(skill.missing
+        ? [
+            `The babysitSkill "${skill.missing}" is not installed, so babysitting uses the built-in instructions.`,
+          ]
+        : []),
+    ];
+    return { added, notes, text: startPrompt(added, skill.skill) };
+  }
+
+  async function stopBabysit(sessionID: string, urls?: readonly string[]) {
+    const status = babysitting();
+    const stopped = await status.babysitter.stop(
+      sessionID,
+      urls?.length ? normalize(urls) : undefined,
+    );
+    status.babysitChanged(sessionID);
+    return stopped.length
+      ? `Stopped babysitting ${stopped.join(', ')}.`
+      : 'Nothing matching was being babysat.';
+  }
+
+  async function babysitStatus(sessionID: string) {
+    const record = await babysitting().babysitter.get(sessionID);
+    const items = Object.entries(record?.items ?? {});
+    if (items.length === 0) return 'This session babysits no PRs/MRs.';
+    return [
+      `Babysitting ${items.length} PR/MR${items.length === 1 ? '' : 's'}:`,
+      ...items.map(
+        ([url, state]) =>
+          `- ${url}${state.observed ? `: CI ${state.ci?.toLowerCase() ?? 'unknown'}${state.conflicts ? ', merge conflicts' : ''}` : ': waiting for the first check'}`,
+      ),
+    ].join('\n');
+  }
+
+  // The entries the session should have, as the model reads them.
+  async function wantedEntries(sessionID: string) {
+    const state = await stateFor(sessionID);
+    const wanted = new Map([
+      [TARGET_KEY, `Current session target: ${describeTargets(state.targets)}.`],
+    ]);
+    const urls = Object.keys((await watcher?.babysitter.get(sessionID))?.items ?? {});
+    if (urls.length) wanted.set(BABYSIT_KEY, babysitNote(urls));
+    return wanted;
+  }
+
+  // Brings the session's entries up to date, and returns the ones it wrote.
+  // It compares with the stored entries instead of remembering what it wrote,
+  // so it also corrects entries after a failed write or a reload.
+  async function writeInstructions(sessionID: string) {
+    if (closing) return [];
+    const wanted = await wantedEntries(sessionID);
+    const current = new Map(
+      (await ctx.session.instructions.entry.list({ sessionID })).map((entry) => [
+        entry.key,
+        entry.value,
+      ]),
+    );
+    const written: string[] = [];
+    for (const [key, value] of wanted) {
+      if (current.get(key) === value) continue;
+      await ctx.session.instructions.entry.put({ sessionID, key, value });
+      written.push(value);
+    }
+    for (const key of [TARGET_KEY, BABYSIT_KEY]) {
+      if (!wanted.has(key) && current.has(key))
+        await ctx.session.instructions.entry.remove({ sessionID, key });
+    }
+    return written;
+  }
+
+  // Runs one write at a time per session, so a stale read can't overwrite a newer one.
   function instruct(sessionID: string): Promise<string[]> {
     const next = (instructing.get(sessionID) ?? Promise.resolve()).then(() =>
       writeInstructions(sessionID),
@@ -298,6 +485,9 @@ export async function setupServer(
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (session.parentID || session.location.directory !== ctx.location.directory) return;
       event.system.push({ type: 'text', text: GUIDANCE.join('\n') });
+      // The model sees an entry from the next step on. What this call wrote
+      // goes into this request too, so a session's first request, or the
+      // first after a reload, doesn't lack its target.
       const written = await instruct(event.sessionID);
       if (written.length) event.system.push({ type: 'text', text: written.join('\n') });
     } catch {
@@ -352,6 +542,7 @@ export async function setupServer(
     controller.abort();
     await drain([...pending.values()], DRAIN_TIME);
     await watcher?.dispose();
+    await commands.dispose();
     await tools.dispose();
     await rpc.dispose();
   };

@@ -10,6 +10,7 @@ import {
   type PendingDelivery,
   type ReviewHistory,
 } from './automated-review-watch';
+import { createBabysitter, type BabysitRecord } from './babysit';
 import type { Exec } from './exec';
 import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
 import { reference, traitsOf, type ForgeCatalog } from './forges';
@@ -53,6 +54,8 @@ export interface StatusHost {
   isTarget: (sessionID: string, url: string) => boolean;
   publish: (key: string, snapshot: Snapshot) => void;
   notice: (notice: Notice) => void;
+  // After the PRs/MRs a session babysits changed.
+  babysitUpdated?: (sessionID: string) => void;
 }
 
 // Storage keys. Every checkout's instance shares this plugin's storage, so
@@ -66,6 +69,8 @@ const pendingKey = (sessionID: string, url: string) =>
 const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
 const reviewHistoryKey = (sessionID: string, url: string) =>
   `status/reviews/${encodeURIComponent(sessionID)}/${encodeURIComponent(url)}`;
+const BABYSIT_PREFIX = 'babysit/';
+const babysitKey = (sessionID: string) => `${BABYSIT_PREFIX}${encodeURIComponent(sessionID)}`;
 
 // The title without the prefix this plugin wrote.
 export function userTitle(
@@ -147,6 +152,7 @@ export async function setupStatus(
     if (foreign.has(sessionID)) return;
     foreign.add(sessionID);
     automated?.forget(sessionID);
+    babysitter.forget(sessionID);
     invalidate(sessionID);
   }
 
@@ -272,6 +278,54 @@ export async function setupStatus(
       })
     : undefined;
 
+  const babysitter = createBabysitter({
+    directory,
+    now: deps.now,
+    read: async (sessionID) =>
+      (await ctx.storage.get(babysitKey(sessionID))) as BabysitRecord | undefined,
+    // Waits for the write, so a command reports only what was stored.
+    write: (sessionID, record) => {
+      if (closed) return Promise.reject(new Error('The plugin stopped'));
+      return new Promise<void>((resolve, reject) =>
+        write(async () => {
+          try {
+            if (record) await ctx.storage.set(babysitKey(sessionID), record as never);
+            else await ctx.storage.remove(babysitKey(sessionID));
+            resolve();
+          } catch (error) {
+            reject(error);
+            throw error;
+          }
+        }),
+      );
+    },
+    scan: async () =>
+      (await scanAll(BABYSIT_PREFIX)).map(({ key, value }) => ({
+        sessionID: decodeURIComponent(key.slice(BABYSIT_PREFIX.length)),
+        record: value as BabysitRecord,
+      })),
+    changed: (sessionID) => host.babysitUpdated?.(sessionID),
+    async send(sessionID, requests, compose) {
+      const sent = await tell(sessionID, requests, compose);
+      if (sent.length > 0)
+        notice({
+          sessionID,
+          title: compose(sent).description,
+          message: 'Sent to the agent.',
+          variant: 'info',
+        });
+      return sent;
+    },
+    onSendError(error, sessionID) {
+      const reason = error instanceof Error ? error.message : String(error);
+      notice({
+        sessionID,
+        message: `Could not tell the session about its babysitting update: ${reason}. Retrying on the next poll.`,
+        variant: 'error',
+      });
+    },
+  });
+
   const service = createStatusService({
     async load(key, previous) {
       if (key === HOME) return locate(deps.forges, { directory });
@@ -280,6 +334,7 @@ export async function setupStatus(
         // Not `markForeign`: invalidating would discard this very lookup.
         foreign.add(key);
         automated?.forget(key);
+        babysitter.forget(key);
         return { kind: 'none', reason: 'The session moved to another checkout' };
       }
       foreign.delete(key);
@@ -296,12 +351,21 @@ export async function setupStatus(
     publish: host.publish,
     automated,
     human,
+    pinned: (sessionID) => babysitter.active(sessionID),
+    babysit: { observe: (sessionID, lookup) => babysitter.observe(sessionID, lookup) },
     onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
     now: deps.now,
   });
   invalidate = (sessionID) => service.invalidate(sessionID);
+
+  // Babysitting survives restarts: this checkout's sessions poll again
+  // without waiting for a CLI to show them.
+  void babysitter
+    .restore()
+    .then((sessionIDs) => sessionIDs.forEach((sessionID) => service.resync(sessionID)))
+    .catch((error) => reportOnce('babysit', 'Could not restore babysitting', error));
 
   // Housekeeping, on the write queue so it doesn't hold up setup: removes
   // feedback records not seen for a long time.
@@ -314,6 +378,9 @@ export async function setupStatus(
 
   return {
     service,
+    babysitter,
+    // After babysitting starts or stops, so the session polls or stops.
+    babysitChanged: (sessionID: string) => service.resync(sessionID),
     // Discards lookups of the old targets and looks the session up again.
     // Whether the new targets include a PR/MR is known now, so the footer
     // doesn't depend on that lookup succeeding.
