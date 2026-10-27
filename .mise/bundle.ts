@@ -4,7 +4,7 @@ const usage = 'Usage: bun .mise/bundle.ts <package-dir> <outdir> [--sourcemap]';
 const [pkg, outdir, ...flags] = Bun.argv.slice(2);
 if (!pkg || !outdir) throw new Error(usage);
 
-for (const file of ['index.ts', 'tui.ts', 'tui.tsx']) {
+for (const file of ['index.ts', 'tui.ts', 'tui.tsx', 'worker.ts']) {
   const entry = `${pkg}/src/${file}`;
   if (!(await Bun.file(entry).exists())) continue;
   const result = await Bun.build({

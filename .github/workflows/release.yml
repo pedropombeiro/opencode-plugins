@@ -22,6 +22,7 @@ jobs:
       forgekeeper--release_created: ${{ steps.release.outputs['packages/forgekeeper--release_created'] }}
       atuin-history--release_created: ${{ steps.release.outputs['packages/atuin-history--release_created'] }}
       tmux-indicator--release_created: ${{ steps.release.outputs['packages/tmux-indicator--release_created'] }}
+      session-search--release_created: ${{ steps.release.outputs['packages/session-search--release_created'] }}
     steps:
       - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
         id: release
@@ -46,6 +47,8 @@ jobs:
             enabled: ${{ needs.release-please.outputs['atuin-history--release_created'] }}
           - package: tmux-indicator
             enabled: ${{ needs.release-please.outputs['tmux-indicator--release_created'] }}
+          - package: session-search
+            enabled: ${{ needs.release-please.outputs['session-search--release_created'] }}
     steps:
       - if: matrix.enabled == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
