@@ -36,6 +36,6 @@
   ],
   "license": "MIT",
   "peerDependencies": {
-    "@opencode/plugin": "^2.0.0"
+    "@opencode/plugin": "^2.2.0"
   }
 }

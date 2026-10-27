@@ -2,7 +2,7 @@
 
 An [OpenCode](https://opencode.ai) plugin that sends agent status to [Home Assistant](https://www.home-assistant.io) via webhooks -- and optionally lets you respond to permission requests from HA.
 
-Requires OpenCode 2. For OpenCode 1, install the `opencode-v1` dist-tag
+Requires OpenCode 2.2 or later. For OpenCode 1, install the `opencode-v1` dist-tag
 (`npm install opencode-homeassistant@opencode-v1`).
 
 ## Features

@@ -19,7 +19,6 @@ jobs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       terminal-progress--release_created: ${{ steps.release.outputs['packages/terminal-progress--release_created'] }}
       homeassistant--release_created: ${{ steps.release.outputs['packages/homeassistant--release_created'] }}
-      forge-session-title--release_created: ${{ steps.release.outputs['packages/forge-session-title--release_created'] }}
       forgekeeper--release_created: ${{ steps.release.outputs['packages/forgekeeper--release_created'] }}
       atuin-history--release_created: ${{ steps.release.outputs['packages/atuin-history--release_created'] }}
       tmux-indicator--release_created: ${{ steps.release.outputs['packages/tmux-indicator--release_created'] }}
@@ -41,8 +40,6 @@ jobs:
             enabled: ${{ needs.release-please.outputs['terminal-progress--release_created'] }}
           - package: homeassistant
             enabled: ${{ needs.release-please.outputs['homeassistant--release_created'] }}
-          - package: forge-session-title
-            enabled: ${{ needs.release-please.outputs['forge-session-title--release_created'] }}
           - package: forgekeeper
             enabled: ${{ needs.release-please.outputs['forgekeeper--release_created'] }}
           - package: atuin-history
