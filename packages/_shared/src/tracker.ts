@@ -3,6 +3,21 @@ import { formDetail, permissionDetail, type WaitingDetail } from './waiting.ts';
 
 export type AgentState = 'busy' | 'idle' | 'waiting' | 'error';
 
+export const TRACKED_EVENTS = [
+  'session.status',
+  'session.execution.started',
+  'session.step.started',
+  'session.idle',
+  'session.execution.succeeded',
+  'session.execution.interrupted',
+  'session.execution.failed',
+  'permission.asked',
+  'permission.replied',
+  'form.created',
+  'form.replied',
+  'form.cancelled',
+] as const satisfies readonly OpenCodeEvent['type'][];
+
 type Callback<Args extends unknown[]> = (...args: Args) => Promise<void> | void;
 
 export interface AgentStateOptions {

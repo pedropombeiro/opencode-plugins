@@ -48,7 +48,7 @@
       "name": "opencode-homeassistant",
       "version": "1.0.2",
       "peerDependencies": {
-        "@opencode/plugin": "^2.0.0",
+        "@opencode/plugin": "^2.2.0",
       },
     },
     "packages/terminal-progress": {

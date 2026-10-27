@@ -6,6 +6,7 @@ import type { Plugin } from '@opencode/plugin';
 import {
   createAgentStateTracker,
   createLocationFilter,
+  TRACKED_EVENTS,
   type FormInfo,
   type OpenCodeEvent,
   type WaitingDetail,
@@ -621,7 +622,10 @@ export default {
 
     const controller = new AbortController();
     void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+      for await (const event of ctx.event.subscribe({
+        types: [...TRACKED_EVENTS],
+        signal: controller.signal,
+      })) {
         if (await owns(event)) await homeAssistant.handle(event);
       }
     })().catch(() => {});

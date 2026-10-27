@@ -1,4 +1,9 @@
-export { createAgentStateTracker, type AgentState, type AgentStateOptions } from './tracker.ts';
+export {
+  createAgentStateTracker,
+  TRACKED_EVENTS,
+  type AgentState,
+  type AgentStateOptions,
+} from './tracker.ts';
 export { exec, type ExecOptions, type ExecResult } from './exec.ts';
 export { createLocationFilter, eventSessionID } from './location.ts';
 export { createViewFilter } from './view.ts';
