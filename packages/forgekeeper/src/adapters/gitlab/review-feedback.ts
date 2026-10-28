@@ -1,5 +1,5 @@
-import type { FeedbackSnapshot } from './forge';
-import { SETTLE_TIME } from './human-review-watch';
+import type { FeedbackSnapshot } from '../../forge';
+import { SETTLE_TIME } from '../../human-review-watch';
 
 export function duoFindings(snapshot: FeedbackSnapshot): FeedbackSnapshot {
   return {

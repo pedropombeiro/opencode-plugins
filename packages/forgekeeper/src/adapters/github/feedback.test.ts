@@ -5,9 +5,9 @@ import {
   toInlineComment,
   toIssueComment,
   toReview,
-} from './github-feedback';
-import type { GraphQL } from './github';
-import type { GitHubPullRequest } from './forge';
+} from './feedback';
+import type { GraphQL } from './adapter';
+import type { GitHubPullRequest } from '../../forge';
 import {
   applyFeedback,
   createFeedbackWatcher,
@@ -15,7 +15,7 @@ import {
   RETRY_DELAY,
   SETTLE_TIME,
   type FeedbackRecord,
-} from './human-review-watch';
+} from '../../human-review-watch';
 
 const user = { __typename: 'User', login: 'alice', id: 'alice' };
 

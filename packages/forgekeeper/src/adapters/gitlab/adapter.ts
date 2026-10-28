@@ -1,4 +1,4 @@
-import type { Exec } from './exec';
+import type { Exec } from '../../exec';
 import {
   ForgeError,
   humanize,
@@ -11,12 +11,12 @@ import {
   type ForgeTraits,
   type GitLabMergeRequest,
   type ReviewRef,
-} from './forge';
-import type { RemoteProject, Repository } from './git';
-import { fetchComments } from './gitlab-feedback';
-import { duoFindings, duoReady } from './gitlab-review-feedback';
-import { subscribeToNotes } from './gitlab-subscription';
-import { query, typed, type Query, type Transport, type Typed } from './graphql';
+} from '../../forge';
+import type { RemoteProject, Repository } from '../../git';
+import { fetchComments } from './feedback';
+import { duoFindings, duoReady } from './review-feedback';
+import { subscribeToNotes } from './subscription';
+import { query, typed, type Query, type Transport, type Typed } from '../../graphql';
 
 interface DiscussionPage {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };

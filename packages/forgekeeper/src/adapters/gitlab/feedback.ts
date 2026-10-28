@@ -1,7 +1,7 @@
 // Reads a GitLab MR's comments for GitLab's `feedback` capability.
-import type { FeedbackSnapshot, ReviewComment } from './forge';
-import type { GraphQL } from './gitlab';
-import { query, typed, type Query } from './graphql';
+import type { FeedbackSnapshot, ReviewComment } from '../../forge';
+import type { GraphQL } from './adapter';
+import { query, typed, type Query } from '../../graphql';
 
 interface NoteNode {
   id: string;

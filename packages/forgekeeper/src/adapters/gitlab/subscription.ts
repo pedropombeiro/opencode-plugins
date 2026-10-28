@@ -1,7 +1,7 @@
-import type { Exec } from './exec';
-import type { FeedbackEvents, GitLabMergeRequest } from './forge';
+import type { Exec } from '../../exec';
+import type { FeedbackEvents, GitLabMergeRequest } from '../../forge';
 import { cableSocket } from './cable-socket';
-import { SubscriptionRateLimit, subscriptionRetryAt } from './subscription-retry';
+import { SubscriptionRateLimit, subscriptionRetryAt } from '../../subscription-retry';
 
 export type { CableSocket } from './cable-socket';
 
