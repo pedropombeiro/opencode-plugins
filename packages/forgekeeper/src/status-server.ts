@@ -53,14 +53,16 @@ import {
   type LifecycleEvent,
   type LifecycleKind,
   type LifecycleRecord,
+  type PipelineState,
 } from './lifecycle-watch';
 import { retargetChildren, stricter, type RetargetEntry } from './lifecycle-execution';
-import type {
-  CommentDetail,
-  FeedbackSnapshot,
-  LinkedNote,
-  ReviewComment,
-  ReviewRequest,
+import {
+  failedJobCount,
+  type CommentDetail,
+  type FeedbackSnapshot,
+  type LinkedNote,
+  type ReviewComment,
+  type ReviewRequest,
 } from './forge';
 import { parseUrl, reference, traits, traitsOf, type ForgeCatalog } from './forges';
 import {
@@ -111,6 +113,24 @@ const receipt = (note: LinkedResult) =>
     : note.status === 'omitted'
       ? `${note.url} was left out because of size limits.`
       : `Could not read ${note.url}.`;
+
+// A failed-pipeline update's title, such as `!1: job rspec failed in its
+// pipeline, which is still running`. `ci` is the forge's word for it.
+function failureTitle(reference: string, ci: PipelineState, word: string) {
+  const count = ci.jobs.length + ci.more;
+  const what =
+    count === 1 && ci.jobs.length === 1 ? `job ${ci.jobs[0].name} failed` : `${count} jobs failed`;
+  return `${reference}: ${what} in its ${word}${ci.running ? ', which is still running' : ''}`;
+}
+
+// One line per failed job, from forge data, for the update's details.
+function failureDetails(ci: PipelineState): string[] {
+  return [
+    ...ci.jobs.map((job) => `${job.name} failed${job.stage ? ` in stage ${job.stage}` : ''}.`),
+    ...(ci.more ? [`${ci.more} more jobs failed.`] : []),
+    ...(ci.running ? ['Other jobs are still running.'] : []),
+  ];
+}
 
 // Waits for the tasks, or for `limit` milliseconds, whichever comes first.
 async function drain(tasks: ReadonlySet<Promise<unknown>>, limit: number) {
@@ -316,17 +336,22 @@ export async function setupStatus(
     return record && (deps.now ?? Date.now)() - record.at < SUMMARY_RETENTION ? record : undefined;
   };
 
-  // Whether the session's latest lookup says a conflict announced for the PR/MR
-  // is over: it no longer conflicts, or it merged or closed. Without a lookup
-  // of it, the conflict counts as current.
-  function resolvedConflict(item: Pick<FeedbackItem, 'sessionID' | 'url'>): boolean {
+  // Whether the session's latest lookup says a conflict or a failed pipeline
+  // announced for the PR/MR is over: it no longer conflicts, its pipeline no
+  // longer fails or another one replaced it, or it merged or closed. Without
+  // a lookup of it, the update counts as current, and merges always do.
+  function settled(item: Pick<FeedbackItem, 'sessionID' | 'url' | 'kind' | 'pipeline'>): boolean {
+    if (item.kind !== 'conflict' && item.kind !== 'ci-failed') return false;
     const lookup = service.get(item.sessionID).lookup;
     const request =
       lookup?.kind === 'found'
         ? lookup.requests.find((entry) => entry.url === item.url)
         : undefined;
     if (!request) return false;
-    return request.state !== 'opened' || (request.conflictsKnown && !request.conflicts);
+    if (request.state !== 'opened') return true;
+    if (item.kind === 'conflict') return request.conflictsKnown && !request.conflicts;
+    const pipeline = request.pipeline;
+    return !!pipeline?.id && (pipeline.id !== item.pipeline || failedJobCount(pipeline) === 0);
   }
 
   // Whether an error says the session doesn't exist, which ends its delivery.
@@ -348,7 +373,7 @@ export async function setupStatus(
     }
     if (!session || session.time?.archived !== undefined) return false;
     if (session.location.directory !== directory) return false;
-    if (item.kind === 'conflict' && resolvedConflict(item)) return false;
+    if (settled(item)) return false;
     const targets = (await host.state(item.sessionID)).targets;
     if (closing) throw new Error('The plugin stopped');
     return includesRequest(targets, item.url);
@@ -396,7 +421,8 @@ export async function setupStatus(
   }
 
   // Clears a session's updates for PRs/MRs that merged or closed, or that it no
-  // longer targets, and conflicts that are over. A merge event stays until it's
+  // longer targets, and conflicts and failed pipelines that are over. A merge
+  // event stays until it's
   // acknowledged, since the merge is its news. Only a finished lookup in this
   // instance says so: before one, such as right after a reload, the targets
   // aren't known yet.
@@ -417,7 +443,7 @@ export async function setupStatus(
           item.sessionID === sessionID &&
           (!host.isTarget(sessionID, item.url) ||
             (item.kind !== 'merged' && closed.has(item.url)) ||
-            (item.kind === 'conflict' && resolvedConflict(item))),
+            settled(item)),
       )
       .catch((error) => reportOnce('inbox', 'Could not clear stale review updates', error));
   }
@@ -881,11 +907,13 @@ export async function setupStatus(
     return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
   }
 
-  // The current policy for an event.
+  // The current policy for an event. Failed pipelines only notify.
   const policyOf = (kind: LifecycleKind) =>
     kind === 'merged'
       ? settings.lifecycleExecution.parentMerged
-      : settings.lifecycleExecution.conflict;
+      : kind === 'conflict'
+        ? settings.lifecycleExecution.conflict
+        : undefined;
 
   // Takes a lifecycle event to the inbox, after any follow-up its policy
   // allows. Resolves `false` to drop the event, `retry` to keep it while a
@@ -911,8 +939,14 @@ export async function setupStatus(
     if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
     const targets = (await host.state(record.sessionID)).targets;
     if (!includesRequest(targets, record.url)) return false;
-    // A conflict that's already over isn't news.
+    // A conflict that's already over isn't news, nor is a failed pipeline that
+    // passed on a retry or that another pipeline replaced.
     if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
+      return false;
+    if (
+      event.kind === 'ci-failed' &&
+      (record.state !== 'opened' || record.ci?.id !== event.pipeline || !record.ci?.failed)
+    )
       return false;
     // Only dependents the session still targets. A dropped one's record stays
     // until housekeeping, and must not authorize a change.
@@ -929,7 +963,7 @@ export async function setupStatus(
         ? await retargetChildren({
             parent: record,
             children,
-            policy: stricter(event.policy, policyOf('merged')),
+            policy: stricter(event.policy, settings.lifecycleExecution.parentMerged),
             fetch: fresh,
             allowed: async (child) => {
               if (closing) throw new Error('The plugin stopped');
@@ -977,9 +1011,12 @@ export async function setupStatus(
     // A retarget that may still succeed holds the update back until it does,
     // or until its attempts run out, so the update reports the outcome.
     if (execution?.retry) return 'retry';
-    const details = execution?.lines ?? [];
-    const title =
-      event.kind === 'conflict'
+    const ci = event.kind === 'ci-failed' ? record.ci : undefined;
+    const details = ci ? failureDetails(ci) : (execution?.lines ?? []);
+    const forge = requestOf(record);
+    const title = ci
+      ? failureTitle(record.reference, ci, forge ? traitsOf(forge).ci : 'pipeline')
+      : event.kind === 'conflict'
         ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
         : `${record.reference} merged into ${record.targetBranch}`;
     const item: FeedbackItem = {
@@ -988,8 +1025,10 @@ export async function setupStatus(
       sessionID: record.sessionID,
       url: record.url,
       title,
-      links: [record.url],
+      // The failed jobs first, so Enter opens the first of them.
+      links: [...(ci?.jobs.flatMap((job) => job.url ?? []) ?? []), record.url],
       ...(details.length ? { details } : {}),
+      ...(event.pipeline ? { pipeline: event.pipeline } : {}),
       // The mode when the event happened, so a change since then affects only
       // later events.
       ...(event.delivery ? { delivery: event.delivery } : {}),

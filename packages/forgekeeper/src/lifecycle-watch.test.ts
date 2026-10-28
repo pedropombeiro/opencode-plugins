@@ -81,6 +81,83 @@ describe('observe', () => {
     expect(events(records)).toEqual([JSON.stringify(['one', mr('1').url, 'merged'])]);
   });
 
+  // A pipeline with these failed jobs, still running unless `status` says.
+  const pipeline = (id: string, failed: string[], status = 'RUNNING') => ({
+    pipeline: {
+      id,
+      status,
+      label: status.toLowerCase(),
+      failedJobs: failed.map((name) => ({ name, url: `https://gitlab.com/g/p/-/jobs/${name}` })),
+      failedCount: failed.length,
+    },
+  });
+  const failure = (id: string, cycle: number) =>
+    JSON.stringify(['one', mr('1').url, 'ci-failed', id, cycle]);
+
+  test("announces a pipeline's first failed job while the pipeline still runs", () => {
+    const records = run(
+      [mr('1', pipeline('p1', []))],
+      [mr('1', pipeline('p1', ['rspec']))],
+      // More failures, and the pipeline's end, are the same failure.
+      [mr('1', pipeline('p1', ['rspec', 'lint']))],
+      [mr('1', pipeline('p1', ['rspec', 'lint'], 'FAILED'))],
+    );
+    expect(events(records)).toEqual([failure('p1', 1)]);
+    expect(records.get(mr('1').url)?.pending[0]).toMatchObject({
+      kind: 'ci-failed',
+      pipeline: 'p1',
+    });
+    expect(records.get(mr('1').url)?.ci).toMatchObject({
+      id: 'p1',
+      failed: true,
+      running: false,
+      jobs: [{ name: 'rspec' }, { name: 'lint' }],
+    });
+  });
+
+  test('announces another pipeline that fails, and a failure after a retry passed', () => {
+    const records = run(
+      [mr('1', pipeline('p1', []))],
+      [mr('1', pipeline('p1', ['rspec']))],
+      // A new pipeline that already fails when first seen is new.
+      [mr('1', pipeline('p2', ['rspec']))],
+      // The job passed on a retry, and another one failed later.
+      [mr('1', pipeline('p2', []))],
+      [mr('1', pipeline('p2', ['lint']))],
+    );
+    expect(events(records)).toEqual([failure('p1', 1), failure('p2', 2), failure('p2', 3)]);
+  });
+
+  test('records failed pipelines without events on the first lookup, and in older records', () => {
+    expect(events(run([mr('1', pipeline('p1', ['rspec']))]))).toEqual([]);
+    // A record from before Forgekeeper watched pipelines only learns it.
+    const [legacy] = observe('one', [mr('1')], new Map(), reference, 1);
+    delete legacy.ci;
+    const [record] = observe(
+      'one',
+      [mr('1', pipeline('p1', ['rspec']))],
+      new Map([[legacy.url, legacy]]),
+      reference,
+      2,
+    );
+    expect(record.pending).toEqual([]);
+    expect(record.ci).toMatchObject({ id: 'p1', failed: true });
+    // Nor does a PR/MR that's no longer open announce one.
+    expect(
+      events(
+        run(
+          [mr('1', pipeline('p1', []))],
+          [mr('1', { state: 'closed', ...pipeline('p1', ['x']) })],
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test('counts a failed job only in a pipeline the forge identifies', () => {
+    const unidentified = { pipeline: { status: 'FAILED', label: 'failed' } };
+    expect(events(run([mr('1')], [mr('1', unidentified)]))).toEqual([]);
+  });
+
   test('records the delivery mode each event happened under, except the inbox', () => {
     const previous = new Map([[mr('1').url, run([mr('1')]).get(mr('1').url)!]]);
     const merged = [mr('1', { state: 'merged' })];

@@ -1919,6 +1919,51 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
+  test('announces a failed job before its pipeline finishes, and clears it once a new pipeline runs', async () => {
+    const running = (id: string, failed: string[]) => ({
+      pipeline: {
+        id,
+        status: 'RUNNING',
+        label: 'running',
+        failedJobs: failed.map((name) => ({
+          name,
+          url: `https://gitlab.com/group/a/-/jobs/${name}`,
+          stage: 'test',
+        })),
+        failedCount: failed.length,
+      },
+    });
+    const forge = new StatusForge();
+    forge.set('group/a', '1', running('p1', []));
+    const { app } = await watchedTargets([projectA], {
+      status: forge,
+      pluginOptions: { lifecycleDelivery: 'summary' },
+    });
+    expect((await app.feedback()).items).toEqual([]);
+    forge.set('group/a', '1', running('p1', ['rspec']));
+    await app.refresh();
+    await settle();
+    const [item] = (await app.feedback()).items;
+    expect(item).toMatchObject({
+      kind: 'ci-failed',
+      pipeline: 'p1',
+      title: '!1: job rspec failed in its pipeline, which is still running',
+      links: ['https://gitlab.com/group/a/-/jobs/rspec', projectA],
+      details: ['rspec failed in stage test.', 'Other jobs are still running.'],
+    });
+    // The summary sees only the forge's facts, without tools.
+    const summary = await app.request();
+    expect(summary.tools).toEqual({});
+    expect(textOf(summary)).toContain(`<mr-event kind="ci-failed" link="${projectA}">`);
+    expect(textOf(summary)).toContain('<mr-detail>rspec failed in stage test.</mr-detail>');
+    // A new pipeline, such as after a push, replaces the failed one.
+    forge.set('group/a', '1', running('p2', []));
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+  });
+
   test('summarizes a lifecycle event from forge facts in a tool-free turn', async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1');

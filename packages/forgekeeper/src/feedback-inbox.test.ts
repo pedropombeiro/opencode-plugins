@@ -31,6 +31,15 @@ describe('feedback inbox', () => {
     const credentials = 'https://user:pass@gitlab.com/g/p/-/merge_requests/1';
     expect(linkOptions({ url: credentials, links: [] })).toEqual([]);
   });
+  test('labels the links of a failed-job update as jobs', () => {
+    const url = 'https://gitlab.com/g/p/-/merge_requests/1';
+    expect(
+      linkOptions({ url, kind: 'ci-failed', links: ['https://gitlab.com/g/p/-/jobs/9', url] }).map(
+        (option) => option.title,
+      ),
+    ).toEqual(['Failed job (jobs/9)', 'PR/MR overview']);
+  });
+
   test("labels an update with its newest comment's time, or its detection time without comments", () => {
     const at = Date.UTC(2026, 9, 28, 14, 31);
     const postedAt = Date.UTC(2026, 9, 28, 14, 25);

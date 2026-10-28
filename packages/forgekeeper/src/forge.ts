@@ -10,7 +10,34 @@ export interface Pipeline {
   status: string;
   label: string;
   url?: string;
+  // Identifies the run, so another run counts as new: GitLab's pipeline ID,
+  // or the commit GitHub's checks ran on.
+  id?: string;
+  // Jobs or checks that failed and fail the run, not ones allowed to fail or
+  // retried, at most as many as the adapter reads. Absent when the forge
+  // doesn't say.
+  failedJobs?: FailedJob[];
+  // How many such jobs failed, when more than `failedJobs` lists.
+  failedCount?: number;
+  // Whether jobs are still running, when the status doesn't say, such as for
+  // GitHub checks that report a failure while others run.
+  running?: boolean;
 }
+
+export interface FailedJob {
+  name: string;
+  url?: string;
+  stage?: string;
+}
+
+// Pipeline statuses that mean the run is over, on either forge.
+const FINISHED = new Set(['SUCCESS', 'FAILED', 'CANCELED', 'CANCELLED', 'SKIPPED', 'MANUAL']);
+export const pipelineRunning = (pipeline: Pipeline | undefined) =>
+  !!pipeline && (pipeline.running ?? !FINISHED.has(pipeline.status));
+
+// How many jobs fail the run.
+export const failedJobCount = (pipeline: Pipeline | undefined) =>
+  pipeline?.failedCount ?? pipeline?.failedJobs?.length ?? 0;
 
 interface Common {
   iid: string;

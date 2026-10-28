@@ -498,17 +498,34 @@ timestamp-only behavior until a new baseline is created.
 
 ## Merge request updates
 
-Forgekeeper also watches each session's explicit PR/MR targets for two changes:
+Forgekeeper also watches each session's explicit PR/MR targets for three changes:
 
 - **Conflicts:** a target that could merge starts to conflict with its target branch.
+- **Failed jobs:** a job fails in a target's head pipeline, even while the pipeline still
+  runs.
 - **Merges:** a target merges.
 
-Both come from the forge's own state, compared between two lookups, never from comments
+All come from the forge's own state, compared between two lookups, never from comments
 such as GitLab's "can no longer be merged" note. The first lookup of a target only records
 it, so nothing that happened earlier is announced, including after a restart. A
 mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
 push, keeps the last known state. A conflict that ends and starts again is a new update.
 Sessions are watched the same way as for review feedback, without visiting their tabs.
+
+Failed jobs don't wait for the pipeline to finish, which can take much longer than the
+job. Each lookup reads the pipeline's failed jobs:
+
+- On GitLab, failed jobs that aren't retried and aren't allowed to fail, at most 10 by
+  name. More are counted.
+- On GitHub, the head commit's failed checks, which count as one pipeline.
+
+A pipeline's first failed job is one update, which names the failed jobs, links them, and
+says whether the pipeline still runs. Further failures in the same pipeline add no update.
+Another pipeline that fails, such as after a push, is a new update. So is a job failing
+after an earlier failure in the same pipeline passed on a retry. Records stored before
+Forgekeeper watched pipelines only record the pipeline, without an update. The update
+clears once the pipeline no longer has failed jobs, another pipeline replaces it, or the
+PR/MR closes. Forgekeeper only reports failed jobs: it doesn't retry or fix them.
 
 Each change waits in the target's record until it reaches the inbox, in the same storage
 write as the record. A merge stops polling, so waiting changes are retried every minute
@@ -521,7 +538,7 @@ never comments.
 
 A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
-drops clear right away. Turning `notifyLifecycle` off stops both kinds.
+drops clear right away. Turning `notifyLifecycle` off stops all three kinds.
 
 ### Stacked PRs/MRs
 
@@ -629,7 +646,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `notifyAutomatedReviews` | `true`           | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                        |
 | `notifyHumanReviews`     | `true`           | Surface new human review feedback.                                                                                           |
 | `reviewFeedbackDelivery` | `"inbox"`        | What an update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns). |
-| `notifyLifecycle`        | `true`           | Surface targets that start to conflict and targets that merge. See [Merge request updates](#merge-request-updates).          |
+| `notifyLifecycle`        | `true`           | Surface targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).      |
 | `lifecycleDelivery`      | `"inbox"`        | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                         |
 | `lifecycleExecution`     | all `"notify"`   | What Forgekeeper does about each event: `parentMerged` and `conflict`. See [Stacked PRs/MRs](#stacked-prsmrs).               |
 
@@ -748,7 +765,7 @@ been removed; saved values have no effect. Set `reviewStatus` to `false` to keep
   renders the footer and dialog.
 - `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
   agent.
-- `src/lifecycle-watch.ts` finds conflicts, merges, and stack links between lookups, and
+- `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and
   keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` works out and
   carries out retargets of stacked PRs/MRs.
 - `src/adapters/gitlab/linked-notes.ts` finds and reads the notes review comments link to.

@@ -8,9 +8,12 @@ export interface FeedbackItem {
   commentIDs?: string[];
   // When the newest of those comments was last written, in milliseconds.
   postedAt?: number;
-  // Lifecycle events: the PR/MR started to conflict, or merged. Absent for
-  // review feedback.
-  kind?: 'conflict' | 'merged';
+  // Lifecycle events: the PR/MR started to conflict, its pipeline got a
+  // failed job, or it merged. Absent for review feedback.
+  kind?: 'conflict' | 'merged' | 'ci-failed';
+  // The pipeline a `ci-failed` update is about, so it clears once another
+  // pipeline replaces it or it no longer fails.
+  pipeline?: string;
   // What Forgekeeper knows or did about a lifecycle event, from forge data,
   // one sentence each, such as dependent PRs/MRs and their new targets.
   details?: string[];
@@ -65,13 +68,19 @@ export function feedbackLinks(item: Pick<FeedbackItem, 'url' | 'links'>): string
 // The links `/forge-feedback` offers for an update: its comments first, so
 // Enter opens the first comment, and then the PR/MR itself. Comment links
 // differ only after `#`, so their titles show that part.
-export function linkOptions(item: Pick<FeedbackItem, 'url' | 'links'>) {
+export function linkOptions(item: Pick<FeedbackItem, 'url' | 'links' | 'kind'>) {
   // Every option, the PR/MR's own link included, passes the same filter.
   const links = feedbackLinks(item);
   const comments = links.filter((url) => url !== item.url);
+  // A failed-job update links its jobs, named by the end of their path.
+  const jobs = item.kind === 'ci-failed';
   return [
     ...comments.map((url, index) => ({
-      title: `Comment ${comments.length > 1 ? `${index + 1} of ${comments.length} ` : ''}(${new URL(url).hash || 'no anchor'})`,
+      title: `${jobs ? 'Failed job' : 'Comment'} ${comments.length > 1 ? `${index + 1} of ${comments.length} ` : ''}(${
+        jobs
+          ? new URL(url).pathname.split('/').filter(Boolean).slice(-2).join('/')
+          : new URL(url).hash || 'no anchor'
+      })`,
       description: url,
       value: url,
     })),

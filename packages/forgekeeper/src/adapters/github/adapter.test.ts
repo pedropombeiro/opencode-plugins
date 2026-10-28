@@ -145,6 +145,37 @@ test('check rollup prioritizes failures and never marks partial checks green', (
   ).toBe('PENDING');
 });
 
+test('check rollup names the failed checks of a commit while others still run', () => {
+  const rollup = checks(
+    [
+      {
+        __typename: 'CheckRun',
+        name: 'test',
+        status: 'COMPLETED',
+        conclusion: 'FAILURE',
+        detailsUrl: 'https://github.com/o/r/actions/runs/1',
+      },
+      { __typename: 'StatusContext', context: 'ci/legacy', state: 'ERROR' },
+      { __typename: 'CheckRun', name: 'build', status: 'IN_PROGRESS' },
+    ],
+    true,
+    'url',
+    'abc123',
+  );
+  expect(rollup).toMatchObject({
+    status: 'FAILED',
+    id: 'abc123',
+    running: true,
+    failedCount: 2,
+    failedJobs: [
+      { name: 'test', url: 'https://github.com/o/r/actions/runs/1' },
+      { name: 'ci/legacy' },
+    ],
+  });
+  // Without the commit, the checks aren't one identified run.
+  expect(checks([], true, 'url').id).toBeUndefined();
+});
+
 test('check rollup distinguishes passed, skipped, and neutral checks', () => {
   const passed = [
     { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
