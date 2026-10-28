@@ -41,9 +41,19 @@ interface MergeRequestNode {
   sourceProject: { fullPath: string } | null;
   targetProject: { fullPath: string };
   headPipeline: {
+    id?: string | null;
     status: string;
     path: string | null;
     detailedStatus: { label: string | null } | null;
+    jobs?: {
+      count: number;
+      nodes: Array<{
+        name: string | null;
+        allowFailure: boolean;
+        webPath: string | null;
+        stage: { name: string | null } | null;
+      }>;
+    } | null;
   } | null;
   discussions: DiscussionPage;
   reviewers?: { nodes: ReviewerNode[] } | null;
@@ -67,6 +77,9 @@ const DISCUSSIONS = 'pageInfo { hasNextPage endCursor } nodes { resolvable resol
 const PAGE_SIZE = 100;
 export const MAX_DISCUSSION_PAGES = 50;
 
+// The failed jobs read per pipeline. More are only counted.
+const MAX_FAILED_JOBS = 10;
+
 // Merge statuses during which GitLab hasn't settled whether the MR conflicts.
 const RECHECKING = new Set(['CHECKING', 'UNCHECKED', 'PREPARING']);
 
@@ -75,7 +88,12 @@ const MERGE_REQUEST_FIELDS = `
   approvedBy(first: 100) { nodes { id bot } }
   sourceProject { fullPath }
   targetProject { fullPath }
-  headPipeline { status path detailedStatus { label } }
+  headPipeline {
+    id status path detailedStatus { label }
+    jobs(statuses: [FAILED], retried: false, first: ${MAX_FAILED_JOBS}) {
+      count nodes { name allowFailure webPath stage { name } }
+    }
+  }
   reviewers(first: 100) { nodes { type username bot mergeRequestInteraction { reviewState approved } } }
   discussions(first: ${PAGE_SIZE}) { ${DISCUSSIONS} }
 `;
@@ -294,6 +312,24 @@ const RETARGET_MUTATION = query<{
 // states stay silent until they are added here.
 const DUO_FEEDBACK = new Set(['REVIEWED', 'REQUESTED_CHANGES']);
 
+// The pipeline's ID and the failed jobs that fail it. Jobs allowed to fail
+// don't, and the query leaves out retried ones. The count covers jobs past
+// the ones read, which may include some allowed to fail.
+function failedJobs(host: string, pipeline: NonNullable<MergeRequestNode['headPipeline']>) {
+  if (!pipeline.id || !pipeline.jobs) return {};
+  const nodes = pipeline.jobs.nodes;
+  const failing = nodes.filter((job) => !job.allowFailure && job.name);
+  return {
+    id: pipeline.id,
+    failedJobs: failing.map((job) => ({
+      name: job.name!,
+      ...(job.webPath ? { url: `https://${host}${job.webPath}` } : {}),
+      ...(job.stage?.name ? { stage: job.stage.name } : {}),
+    })),
+    failedCount: failing.length + Math.max(0, pipeline.jobs.count - nodes.length),
+  };
+}
+
 function duoState(state: string): AutomatedReviewState {
   if (state === 'REVIEW_STARTED') return 'running';
   return DUO_FEEDBACK.has(state) ? 'feedback' : 'settled';
@@ -440,6 +476,7 @@ export class GitLabForge implements Forge {
             label:
               pipeline.detailedStatus?.label ?? pipeline.status.toLowerCase().replace(/_/g, ' '),
             url: pipeline.path ? `https://${host}${pipeline.path}` : undefined,
+            ...failedJobs(host, pipeline),
           }
         : undefined,
       unresolvedThreads: threads.count,

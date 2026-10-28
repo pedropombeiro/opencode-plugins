@@ -231,6 +231,51 @@ describe('GitLabForge.findByNumber', () => {
     },
   );
 
+  test("reads the pipeline's failed jobs that fail it, while it still runs", async () => {
+    let seen = '';
+    const mr = await new GitLabForge(async (_host, text) => {
+      seen = String(text);
+      return {
+        p0: {
+          mergeRequest: node({
+            headPipeline: {
+              id: 'gid://gitlab/Ci::Pipeline/9',
+              status: 'RUNNING',
+              path: '/group/project/-/pipelines/9',
+              detailedStatus: { label: 'running' },
+              jobs: {
+                // One more failed job than the query read.
+                count: 4,
+                nodes: [
+                  {
+                    name: 'rspec',
+                    allowFailure: false,
+                    webPath: '/group/project/-/jobs/1',
+                    stage: { name: 'test' },
+                  },
+                  { name: 'optional', allowFailure: true, webPath: null, stage: null },
+                  { name: 'lint', allowFailure: false, webPath: null, stage: null },
+                ],
+              },
+            },
+          }),
+        },
+      };
+    }).findByNumber(projects, '1');
+    expect(seen).toContain('jobs(statuses: [FAILED], retried: false, first: 10)');
+    expect(mr?.pipeline).toEqual({
+      status: 'RUNNING',
+      label: 'running',
+      url: 'https://gitlab.com/group/project/-/pipelines/9',
+      id: 'gid://gitlab/Ci::Pipeline/9',
+      failedJobs: [
+        { name: 'rspec', url: 'https://gitlab.com/group/project/-/jobs/1', stage: 'test' },
+        { name: 'lint' },
+      ],
+      failedCount: 3,
+    });
+  });
+
   test('reads the source branch, and treats mergeability as unknown while GitLab rechecks it', async () => {
     const read = async (overrides: Record<string, unknown>) =>
       new GitLabForge(async () => ({

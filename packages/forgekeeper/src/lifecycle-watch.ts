@@ -1,16 +1,30 @@
 // Lifecycle events for a session's PRs/MRs: one that starts to conflict with
-// its target branch, and one that merges. Each comes from a change between two
-// lookups, never from the state alone, so the first lookup of a PR/MR only
-// records it, and nothing old is announced after a restart.
+// its target branch, one whose pipeline gets its first failed job, even while
+// the pipeline still runs, and one that merges. Each comes from a change
+// between two lookups, never from the state alone, so the first lookup of a
+// PR/MR only records it, and nothing old is announced after a restart.
 //
 // Events wait in their PR/MR's record until they reach the inbox. The record
 // and its new events are one storage write, so a crash neither loses an
 // event nor repeats it, and a merged PR/MR that nothing polls anymore still
 // gets its event delivered.
-import type { ReviewRequest } from './forge';
+import { failedJobCount, pipelineRunning, type FailedJob, type ReviewRequest } from './forge';
 import type { EventPolicy, FeedbackDelivery } from './options';
 
-export type LifecycleKind = 'conflict' | 'merged';
+export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed';
+
+// The head pipeline as a lookup last saw it.
+export interface PipelineState {
+  // Absent while the PR/MR has no pipeline the forge identifies.
+  id?: string;
+  failed: boolean;
+  running: boolean;
+  jobs: FailedJob[];
+  // Failed jobs past `jobs`.
+  more: number;
+  // How many times a pipeline got its first failed job, for distinct IDs.
+  cycles: number;
+}
 
 export interface LifecycleEvent {
   kind: LifecycleKind;
@@ -23,6 +37,8 @@ export interface LifecycleEvent {
   // How the event reaches its session, as the mode was when it happened.
   // Absent in inbox mode, so enabling summaries never starts turns for it.
   delivery?: 'passive' | 'summary';
+  // The pipeline a `ci-failed` event is about.
+  pipeline?: string;
 }
 
 export interface LifecycleRecord {
@@ -34,6 +50,9 @@ export interface LifecycleRecord {
   conflicts?: boolean;
   // How many times the PR/MR started to conflict, for distinct event IDs.
   cycles: number;
+  // Absent in records from before Forgekeeper watched pipelines, whose next
+  // lookup only records the pipeline.
+  ci?: PipelineState;
   targetProject: string;
   targetBranch: string;
   sourceProject?: string;
@@ -70,6 +89,22 @@ function parentOf(child: ReviewRequest, requests: readonly ReviewRequest[]) {
   return candidates.length === 1 ? candidates[0] : undefined;
 }
 
+// What a lookup says of the request's head pipeline. A pipeline the forge
+// doesn't identify counts as none.
+function pipelineState(request: ReviewRequest, previous: PipelineState | undefined): PipelineState {
+  const pipeline = request.pipeline?.id ? request.pipeline : undefined;
+  const jobs = pipeline?.failedJobs ?? [];
+  const count = failedJobCount(pipeline);
+  return {
+    ...(pipeline ? { id: pipeline.id } : {}),
+    failed: count > 0,
+    running: pipelineRunning(pipeline),
+    jobs,
+    more: Math.max(0, count - jobs.length),
+    cycles: previous?.cycles ?? 0,
+  };
+}
+
 // The session's records after a lookup of its targets. Returns a record for
 // each request. A request without a record gets one without events.
 export function observe(
@@ -98,7 +133,7 @@ export function observe(
     const parent = found?.url ?? kept;
     let cycles = previous?.cycles ?? 0;
     const pending = [...(previous?.pending ?? [])];
-    const add = (kind: LifecycleKind, id: string) => {
+    const add = (kind: LifecycleKind, id: string, extra: Partial<LifecycleEvent> = {}) => {
       if (pending.some((event) => event.id === id)) return;
       const rule = policy(kind);
       const mode = delivery();
@@ -108,8 +143,24 @@ export function observe(
         detectedAt: now,
         ...(rule ? { policy: rule } : {}),
         ...(mode !== 'inbox' ? { delivery: mode } : {}),
+        ...extra,
       });
     };
+    const ci = pipelineState(request, previous?.ci);
+    // A pipeline's first failed job, whether the pipeline still runs or not.
+    // Another pipeline, such as after a push or a new run, is new.
+    if (
+      previous?.ci &&
+      request.state === 'opened' &&
+      ci.id &&
+      ci.failed &&
+      !(previous.ci.id === ci.id && previous.ci.failed)
+    ) {
+      ci.cycles++;
+      add('ci-failed', JSON.stringify([sessionID, request.url, 'ci-failed', ci.id, ci.cycles]), {
+        pipeline: ci.id,
+      });
+    }
     if (previous) {
       if (
         request.state === 'opened' &&
@@ -130,6 +181,7 @@ export function observe(
       state: request.state,
       ...(conflicts !== undefined ? { conflicts } : {}),
       cycles,
+      ci,
       targetProject: request.targetProject,
       targetBranch: request.targetBranch,
       ...(request.sourceProject ? { sourceProject: request.sourceProject } : {}),
