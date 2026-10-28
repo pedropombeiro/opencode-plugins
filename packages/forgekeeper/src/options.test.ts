@@ -1,21 +1,29 @@
 import { describe, expect, test } from 'bun:test';
 import { statusOptions } from './options';
 
+const notify = { mode: 'notify' as const, actions: [] };
+
 describe('statusOptions', () => {
-  test('monitors feedback without resuming sessions by default', () => {
+  test('monitors feedback and lifecycle events without resuming sessions by default', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
       pollSeconds: 120,
       notifyAutomatedReviews: true,
       notifyHumanReviews: true,
       feedbackDelivery: 'inbox',
+      notifyLifecycle: true,
+      lifecycleDelivery: 'inbox',
+      lifecycleExecution: { parentMerged: notify, conflict: notify },
+      problems: [],
     });
   });
 
-  test('reads the feedback delivery mode and falls back to the inbox for unknown values', () => {
+  test('reads the delivery modes and falls back to the inbox for unknown values', () => {
     expect(statusOptions({ reviewFeedbackDelivery: 'summary' }).feedbackDelivery).toBe('summary');
     expect(statusOptions({ reviewFeedbackDelivery: 'passive' }).feedbackDelivery).toBe('passive');
     expect(statusOptions({ reviewFeedbackDelivery: 'resume' }).feedbackDelivery).toBe('inbox');
+    expect(statusOptions({ lifecycleDelivery: 'summary' }).lifecycleDelivery).toBe('summary');
+    expect(statusOptions({ lifecycleDelivery: 'apply' }).lifecycleDelivery).toBe('inbox');
   });
 
   test('reads explicit settings', () => {
@@ -25,13 +33,15 @@ describe('statusOptions', () => {
         pollSeconds: 45,
         notifyAutomatedReviews: false,
         notifyHumanReviews: false,
+        notifyLifecycle: false,
       }),
-    ).toEqual({
+    ).toMatchObject({
       enabled: false,
       pollSeconds: 45,
       notifyAutomatedReviews: false,
       notifyHumanReviews: false,
       feedbackDelivery: 'inbox',
+      notifyLifecycle: false,
     });
   });
 
@@ -44,5 +54,44 @@ describe('statusOptions', () => {
       statusOptions({ notifyDuoReview: false, notifyAutomatedReviews: true })
         .notifyAutomatedReviews,
     ).toBe(true);
+  });
+
+  test('grants execution only as each event policy states', () => {
+    const options = statusOptions({
+      lifecycleExecution: {
+        parentMerged: { mode: 'apply', actions: ['retarget', 'retarget'] },
+        conflict: { mode: 'notify' },
+      },
+    });
+    expect(options.lifecycleExecution).toEqual({
+      parentMerged: { mode: 'apply', actions: ['retarget'] },
+      conflict: notify,
+    });
+    expect(options.problems).toEqual([]);
+    expect(
+      statusOptions({ lifecycleExecution: { parentMerged: { mode: 'prepare' } } })
+        .lifecycleExecution.parentMerged,
+    ).toEqual({ mode: 'prepare', actions: [] });
+  });
+
+  test('falls back to notifying for every invalid or unsupported policy, and says why', () => {
+    for (const [policy, reason] of [
+      [{ mode: 'apply' }, '"apply" needs at least one action'],
+      [{ mode: 'apply', actions: ['push'] }, 'unsupported actions ["push"]'],
+      [{ mode: 'everything' }, 'mode must be'],
+      [{ mode: 'apply', actions: 'retarget' }, 'actions must be a list'],
+      ['apply', 'mode must be'],
+    ] as const) {
+      const options = statusOptions({ lifecycleExecution: { parentMerged: policy } });
+      expect(options.lifecycleExecution.parentMerged).toEqual(notify);
+      expect(options.problems).toEqual([expect.stringContaining(reason)]);
+    }
+    // Conflicts support only notifying so far.
+    const conflict = statusOptions({ lifecycleExecution: { conflict: { mode: 'prepare' } } });
+    expect(conflict.lifecycleExecution.conflict).toEqual(notify);
+    expect(conflict.problems).toEqual([expect.stringContaining('"prepare" isn\'t supported yet')]);
+    expect(statusOptions({ lifecycleExecution: 'apply' }).problems).toEqual([
+      expect.stringContaining('must be an object'),
+    ]);
   });
 });

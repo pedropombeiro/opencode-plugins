@@ -8,6 +8,12 @@ export interface FeedbackItem {
   commentIDs?: string[];
   // When the newest of those comments was last written, in milliseconds.
   postedAt?: number;
+  // Lifecycle events: the PR/MR started to conflict, or merged. Absent for
+  // review feedback.
+  kind?: 'conflict' | 'merged';
+  // What Forgekeeper knows or did about a lifecycle event, from forge data,
+  // one sentence each, such as dependent PRs/MRs and their new targets.
+  details?: string[];
   // How the update reaches its session, as the mode was when it was recorded.
   // Absent in inbox mode, so the update never starts a turn later.
   delivery?: 'passive' | 'summary';

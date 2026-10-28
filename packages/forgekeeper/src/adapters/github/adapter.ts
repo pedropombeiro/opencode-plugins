@@ -475,6 +475,8 @@ export class GitHubForge implements Forge {
       reviewersComplete: !reviewers.pageInfo?.hasNextPage,
       targetProject: node.baseRepository.nameWithOwner,
       targetBranch: node.baseRefName,
+      ...(node.headRepository ? { sourceProject: node.headRepository.nameWithOwner } : {}),
+      sourceBranch: node.headRefName,
       headSha: node.headRefOid,
       updatedAt: node.updatedAt,
       pipeline:
