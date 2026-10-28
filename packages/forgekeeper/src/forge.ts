@@ -141,6 +141,11 @@ export interface CompletedReview {
 
 // A forge's automated code reviewer, such as GitLab Duo or GitHub Copilot.
 export interface AutomatedReview<Request extends ReviewRequest = ReviewRequest> {
+  readonly publishedFeedback?: {
+    storageKey: string;
+    select(snapshot: FeedbackSnapshot): FeedbackSnapshot;
+    ready(snapshot: FeedbackSnapshot, now: number): boolean;
+  };
   readonly name: string;
   // The reviewer's review of a request, or undefined without one.
   status(request: Request): AutomatedReviewStatus | undefined;
@@ -149,6 +154,7 @@ export interface AutomatedReview<Request extends ReviewRequest = ReviewRequest> 
 // A comment on a PR/MR, as read by a forge's `feedback` capability. The forge
 // leaves out entries that aren't comments, such as GitLab's system notes.
 export interface ReviewComment {
+  automated?: { reviewer: string; finding: boolean; runID?: string; status?: string };
   // Identifies the comment, for remembering which comments were announced.
   id: string;
   // Orders comments by when they were posted, across all comment types.
@@ -174,8 +180,20 @@ export interface FeedbackSnapshot {
 
 // Reads a request's review comments, for announcing new human feedback.
 export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
+  subscribe?(
+    run: Exec,
+    directory: string,
+    request: Request,
+    events: FeedbackEvents,
+    signal: AbortSignal,
+  ): Promise<void>;
   // Undefined when the request doesn't exist.
   fetch(run: Exec, directory: string, request: Request): Promise<FeedbackSnapshot | undefined>;
+}
+
+export interface FeedbackEvents {
+  connected: () => void;
+  changed: () => void;
 }
 
 // A type guard for one forge's requests, for its traits' `owns`.

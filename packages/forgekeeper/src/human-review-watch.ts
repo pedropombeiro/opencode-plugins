@@ -151,6 +151,9 @@ export interface FeedbackWatcherOptions {
   onFetchError?: (error: unknown) => void;
   onSendError?: (error: unknown) => void;
   now?: () => number;
+  interval?: (request: ReviewRequest) => number;
+  select?: (snapshot: FeedbackSnapshot, request: ReviewRequest) => FeedbackSnapshot;
+  ready?: (snapshot: FeedbackSnapshot, now: number, request: ReviewRequest) => boolean;
 }
 
 export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
@@ -161,6 +164,8 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
   const inflight = new Set<string>();
   const fetchedAt = new Map<string, number>();
   const retryAt = new Map<string, number>();
+  const snapshots = new Map<string, FeedbackSnapshot>();
+  const dirty = new Set<string>();
 
   // Merges the stored and local records. The higher baseline is the safer one.
   const seen = (key: string, shared: FeedbackRecord | undefined): SeenComments | undefined => {
@@ -198,6 +203,7 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
         .map((comment) => comment.id);
       return remember(key, { baseline, baselineIDs }, at);
     }
+    if (options.ready && !options.ready(snapshot, at, request)) return;
     if (at < (retryAt.get(key) ?? 0)) return;
     const comments = eligibleFeedback(snapshot, previous, at).filter(
       (comment) => !reserved.has(`${key} ${comment.id}`),
@@ -221,19 +227,46 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
   }
 
   return {
+    invalidate(sessionID: string, request: ReviewRequest) {
+      const key = feedbackKey(sessionID, request);
+      fetchedAt.delete(key);
+      snapshots.delete(key);
+      dirty.add(key);
+    },
     // Fetches the request's comments, unless a fetch is running or ran
     // recently, and announces settled feedback. Resolves once that work is done.
     async check(sessionID: string, request: ReviewRequest): Promise<void> {
       const key = feedbackKey(sessionID, request);
-      if (inflight.has(key) || now() - (fetchedAt.get(key) ?? -Infinity) < FETCH_INTERVAL) return;
+      if (inflight.has(key)) return;
       if (!options.current(sessionID, request)) return;
       inflight.add(key);
-      fetchedAt.set(key, now());
       try {
-        const snapshot = await options.fetch(sessionID, request);
-        if (!snapshot || !options.current(sessionID, request)) return;
+        if (
+          now() - (fetchedAt.get(key) ?? -Infinity) <
+          (options.interval?.(request) ?? FETCH_INTERVAL)
+        ) {
+          if (now() - (fetchedAt.get(key) ?? -Infinity) < FETCH_INTERVAL) return;
+          const snapshot = snapshots.get(key);
+          const previous = seen(key, await options.record(key));
+          if (!snapshot || !previous || eligibleFeedback(snapshot, previous, now()).length === 0)
+            return;
+          if (now() < (retryAt.get(key) ?? 0)) return;
+        }
+        dirty.delete(key);
+        fetchedAt.set(key, now());
+        const fetched = await options.fetch(sessionID, request);
+        const snapshot = fetched && (options.select?.(fetched, request) ?? fetched);
+        if (!snapshot?.complete) {
+          fetchedAt.delete(key);
+          snapshots.delete(key);
+          return;
+        }
+        if (dirty.has(key) || !options.current(sessionID, request)) return;
+        snapshots.set(key, snapshot);
         await observe(sessionID, request, snapshot);
       } catch (error) {
+        fetchedAt.delete(key);
+        snapshots.delete(key);
         options.onFetchError?.(error);
       } finally {
         inflight.delete(key);

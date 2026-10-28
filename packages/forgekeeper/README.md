@@ -2,7 +2,7 @@
 
 An [OpenCode](https://opencode.ai) plugin that tracks the issues or PRs/MRs a session works on.
 It prefixes the session title with their references, shows the PR/MR status in the prompt
-footer, and tells the agent about new review feedback. It supports GitLab and GitHub. The status
+footer, and surfaces new review feedback in a persistent inbox. It supports GitLab and GitHub. The status
 and review notifications are optional; see [Keep only session titles](#keep-only-session-titles).
 
 Requires OpenCode 2.2 or later. It replaces
@@ -189,9 +189,33 @@ The server caches each session's status and polls every 2 minutes while a CLI sh
 PR/MR, or every 30 seconds while an automated review runs. Each change reaches the CLIs as
 an RPC event.
 
+Sessions in the same checkout share cached status and human-feedback fetches for the same
+forge, host, project, and PR/MR number. Overlapping requests share one in-flight fetch.
+Successful status results remain fresh for the polling interval, capped at 30 seconds
+while an automated review runs. Complete human-feedback results remain fresh for 60 seconds.
+Failures and incomplete feedback are not retained for reuse. Each cache keeps at most
+1,000 entries and is cleared when the plugin stops.
+
+Session timers, review baselines, and acknowledgements remain independent. Manual refresh
+invalidates the selected session's target caches and feedback fetch timestamps. Completed turns invalidate the checkout's caches
+before notifying watched sessions, so changes such as pushes can be observed. Caches are
+not shared between checkouts, whose CLI credentials and repository context may differ.
+
 ### Which sessions the server watches
 
-The server watches only sessions that a CLI has shown since it started. The CLI renews a
+The server discovers recent sessions at startup, every 5 minutes, and after target changes
+or completed turns. A session qualifies when it is a non-archived root session in the
+checkout, has an explicit PR/MR target, and has a user message in the last 72 hours.
+Viewing a tab, changing its title, or receiving a background notification does not extend
+that window. Sessions without readable conversation activity are skipped. Discovery reads
+conversation timestamps locally; it does not send conversations to a model.
+
+Discovered sessions poll without a CLI lease while at least one explicit target is open.
+When all targets close or merge, polling stops. Discovery reevaluates the activity window
+every 5 minutes. It runs only while OpenCode has this checkout's plugin instance loaded;
+it is not a separate scheduler and cannot wake an unloaded location or stopped service.
+
+The server also watches sessions that a CLI has shown since it started. The CLI renews a
 lease on each of them every minute, and a lease that isn't renewed for 3 minutes ends, such
 as after the CLI exits. A session keeps polling while it's on screen in any CLI. A hidden
 session with a lease keeps polling while it has a running automated review, human feedback
@@ -209,7 +233,7 @@ lookup or fetch ran is left to its new checkout. A review that finishes during t
 go unannounced, because the new instance never saw it running. If the session can't be
 read, the notification is retried later instead of being dropped.
 
-After that read, the server checks the targets again and writes the message for the
+After that read, the server checks the targets again and records feedback for the
 PRs/MRs that are still targets. A target removed in the meantime isn't mentioned.
 
 When the server plugin stops, such as on a reload, no new lookup, fetch, notification,
@@ -222,13 +246,22 @@ sent again.
 
 ## Review notifications
 
-For each explicit target that is an open PR/MR, the server tells the agent about reviews.
+For each explicit target that is an open PR/MR, the server records new review feedback.
 A target that merges or closes gets no more notifications, and a notification waiting for a
 retry is dropped.
-Each notification is a queued synthetic message, followed by a toast in the CLIs that have
-shown the session. The message resumes the session unless `resumeSession` is `false`.
-Messages include the full URL of each PR/MR. PRs/MRs from the title or the branch don't get
-notifications.
+By default, feedback goes only to a persistent inbox. It does not queue an agent message,
+resume a session, or make a model request. `/forge-feedback` lists pending feedback for
+the current checkout. Select an update to open its PR/MR or comment links, press Ctrl+D
+to acknowledge it, or press Ctrl+S to pause or resume review monitoring. Acknowledgement
+only dismisses the local update; it does not reply to or resolve a remote discussion.
+The home and session footers show the pending count, and connected CLIs in the checkout
+show a toast even when the session's tab has never been visited.
+
+The inbox retains the newest 500 updates per checkout across plugin reloads. It stores
+session IDs, target URLs, notification titles, comment URLs, and timestamps, not comment
+bodies or credentials. A pause persists across reloads and leaves status display available.
+
+PRs/MRs from the title or the branch don't get review notifications.
 
 Before it sends a notification, the server checks that the PR/MR is still one of the
 session's targets. A lookup that started before the targets changed is discarded, so a
@@ -239,11 +272,17 @@ removed target never triggers a notification.
 | An automated review finished with feedback | GitLab Duo  | GitHub Copilot |
 | New human review feedback                  | MR comments | PR comments    |
 
-- **Automated reviews**: for GitLab, Duo's final state of `REVIEWED` or `REQUESTED_CHANGES`
-  asks the agent to read its comments. Other final states, such as `APPROVED`, send nothing.
-  The server notifies when it sees a review go from running to finished, so a Duo review
-  that finished before the server first saw it running isn't announced. Reviews that finish
-  in the same poll share one message.
+- **Duo reviews**: new unresolved inline findings from the GitLab Duo bot create inbox
+  updates after the findings remain unchanged for five minutes. Forgekeeper does not need
+  to observe the review running. Summary-only reviews, approvals without inline findings,
+  system notes, and resolved findings send nothing. Comment IDs persist independently of
+  human feedback, including an empty baseline when monitoring starts without findings.
+  Existing findings become the initial baseline; new findings posted while OpenCode is
+  offline are detected after monitoring resumes if a baseline was already stored.
+  When available, `duoCreatedSession.id` groups findings by code-review workflow run.
+  A linked workflow must be terminal before delivery, and the watcher refetches before
+  notifying. Older GitLab versions and permission-hidden workflows use comment IDs and
+  the settling window without a workflow link. Separate runs use distinct inbox IDs.
 - **Copilot reviews**: the server notifies when a submitted, undismissed review has at least
   one inline comment. A review without inline comments, such as one that
   found nothing or couldn't run for lack of quota, sends nothing. Copilot reviews are
@@ -253,15 +292,16 @@ removed target never triggers a notification.
   review is requested.
 - **Human reviews**: new comments and replies from people other than you and bots are
   announced once none of their unresolved comments has changed for 5 minutes. Expect one
-  message 5 to 7 minutes after the review goes quiet. Resolved threads are skipped.
+  update 5 to 7 minutes after the review goes quiet. Resolved threads are skipped.
 
 The first look at a PR/MR records its newest comment as a baseline, so older comments never
 count as new. Announced comments are stored per session and PR/MR, so a restart replays
 nothing but still catches comments posted in the meantime.
 
-A failed send shows an error toast and is retried after 10 minutes. A failed automated
-review notification stays pending in the server's storage, so it's retried even after a
-restart, as long as the review still has feedback and the PR/MR is still an open target.
+A failed send shows an error toast and is retried after 10 minutes. Failed Duo and human
+feedback deliveries leave their comment IDs unannounced, so a restart can retry them.
+Failed Copilot notifications stay pending in storage while the review still has feedback
+and the PR remains an open target. Legacy state-only Duo pending notifications are discarded.
 
 Every checkout's server plugin instance shares the plugin's storage, so each baseline and
 each pending notification has its own storage key. Instances never overwrite each other's
@@ -269,6 +309,41 @@ records. A failed storage write shows an error toast once.
 
 On GitLab, the server reads the newest 2,000 comments. On busier MRs, edits to older
 comments don't count as activity.
+
+### Live comment subscriptions
+
+GitLab feedback monitoring attempts an outbound TLS WebSocket connection to the MR's host,
+using GitLab's internal `Noteable::NotesChannel` Action Cable interface. Sessions targeting
+the same MR share one subscription within a checkout. No webhook receiver or project
+administration permission is required. This interface is not a public GraphQL subscription
+and can differ across GitLab versions.
+
+After the server confirms a subscription, comment events trigger a feedback fetch. Events
+within a one-second window share a refresh. Quiet connections reconcile comments every
+15 minutes, on the next scheduled status check. The five-minute settling window still
+applies, and the watcher fetches again before delivering pending feedback. Initial connection
+and reconnection also trigger a fetch to catch changes while disconnected.
+
+GitHub and hosts that cannot establish a subscription keep polling. Connection failures,
+rejections, and missing heartbeats restore normal feedback polling. Reconnection attempts
+back off from 30 seconds to 15 minutes. Pausing feedback, removing the last session watching
+an MR, or unloading the plugin closes its connection. Subscriptions only accelerate comment
+monitoring; status, pipeline, and automated-review polling continue at their existing intervals.
+
+On HTTP 429, subscription retries honor `Retry-After` and GitLab's `RateLimit-Reset` and
+`RateLimit-ResetTime` headers, even when the wait exceeds 15 minutes. The cooldown applies
+to all MR subscriptions on that origin within the checkout and survives removing and
+re-adding a target during the plugin instance's lifetime. Other origins remain independent.
+Bun's native WebSocket client hides rejected-handshake headers, so a failed handshake
+triggers one HTTP upgrade probe with a 10-second timeout and redirects disabled. The probe
+reads the reset headers and discards the body. A 429 without usable headers delays retries
+by at least one minute. Normal authenticated API polling continues during this subscription
+cooldown.
+
+GitLab can classify bearer-authenticated `/-/cable` requests as unauthenticated for rate
+limiting: its rate-limit authentication checks API and feed routes, while Action Cable
+authenticates the bearer token later. A valid API token therefore does not necessarily
+avoid the unauthenticated per-IP limit on this route.
 
 On GitHub, the server reads three lists: conversation comments, the text of submitted
 reviews, and the inline comments of review threads. It keeps the newest 2,000 of each.
@@ -283,6 +358,29 @@ timestamp-only behavior until a new baseline is created.
 
 ## Options
 
+### Monitoring security boundary
+
+Monitoring uses the existing authenticated `gh` and `glab` clients for fixed read-only
+GraphQL queries and GitLab MR REST lookups. GitLab subscriptions read the host's token with
+`glab config get token --host` and send it in the WebSocket authorization header over TLS.
+Tokens are not stored in plugin storage or included in URLs. Subprocesses use argument arrays
+rather than shell interpolation, share
+the existing concurrency limit of four, and time out after 30 seconds. Their credentials
+and environment are those of the OpenCode service; monitoring does not provide OS-level
+isolation or reduce those credentials' scopes.
+
+The notification-only path never invokes a model or executes commands from review content.
+It does not edit repository files, commit, push, post replies, or resolve discussions.
+Comment links are opened only after user selection and must use HTTPS on the target's
+origin without embedded credentials. Review bodies remain external data, not trusted
+instructions. Analysis and remediation are outside this feature's scope.
+
+Pending updates are stored locally through OpenCode's plugin storage. Conversation history
+is inspected locally only to find the latest user-message timestamp, with at most four
+session checks in flight. The 72-hour window limits monitoring eligibility, not access
+rights. OpenCode's provider, integration, and organization policies still apply. This
+implementation has not received AppSec approval.
+
 Set options with the object form of the `plugins` entry in `opencode.json`:
 
 ```json
@@ -293,13 +391,12 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 
 | Option                   | Default          | Description                                                                                                                        |
 | ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `reviewStatus`           | `true`           | Show the PR/MR status and notify the agent about reviews. Set to `false` to keep only session targets and titles.                  |
+| `reviewStatus`           | `true`           | Show the PR/MR status and monitor review feedback. Set to `false` to keep only session targets and titles.                  |
 | `hosts`                  | `["gitlab.com"]` | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                         |
 | `githubHosts`            | `["github.com"]` | GitHub hosts, including GitHub Enterprise hosts.                                                                                   |
 | `pollSeconds`            | `120`            | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                           |
-| `notifyAutomatedReviews` | `true`           | Tell the agent when an automated review finishes with feedback. The former name, `notifyDuoReview`, still works.                   |
-| `notifyHumanReviews`     | `true`           | Tell the agent about new human review feedback.                                                                                    |
-| `resumeSession`          | `true`           | Resume the session when telling the agent about a review. Set to `false` to queue the message for the session's next turn instead. |
+| `notifyAutomatedReviews` | `true`           | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                   |
+| `notifyHumanReviews`     | `true`           | Surface new human review feedback.                                                                                    |
 
 The server entry point reads every option, so changing one takes effect when the server
 plugin reloads. The CLI has no options of its own. Each checkout's server reads the
@@ -333,6 +430,10 @@ The server registers an [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) wit
   session. `visible` is the key on screen.
 - `release({ clientID })` drops the caller's leases.
 - `refresh({ key })` looks the key up now and returns `{ enabled, snapshot }`.
+- `feedback({})` returns `{ items, paused }` for this checkout's pending feedback.
+- `acknowledgeFeedback({ id })` dismisses a local update and returns the updated inbox.
+- `pauseFeedback({ paused })` persists the checkout's review-monitoring pause state.
+- `feedbackChanged` fires with `{ directory }` when the inbox or pause state changes.
 - `targetChanged` fires after `set_session_target` runs, with the same fields as `target`
   and the `sessionID`. It has only the `sessionID` in branch mode.
 - `status` fires with `{ directory, key, snapshot }` when a key's status changes.
@@ -366,9 +467,9 @@ OpenCode scopes plugin storage by plugin ID, so nothing stored under the former 
   aren't announced.
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
-With default options, the new footer and review notifications start right away, and
-notifications resume the session. Set `reviewStatus` to `false` to keep only titles, or
-`resumeSession` to `false` to queue notifications for the next turn.
+With default options, the footer and review monitoring start right away. All notifications
+stay in the feedback inbox without agent messages. The former `resumeSession` option has
+been removed; saved values have no effect. Set `reviewStatus` to `false` to keep only titles.
 
 ## Code layout
 

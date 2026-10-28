@@ -3,6 +3,7 @@ import type { Plugin } from '@opencode/plugin';
 import type {
   FeedbackSnapshot,
   Forge,
+  GitHubPullRequest,
   GitLabMergeRequest,
   ReviewComment,
   ReviewRef,
@@ -36,13 +37,11 @@ interface Options {
   pluginOptions?: Record<string, unknown>;
   // Turns PR/MR status on, with this forge for its lookups.
   status?: StatusForge;
-  // How many synthetic messages fail before they succeed.
-  failingSynthetic?: number;
+  failingInbox?: number;
   // Reads review comments for human feedback, instead of the forge.
   feedback?: (request: ReviewRequest) => Promise<FeedbackSnapshot | undefined>;
   now?: () => number;
-  // Synthetic messages wait for `releaseSynthetic()`.
-  holdSynthetic?: boolean;
+  holdInbox?: boolean;
   // Shared with another instance, such as one for another checkout.
   sessions?: Map<
     string,
@@ -50,6 +49,7 @@ interface Options {
   >;
   // The instance's checkout. Defaults to /repo.
   directory?: string;
+  activity?: number;
   // Branch lookups for titles wait for `releaseBranch()`.
   holdBranch?: boolean;
 }
@@ -57,12 +57,16 @@ interface Options {
 // A GitLab forge whose PRs/MRs the test changes between lookups. A gated
 // lookup waits for `open()`, then reads the PR/MR as it is at that point.
 class StatusForge implements Forge {
-  readonly traits = traits('gitlab');
-  readonly requests = new Map<string, GitLabMergeRequest>();
+  readonly traits;
+  readonly requests = new Map<string, ReviewRequest>();
   readonly lookups: string[] = [];
   branch: GitLabMergeRequest[] = [];
   private gates: Array<() => void> = [];
   gated = false;
+
+  constructor(kind: 'gitlab' | 'github' = 'gitlab') {
+    this.traits = traits(kind);
+  }
 
   set(project: string, iid: string, overrides: Partial<GitLabMergeRequest> = {}) {
     this.requests.set(`${project}!${iid}`, {
@@ -101,8 +105,8 @@ class StatusForge implements Forge {
 
 const catalogFor = (forge: StatusForge): ForgeCatalog => ({
   kinds,
-  kind: (host) => (host === 'gitlab.com' ? 'gitlab' : undefined),
-  forHost: (host) => (host === 'gitlab.com' ? forge : undefined),
+  kind: (host) => (host === `${forge.traits.kind}.com` ? forge.traits.kind : undefined),
+  forHost: (host) => (host === `${forge.traits.kind}.com` ? forge : undefined),
   projects: async () => [{ host: 'gitlab.com', path: 'group/project' }],
   repository: async () => ({
     kind: 'repository',
@@ -139,6 +143,18 @@ const defaultSessions = () =>
 // Lets the plugin finish the work that the doubles' promises release. None of
 // that work waits for a timer, so one turn of the event loop is enough.
 const settle = flush;
+
+const duoComment = (url: string, id: string): ReviewComment => ({
+  id,
+  order: Number(id),
+  url: `${url}#note_${id}`,
+  editedAt: 0,
+  resolved: false,
+  bot: true,
+  authorID: 'duo',
+  username: 'GitLabDuo',
+  automated: { reviewer: 'GitLab Duo', finding: true, runID: `run-${id}`, status: 'FINISHED' },
+});
 
 // Where the server stores a pending automated-review notification.
 const pendingRecord = (sessionID: string, url: string) =>
@@ -184,11 +200,12 @@ async function harness(options: Options = {}) {
   const emitted: Array<{ name: string; data: unknown }> = [];
   const disposed: string[] = [];
   const synthetic: Array<{ sessionID: string; text: string; resume?: boolean }> = [];
-  let syntheticFailures = options.failingSynthetic ?? 0;
-  let releaseSynthetic = () => {};
-  const syntheticGate = options.holdSynthetic
-    ? new Promise<void>((resolve) => (releaseSynthetic = resolve))
+  let inboxFailures = options.failingInbox ?? 0;
+  let releaseInbox = () => {};
+  const inboxGate = options.holdInbox
+    ? new Promise<void>((resolve) => (releaseInbox = resolve))
     : undefined;
+  let inboxStarted = 0;
   let syntheticStarted = 0;
   // What the next session read does, once: wait for a promise, or fail.
   let nextRead: Promise<void> | Error | undefined;
@@ -221,7 +238,17 @@ async function harness(options: Options = {}) {
         await held;
         return value;
       },
-      set: async (key: string, value: unknown) => void storage.set(key, structuredClone(value)),
+      set: async (key: string, value: unknown) => {
+        if (key.startsWith('feedback-inbox/')) {
+          inboxStarted++;
+          await inboxGate;
+          if (inboxFailures > 0) {
+            inboxFailures--;
+            throw new Error('storage unavailable');
+          }
+        }
+        storage.set(key, structuredClone(value));
+      },
       remove: async (key: string) => void storage.delete(key),
       scan: async ({ prefix }: { prefix: string }) => ({
         entries: [...storage]
@@ -230,6 +257,10 @@ async function harness(options: Options = {}) {
       }),
     },
     session: {
+      context: async () =>
+        options.activity === undefined
+          ? []
+          : [{ type: 'user', time: { created: options.activity } }],
       instructions: {
         entry: {
           list: async ({ sessionID }: { sessionID: string }) =>
@@ -254,7 +285,8 @@ async function harness(options: Options = {}) {
         nextRead = undefined;
         if (next instanceof Error) throw next;
         await next;
-        return sessions.get(sessionID);
+        const session = sessions.get(sessionID);
+        return session ? { ...session, time: {} } : undefined;
       },
       update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
         sessions.get(sessionID)!.title = title;
@@ -265,11 +297,6 @@ async function harness(options: Options = {}) {
       },
       synthetic: async (input: { sessionID: string; text: string; resume?: boolean }) => {
         syntheticStarted++;
-        await syntheticGate;
-        if (syntheticFailures > 0) {
-          syntheticFailures--;
-          throw new Error('session busy');
-        }
         synthetic.push(input);
       },
     },
@@ -304,7 +331,8 @@ async function harness(options: Options = {}) {
     ? {
         forges: catalogFor(options.status),
         exec: async () => ({ stdout: '', stderr: 'not in tests', code: 1 }),
-        ...(options.feedback ? { feedback: options.feedback } : {}),
+        feedback:
+          options.feedback ?? (async () => ({ complete: true, viewerID: 'me', comments: [] })),
         ...(options.now ? { now: options.now } : {}),
       }
     : undefined;
@@ -318,7 +346,8 @@ async function harness(options: Options = {}) {
     sourceLookups,
     synthetic,
     syntheticStarted: () => syntheticStarted,
-    releaseSynthetic: () => releaseSynthetic(),
+    releaseInbox: () => releaseInbox(),
+    inboxStarted: () => inboxStarted,
     // Pauses the next session read until the returned function runs.
     holdNextRead: () => {
       let release = () => {};
@@ -341,6 +370,9 @@ async function harness(options: Options = {}) {
     releaseBranch: () => releaseBranch(),
     renames: () => renames,
     target: (sessionID = 'one') => handlers.target!({ sessionID }),
+    feedback: () => handlers.feedback!({}) as Promise<import('./feedback-inbox').InboxState>,
+    pauseFeedback: (paused: boolean) => handlers.pauseFeedback!({ paused }),
+    acknowledgeFeedback: (id: string) => handlers.acknowledgeFeedback!({ id }),
     watch: (keys: string[], visible?: string) =>
       handlers.watch!({
         clientID: 'cli',
@@ -788,42 +820,52 @@ describe('PR/MR status', () => {
     await app.cleanup();
   });
 
-  test("tells the session when a target's automated review finishes, with the resume option", async () => {
+  test("records a target's published Duo findings without an agent message", async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
-    const app = await harness({ status: forge, pluginOptions: { ...quiet, resumeSession: false } });
+    let comments: ReviewComment[] = [];
+    const app = await harness({
+      status: forge,
+      pluginOptions: quiet,
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    });
     await app.set({ target: projectA });
     await app.watch(['one'], 'one');
     await settle();
     // Hidden after being shown, but still polled because the review is running.
     await app.watch(['one'], '');
     forge.set('group/a', '1', { duoReviewState: 'REQUESTED_CHANGES' });
+    comments = [duoComment(projectA, '7')];
     await app.refresh();
     await settle();
-    expect(app.synthetic).toMatchObject([{ sessionID: 'one', resume: false }]);
-    expect(app.synthetic[0].text).toContain(projectA);
+    expect(app.synthetic).toEqual([]);
+    expect((await app.feedback()).items).toMatchObject([{ sessionID: 'one', url: projectA }]);
     expect(app.notices()).toMatchObject([
-      { sessionID: 'one', title: 'GitLab Duo finished reviewing !1', variant: 'info' },
+      { sessionID: 'one', title: 'New GitLab Duo review feedback on !1', variant: 'info' },
     ]);
     await app.cleanup();
   });
 
-  test('keeps a failed notification pending and reports it', async () => {
+  test('keeps failed Duo findings unannounced and reports the failure', async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
-    const app = await harness({ status: forge, pluginOptions: quiet, failingSynthetic: 1 });
+    let comments: ReviewComment[] = [];
+    const app = await harness({
+      status: forge,
+      pluginOptions: quiet,
+      failingInbox: 1,
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    });
     await app.set({ target: projectA });
     await app.watch(['one'], 'one');
     await settle();
     forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
+    comments = [duoComment(projectA, '7')];
     await app.refresh();
     await settle();
     expect(app.synthetic).toEqual([]);
-    expect(app.notices()).toMatchObject([{ sessionID: 'one', variant: 'error' }]);
-    expect(app.storage.get(pendingRecord('one', projectA))).toMatchObject({
-      sessionID: 'one',
-      url: projectA,
-    });
+    expect(app.notices()).toMatchObject([{ variant: 'error' }]);
+    expect(announcedIn(app.storage)).toEqual([]);
     await app.cleanup();
   });
 
@@ -870,6 +912,76 @@ describe('PR/MR status', () => {
 });
 
 describe('PR/MR status lifecycle', () => {
+  test('ignores state-only Duo completions and respects the automated feedback option', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
+    let comments: ReviewComment[] = [];
+    const storage = new Map<string, unknown>([['sessions/one', { targets: [{ url: projectA }] }]]);
+    const app = await harness({
+      status: forge,
+      storage,
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    });
+    await app.watch(['one'], 'one');
+    await settle();
+    forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+    const disabled = await harness({
+      status: forge,
+      storage,
+      pluginOptions: { notifyAutomatedReviews: false },
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    });
+    await disabled.watch(['one'], 'one');
+    await settle();
+    comments = [duoComment(projectA, '7')];
+    await disabled.refresh();
+    await settle();
+    expect((await disabled.feedback()).items).toEqual([]);
+    await disabled.cleanup();
+  });
+
+  test('finds Duo feedback without a running transition, groups runs, and preserves notifications across reloads', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
+    let comments: ReviewComment[] = [];
+    const storage = new Map<string, unknown>([['sessions/one', { targets: [{ url: projectA }] }]]);
+    const options = {
+      status: forge,
+      storage,
+      pluginOptions: { notifyHumanReviews: false },
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    };
+    const first = await harness(options);
+    await first.watch(['one'], 'two');
+    await settle();
+    await first.cleanup();
+    comments = [duoComment(projectA, '7'), duoComment(projectA, '8')];
+    const second = await harness(options);
+    await second.watch(['one'], 'two');
+    await settle();
+    const initial = (await second.feedback()).items;
+    expect(initial).toHaveLength(2);
+    expect(new Set(initial.map((item) => item.id)).size).toBe(2);
+    expect(initial.every((item) => item.title === 'New GitLab Duo review feedback on !1')).toBe(
+      true,
+    );
+    expect(second.syntheticStarted()).toBe(0);
+    await second.cleanup();
+    const third = await harness(options);
+    await third.watch(['one'], 'two');
+    await settle();
+    expect((await third.feedback()).items).toEqual(initial);
+    comments.push(duoComment(projectA, '9'));
+    await third.refresh('one');
+    await settle();
+    expect((await third.feedback()).items).toHaveLength(3);
+    await third.cleanup();
+  });
+
   const projectA = 'https://gitlab.com/group/a/-/merge_requests/1';
   const projectB = 'https://gitlab.com/group/b/-/merge_requests/1';
   const quiet = { notifyHumanReviews: false };
@@ -927,9 +1039,170 @@ describe('PR/MR status lifecycle', () => {
     const { app } = await watchedFeedback();
     await app.refresh();
     await settle();
-    expect(app.synthetic).toMatchObject([{ sessionID: 'one' }]);
-    expect(app.synthetic[0].text).toContain(`${projectA}#note_7`);
+    expect((await app.feedback()).items).toMatchObject([
+      { sessionID: 'one', links: [`${projectA}#note_7`] },
+    ]);
+    expect(app.syntheticStarted()).toBe(0);
     await app.cleanup();
+  });
+
+  test('preserves Copilot and successive human feedback batches as separate inbox items', async () => {
+    const forge = new StatusForge('github');
+    const url = 'https://github.com/group/a/pull/1';
+    const request = {
+      forge: 'github',
+      iid: '1',
+      url,
+      state: 'opened',
+      copilotReview: { requested: true, comments: 0 },
+    } as GitHubPullRequest;
+    forge.requests.set('group/a!1', request);
+    const reader = feedbackReader();
+    const app = await harness({ status: forge, feedback: reader.read, now: reader.now });
+    await app.set({ target: url });
+    await app.watch(['one'], 'one');
+    await settle();
+    forge.requests.set('group/a!1', {
+      ...request,
+      copilotReview: { requested: false, reviewID: 'copilot-1', comments: 1 },
+    });
+    reader.advance(SETTLE_TIME);
+    await app.refresh();
+    await settle();
+    const automated = (await app.feedback()).items;
+    expect(automated).toHaveLength(1);
+    const first = { ...reader.comment('7'), url: `${url}#discussion_r7` };
+    reader.set([first]);
+    reader.advance(SETTLE_TIME);
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toHaveLength(2);
+    const second = { ...reader.comment('8'), url: `${url}#discussion_r8` };
+    reader.set([first, second]);
+    reader.advance(SETTLE_TIME);
+    await app.refresh();
+    await settle();
+    const items = (await app.feedback()).items;
+    expect(items).toHaveLength(3);
+    expect(items).toEqual(expect.arrayContaining(automated));
+    expect(items.map((item) => item.links)).toEqual(
+      expect.arrayContaining([[first.url], [second.url]]),
+    );
+    expect(new Set(items.map((item) => item.id)).size).toBe(3);
+    reader.advance(SETTLE_TIME);
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual(items);
+    expect(app.syntheticStarted()).toBe(0);
+    await app.cleanup();
+  });
+
+  test('shares status and feedback fetches across sessions but keeps notification baselines separate', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const reader = feedbackReader();
+    const storage = new Map<string, unknown>([
+      ['sessions/one', { targets: [{ url: projectA }] }],
+      ['sessions/two', { targets: [{ url: projectA }] }],
+    ]);
+    const app = await harness({
+      storage,
+      status: forge,
+      feedback: reader.read,
+      now: reader.now,
+    });
+    await app.watch(['one', 'two'], 'one');
+    await settle();
+    expect(forge.lookups).toEqual(['group/a!1']);
+    expect(reader.reads()).toBe(1);
+    expect([...storage.keys()].filter((key) => key.startsWith('status/feedback/'))).toHaveLength(4);
+    reader.advance(FETCH_INTERVAL);
+    reader.set([reader.comment('7')]);
+    app.emit({ type: 'session.execution.succeeded', data: { sessionID: 'one' } });
+    await settle();
+    expect(forge.lookups).toEqual(['group/a!1', 'group/a!1']);
+    expect(reader.reads()).toBe(2);
+    expect((await app.feedback()).items.map((item) => item.sessionID).sort()).toEqual([
+      'one',
+      'two',
+    ]);
+    expect(app.syntheticStarted()).toBe(0);
+    forge.set('group/a', '1', { state: 'merged' });
+    const refreshed = await app.refresh('one');
+    expect(refreshed.snapshot.lookup).toMatchObject({ requests: [{ state: 'merged' }] });
+    await app.cleanup();
+  });
+
+  test('keeps default notifications out of the agent inbox, including its next turn', async () => {
+    const { app, reader } = await watchedFeedback();
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toHaveLength(1);
+    expect(app.syntheticStarted()).toBe(0);
+    const context = await app.context();
+    expect(context).not.toContain('New review feedback');
+    reader.advance(FETCH_INTERVAL);
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toHaveLength(1);
+    expect(app.syntheticStarted()).toBe(0);
+    await app.cleanup();
+  });
+
+  test('ignores the removed resume option for CLI-watched sessions', async () => {
+    const { app } = await watchedFeedback({ pluginOptions: { resumeSession: true } });
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toHaveLength(1);
+    expect(app.syntheticStarted()).toBe(0);
+    await app.cleanup();
+  });
+
+  test('pause suppresses delivery and preserves unannounced comments for resume', async () => {
+    const { app, reader } = await watchedFeedback();
+    await app.pauseFeedback(true);
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    expect(announcedIn(app.storage)).not.toContain('7');
+    await app.pauseFeedback(false);
+    reader.advance(FETCH_INTERVAL);
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toHaveLength(1);
+    expect(app.syntheticStarted()).toBe(0);
+    await app.cleanup();
+  });
+
+  test('surfaces discovered feedback without a CLI or agent execution', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const reader = feedbackReader();
+    const storage = new Map<string, unknown>([['sessions/one', { targets: [{ url: projectA }] }]]);
+    const app = await harness({
+      storage,
+      status: forge,
+      feedback: reader.read,
+      now: reader.now,
+      activity: reader.now(),
+    });
+    await settle();
+    expect(reader.reads()).toBe(1);
+    reader.advance(FETCH_INTERVAL);
+    reader.set([reader.comment('7')]);
+    await app.refresh();
+    await settle();
+    expect(app.syntheticStarted()).toBe(0);
+    const state = await app.feedback();
+    expect(state.items).toMatchObject([{ sessionID: 'one', links: [`${projectA}#note_7`] }]);
+    await app.cleanup();
+    const reloaded = await harness({ storage, status: forge, now: reader.now });
+    expect((await reloaded.feedback()).items).toEqual(state.items);
+    await reloaded.acknowledgeFeedback(state.items[0].id);
+    expect((await reloaded.feedback()).items).toEqual([]);
+    await reloaded.pauseFeedback(true);
+    expect((await reloaded.feedback()).paused).toBe(true);
+    await reloaded.cleanup();
   });
 
   test('never tells a session about feedback read after cleanup started', async () => {
@@ -953,22 +1226,29 @@ describe('PR/MR status lifecycle', () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
     const storage = new Map<string, unknown>([['sessions/one', { targets: [{ url: projectA }] }]]);
-    const app = await harness({ status: forge, storage, pluginOptions: quiet });
+    let comments: ReviewComment[] = [];
+    const app = await harness({
+      status: forge,
+      storage,
+      pluginOptions: quiet,
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    });
     // The CLI renews its lease on the hidden session; another one is on screen.
     await app.watch(['one', 'two'], 'two');
     await settle();
     expect(forge.lookups).toContain('group/a!1');
     forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
+    comments = [duoComment(projectA, '7')];
     await app.refresh();
     await settle();
-    expect(app.synthetic).toMatchObject([{ sessionID: 'one' }]);
+    expect((await app.feedback()).items).toMatchObject([{ sessionID: 'one' }]);
     await app.cleanup();
   });
 
   test("leaves a session that moved to another checkout to that checkout's instance", async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
-    const app = await harness({ status: forge, pluginOptions: quiet, failingSynthetic: 0 });
+    const app = await harness({ status: forge, pluginOptions: quiet });
     await app.set({ target: projectA });
     await app.watch(['one'], 'one');
     await settle();
@@ -1033,35 +1313,44 @@ describe('PR/MR status lifecycle', () => {
         pendingRecord('one', projectA),
         { sessionID: 'one', url: projectA, since: Date.now(), retryAt: 0 },
       ],
+      [
+        `status/feedback/${encodeURIComponent(`duo one ${projectA}`)}`,
+        { baseline: 0, announced: [], seenAt: Date.now() },
+      ],
     ]);
     const app = await harness({
       status: forge,
       storage,
       pluginOptions: quiet,
-      holdSynthetic: true,
+      holdInbox: true,
+      feedback: async () => ({
+        complete: true,
+        viewerID: 'me',
+        comments: [duoComment(projectA, '7')],
+      }),
     });
     await app.watch(['one'], 'one');
     await settle();
-    expect(app.syntheticStarted()).toBe(1);
+    expect(app.inboxStarted()).toBe(1);
     const stopping = app.cleanup();
     await settle();
-    app.releaseSynthetic();
+    app.releaseInbox();
     await stopping;
-    expect(app.synthetic).toHaveLength(1);
+    expect((await app.feedback()).items).toHaveLength(1);
     // The replacement instance won't send it again.
     expect(app.storage.has(pendingRecord('one', projectA))).toBe(false);
   });
 
   test('stores the comments of a feedback notification that finishes during cleanup', async () => {
-    const { app } = await watchedFeedback({ holdSynthetic: true });
+    const { app } = await watchedFeedback({ holdInbox: true });
     await app.refresh();
     await settle();
-    expect(app.syntheticStarted()).toBe(1);
+    expect(app.inboxStarted()).toBe(1);
     const stopping = app.cleanup();
     await settle();
-    app.releaseSynthetic();
+    app.releaseInbox();
     await stopping;
-    expect(app.synthetic).toHaveLength(1);
+    expect((await app.feedback()).items).toHaveLength(1);
     expect(announcedIn(app.storage)).toEqual(['7']);
   });
 
@@ -1084,11 +1373,17 @@ describe('PR/MR status lifecycle', () => {
   test('never tells a session about a target removed while ownership was read', async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
-    const app = await harness({ status: forge, pluginOptions: quiet });
+    let comments: ReviewComment[] = [];
+    const app = await harness({
+      status: forge,
+      pluginOptions: quiet,
+      feedback: async () => ({ complete: true, viewerID: 'me', comments }),
+    });
     await app.set({ target: projectA });
     await app.watch(['one'], 'one');
     await settle();
     forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
+    comments = [duoComment(projectA, '7')];
     let release = () => {};
     await finishDuringRead(app, forge, () => (release = app.holdNextRead()));
     await app.set({ target: projectB });
@@ -1104,25 +1399,34 @@ describe('PR/MR status lifecycle', () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
     forge.set('group/c', '1', { duoReviewState: 'REVIEW_STARTED' });
-    const app = await harness({ status: forge, pluginOptions: quiet });
+    let ready = false;
+    const app = await harness({
+      status: forge,
+      pluginOptions: quiet,
+      feedback: async (request) => ({
+        complete: true,
+        viewerID: 'me',
+        comments: ready ? [duoComment(request.url, '7')] : [],
+      }),
+    });
     await app.set({ targets: [projectA, projectC] });
     await app.watch(['one'], 'one');
     await settle();
     forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
     forge.set('group/c', '1', { duoReviewState: 'REQUESTED_CHANGES' });
+    ready = true;
     let release = () => {};
     await finishDuringRead(app, forge, () => (release = app.holdNextRead()));
     await app.set({ targets: [projectA], operation: 'remove' });
     release();
     await settle();
-    expect(app.synthetic).toHaveLength(1);
-    expect(app.synthetic[0].text).toContain(projectC);
-    expect(app.synthetic[0].text).not.toContain(projectA);
+    expect((await app.feedback()).items).toMatchObject([{ url: projectC }]);
+    expect((await app.feedback()).items).toHaveLength(1);
     expect(app.notices()).toHaveLength(1);
     await app.cleanup();
   });
 
-  test("keeps an automated notification pending when the session can't be read", async () => {
+  test("keeps Duo findings unannounced when the session can't be read", async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
     const storage = new Map<string, unknown>([
@@ -1131,8 +1435,21 @@ describe('PR/MR status lifecycle', () => {
         pendingRecord('one', projectA),
         { sessionID: 'one', url: projectA, since: Date.now(), retryAt: 0 },
       ],
+      [
+        `status/feedback/${encodeURIComponent(`duo one ${projectA}`)}`,
+        { baseline: 0, announced: [], seenAt: Date.now() },
+      ],
     ]);
-    const app = await harness({ status: forge, storage, pluginOptions: quiet });
+    const app = await harness({
+      status: forge,
+      storage,
+      pluginOptions: quiet,
+      feedback: async () => ({
+        complete: true,
+        viewerID: 'me',
+        comments: [duoComment(projectA, '7')],
+      }),
+    });
     forge.gated = true;
     await app.watch(['one'], 'one');
     await settle();
@@ -1140,10 +1457,8 @@ describe('PR/MR status lifecycle', () => {
     forge.open();
     await settle();
     expect(app.synthetic).toEqual([]);
-    expect(
-      (app.storage.get(pendingRecord('one', projectA)) as { retryAt: number }).retryAt,
-    ).toBeGreaterThan(Date.now());
-    expect(app.notices()).toMatchObject([{ sessionID: 'one', variant: 'error' }]);
+    expect(announcedIn(app.storage)).toEqual([]);
+    expect(app.notices()).toMatchObject([{ variant: 'error' }]);
     expect(JSON.stringify(app.notices())).toContain('database locked');
     await app.cleanup();
   });
@@ -1179,13 +1494,25 @@ describe('state shared across instances and reloads', () => {
     return sessions;
   }
 
-  test("keeps every instance's pending notifications in shared storage", async () => {
+  test("keeps every instance's Duo feedback baseline in shared storage after delivery fails", async () => {
     const storage = new Map<string, unknown>();
     const sessions = sharedSessions();
     const forge = new StatusForge();
     forge.set('group/a', '1', { duoReviewState: 'REVIEW_STARTED' });
     forge.set('group/b', '1', { duoReviewState: 'REVIEW_STARTED' });
-    const options = { status: forge, storage, sessions, pluginOptions: quiet, failingSynthetic: 1 };
+    let ready = false;
+    const options = {
+      status: forge,
+      storage,
+      sessions,
+      pluginOptions: quiet,
+      failingInbox: 1,
+      feedback: async (request: ReviewRequest) => ({
+        complete: true,
+        viewerID: 'me',
+        comments: ready ? [duoComment(request.url, '7')] : [],
+      }),
+    };
     const here = await harness(options);
     const there = await harness({ ...options, directory: '/other' });
     await here.set({ target: projectA });
@@ -1195,11 +1522,16 @@ describe('state shared across instances and reloads', () => {
     await settle();
     forge.set('group/a', '1', { duoReviewState: 'REVIEWED' });
     forge.set('group/b', '1', { duoReviewState: 'REVIEWED' });
+    ready = true;
     await here.refresh('one');
     await there.refresh('three');
     await settle();
-    expect(storage.get(pendingRecord('one', projectA))).toMatchObject({ url: projectA });
-    expect(storage.get(pendingRecord('three', projectB))).toMatchObject({ url: projectB });
+    expect(
+      storage.get(`status/feedback/${encodeURIComponent(`duo one ${projectA}`)}`),
+    ).toMatchObject({ baseline: 0, announced: [] });
+    expect(
+      storage.get(`status/feedback/${encodeURIComponent(`duo three ${projectB}`)}`),
+    ).toMatchObject({ baseline: 0, announced: [] });
     await here.cleanup();
     await there.cleanup();
   });

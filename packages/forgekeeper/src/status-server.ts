@@ -2,22 +2,23 @@ import type { Plugin } from '@opencode/plugin';
 import {
   automatedReview,
   createAutomatedReviewWatcher,
-  reviewMessage,
   reviewTitle,
-  reviewToast,
   notificationKey,
   type PendingDeliveries,
   type PendingDelivery,
   type ReviewHistory,
 } from './automated-review-watch';
 import type { Exec } from './exec';
+import { createRequestCache } from './request-cache';
+import { createFeedbackSubscriptions, RECONCILE_INTERVAL } from './feedback-subscriptions';
+import { createFeedbackInbox, type InboxState } from './feedback-inbox';
+import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
 import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
-import { reference, traitsOf, type ForgeCatalog } from './forges';
+import { parseUrl, reference, traits, traitsOf, type ForgeCatalog } from './forges';
 import {
   applyFeedback,
+  FETCH_INTERVAL,
   createFeedbackWatcher,
-  feedbackMessage,
-  feedbackToast,
   isExpired,
   type FeedbackRecord,
 } from './human-review-watch';
@@ -53,6 +54,7 @@ export interface StatusHost {
   isTarget: (sessionID: string, url: string) => boolean;
   publish: (key: string, snapshot: Snapshot) => void;
   notice: (notice: Notice) => void;
+  feedbackChanged?: () => void;
 }
 
 // Storage keys. Every checkout's instance shares this plugin's storage, so
@@ -86,6 +88,22 @@ export async function setupStatus(
   host: StatusHost,
 ) {
   const directory = ctx.location.directory;
+  const requestKey = (ref: { forge: string; host: string; project: string; iid: string }) =>
+    JSON.stringify([ref.forge, ref.host, ref.project, ref.iid]);
+  const statusCache = createRequestCache<ReviewRequest | undefined>({
+    now: deps.now,
+    ttl: (request) =>
+      Math.min(
+        settings.pollSeconds,
+        request && automatedReview(request)?.state === 'running'
+          ? REVIEW_POLL_SECONDS
+          : settings.pollSeconds,
+      ) * 1000,
+  });
+  const feedbackCache = createRequestCache<FeedbackSnapshot | undefined>({
+    now: deps.now,
+    ttl: (snapshot) => (snapshot?.complete ? FETCH_INTERVAL : 0),
+  });
   // Cleanup runs in two steps. `closing` is set first: no new fetch or
   // delivery starts, so a check that finishes later, such as a feedback
   // fetch, can't tell a session anything. Deliveries that already started
@@ -98,6 +116,17 @@ export async function setupStatus(
   // watches them, even if a CLI still leases them here.
   const foreign = new Set<string>();
   let invalidate: (sessionID: string) => void = () => {};
+  const inbox = createFeedbackInbox({
+    read: async () =>
+      (await ctx.storage.get(`feedback-inbox/${encodeURIComponent(directory)}`)) as
+        | InboxState
+        | undefined,
+    write: async (state) => {
+      if (closed) throw new Error('The plugin stopped');
+      await ctx.storage.set(`feedback-inbox/${encodeURIComponent(directory)}`, state as never);
+    },
+    changed: () => host.feedbackChanged?.(),
+  });
 
   // Storage writes run one at a time, so a record's read and write can't
   // interleave with another change to it. A failed write only risks a
@@ -131,18 +160,6 @@ export async function setupStatus(
   const isTarget = (sessionID: string, url: string) =>
     !closing && !foreign.has(sessionID) && host.isTarget(sessionID, url);
 
-  // Whether this instance still owns the session. It reads the session again,
-  // because the session may have moved while a lookup or fetch ran. A session
-  // that moved is left to its new checkout's instance.
-  // A failed read rejects, so the delivery stays pending and is retried: only
-  // a session that was read and is elsewhere counts as moved.
-  async function owns(sessionID: string) {
-    const session = await ctx.session.get({ sessionID });
-    if (session.location.directory === directory) return true;
-    markForeign(sessionID);
-    return false;
-  }
-
   function markForeign(sessionID: string) {
     if (foreign.has(sessionID)) return;
     foreign.add(sessionID);
@@ -168,21 +185,38 @@ export async function setupStatus(
   async function tell(
     sessionID: string,
     requests: ReviewRequest[],
-    compose: (requests: ReviewRequest[]) => { text: string; description: string },
+    title: (requests: ReviewRequest[]) => string,
+    links: string[] = [],
+    identity?: string,
   ): Promise<ReviewRequest[]> {
     if (closing) throw new Error('The plugin stopped');
-    if (!(await owns(sessionID))) return [];
+    const session = await ctx.session.get({ sessionID });
+    if (session.location.directory !== directory) {
+      markForeign(sessionID);
+      return [];
+    }
+    if (session.time?.archived !== undefined) return [];
+    if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
     if (closing) throw new Error('The plugin stopped');
     const current = requests.filter((request) => isTarget(sessionID, request.url));
     if (current.length === 0) return [];
-    const { text, description } = compose(current);
-    await ctx.session.synthetic({
-      sessionID,
-      text,
-      description,
-      delivery: 'queue',
-      resume: settings.resumeSession,
-    });
+    const description = title(current);
+    for (const request of current) {
+      await inbox.add({
+        id: JSON.stringify([
+          sessionID,
+          request.url,
+          identity ??
+            automatedReview(request)?.completed?.id ??
+            (links.length ? [...links].sort() : description),
+        ]),
+        sessionID,
+        url: request.url,
+        title: description,
+        links: links.length ? links : [request.url],
+        at: (deps.now ?? Date.now)(),
+      });
+    }
     return current;
   }
 
@@ -191,9 +225,37 @@ export async function setupStatus(
     (async (request: ReviewRequest, cwd: string) =>
       traitsOf(request).feedback?.fetch(deps.exec, cwd, request));
 
+  const feedbackEvents = new Map<string, ReturnType<typeof setTimeout>>();
+  const subscriptions = createFeedbackSubscriptions({
+    exec: deps.exec,
+    directory,
+    changed(url) {
+      if (closing || feedbackEvents.has(url)) return;
+      feedbackEvents.set(
+        url,
+        setTimeout(() => {
+          feedbackEvents.delete(url);
+          if (closing) return;
+          const ref = parseUrl(url);
+          if (ref) feedbackCache.invalidate(requestKey(ref));
+          service.checkFeedback(url, (sessionID, request) => {
+            human?.invalidate(sessionID, request);
+            publishedFeedback?.invalidate(sessionID, request);
+          });
+        }, 1000),
+      );
+    },
+  });
+
   const automated = settings.notifyAutomatedReviews
     ? createAutomatedReviewWatcher({
-        isTarget,
+        isTarget: (sessionID, url) => {
+          const ref = parseUrl(url);
+          return (
+            isTarget(sessionID, url) &&
+            !(ref && traits(ref.forge).automatedReview?.publishedFeedback)
+          );
+        },
         now: deps.now,
         readHistory: async (sessionID, url) =>
           (await ctx.storage.get(reviewHistoryKey(sessionID, url))) as ReviewHistory | undefined,
@@ -216,11 +278,14 @@ export async function setupStatus(
               : ctx.storage.remove(pendingKey(sessionID, url)),
           ),
         async send(sessionID, requests) {
-          const sent = await tell(sessionID, requests, (current) => ({
-            text: reviewMessage(current),
-            description: reviewTitle(current),
-          }));
-          if (sent.length > 0) notice({ sessionID, ...reviewToast(sent), variant: 'info' });
+          const sent = await tell(sessionID, requests, reviewTitle);
+          if (sent.length > 0)
+            notice({
+              sessionID,
+              title: reviewTitle(sent),
+              message: 'New feedback in /forge-feedback.',
+              variant: 'info',
+            });
         },
         onSendError(error, sessionID, requests) {
           const reason = error instanceof Error ? error.message : String(error);
@@ -234,48 +299,98 @@ export async function setupStatus(
       })
     : undefined;
 
-  const human = settings.notifyHumanReviews
-    ? createFeedbackWatcher({
-        record: async (key) =>
-          (await ctx.storage.get(feedbackRecordKey(key))) as FeedbackRecord | undefined,
-        now: deps.now,
-        persist: (key, change, at) =>
-          write(async () => {
-            const stored = (await ctx.storage.get(feedbackRecordKey(key))) as
-              | FeedbackRecord
-              | undefined;
-            await ctx.storage.set(
-              feedbackRecordKey(key),
-              applyFeedback(stored, change, at) as never,
-            );
-          }),
-        fetch: async (_sessionID, request) =>
-          closing ? undefined : readFeedback(request, directory),
-        current: (sessionID, request) => isTarget(sessionID, request.url),
-        async send(sessionID: string, request: ReviewRequest, comments: ReviewComment[]) {
-          const sent = await tell(sessionID, [request], () => ({
-            text: feedbackMessage(request, comments),
-            description: `New review feedback on ${reference(request)}`,
-          }));
+  const recordKey = (key: string, automatedFeedback: boolean) => {
+    if (!automatedFeedback) return key;
+    const ref = parseUrl(key.slice(key.indexOf(' ') + 1));
+    const namespace = ref && traits(ref.forge).automatedReview?.publishedFeedback?.storageKey;
+    return `${namespace ?? 'automated'} ${key}`;
+  };
+
+  const feedbackWatcher = (automatedFeedback: boolean) =>
+    createFeedbackWatcher({
+      ...(automatedFeedback
+        ? {
+            select: (snapshot: FeedbackSnapshot, request: ReviewRequest) =>
+              traitsOf(request).automatedReview?.publishedFeedback?.select(snapshot) ?? snapshot,
+            ready: (snapshot: FeedbackSnapshot, now: number, request: ReviewRequest) =>
+              traitsOf(request).automatedReview?.publishedFeedback?.ready(snapshot, now) ?? false,
+          }
+        : {}),
+      interval: (request) =>
+        subscriptions.connected(request.url) ? RECONCILE_INTERVAL : FETCH_INTERVAL,
+      record: async (key) =>
+        (await ctx.storage.get(feedbackRecordKey(recordKey(key, automatedFeedback)))) as
+          | FeedbackRecord
+          | undefined,
+      now: deps.now,
+      persist: (key, change, at) =>
+        write(async () => {
+          key = recordKey(key, automatedFeedback);
+          const stored = (await ctx.storage.get(feedbackRecordKey(key))) as
+            | FeedbackRecord
+            | undefined;
+          await ctx.storage.set(feedbackRecordKey(key), applyFeedback(stored, change, at) as never);
+        }),
+      fetch: async (_sessionID, request) => {
+        if (closing) return undefined;
+        const ref = parseUrl(request.url);
+        return ref
+          ? feedbackCache.get(requestKey(ref), () => readFeedback(request, directory))
+          : readFeedback(request, directory);
+      },
+      current: (sessionID, request) => isTarget(sessionID, request.url),
+      async send(sessionID: string, request: ReviewRequest, comments: ReviewComment[]) {
+        const title = automatedFeedback
+          ? `New ${traitsOf(request).automatedReview?.name ?? 'automated'} review feedback on ${reference(request)}`
+          : `New review feedback on ${reference(request)}`;
+        const groups = automatedFeedback
+          ? [...new Set(comments.map((comment) => comment.automated?.runID ?? 'unlinked'))].map(
+              (runID) =>
+                comments.filter((comment) => (comment.automated?.runID ?? 'unlinked') === runID),
+            )
+          : [comments];
+        for (const group of groups) {
+          const sent = await tell(
+            sessionID,
+            [request],
+            () => title,
+            group.map((comment) => comment.url),
+            automatedFeedback
+              ? JSON.stringify([
+                  group[0].automated?.runID ?? 'unlinked',
+                  group.map((comment) => comment.id).sort(),
+                ])
+              : JSON.stringify(['human', group.map((comment) => comment.id).sort()]),
+          );
           if (sent.length > 0)
-            notice({ sessionID, ...feedbackToast(request, comments), variant: 'info' });
-        },
-        onFetchError: (error) =>
-          reportOnce('feedback-fetch', 'Could not check PR/MR review feedback', error),
-        onSendError: (error) => {
-          const reason = error instanceof Error ? error.message : String(error);
-          notice({
-            message: `Could not tell the session about review feedback: ${reason}`,
-            variant: 'error',
-          });
-        },
-      })
-    : undefined;
+            notice({
+              sessionID,
+              title,
+              message: 'New feedback in /forge-feedback.',
+              variant: 'info',
+            });
+        }
+      },
+      onFetchError: (error) =>
+        reportOnce('feedback-fetch', 'Could not check PR/MR review feedback', error),
+      onSendError: (error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        notice({
+          message: `Could not tell the session about review feedback: ${reason}`,
+          variant: 'error',
+        });
+      },
+    });
+
+  const human = settings.notifyHumanReviews ? feedbackWatcher(false) : undefined;
+  const publishedFeedback = settings.notifyAutomatedReviews ? feedbackWatcher(true) : undefined;
 
   const service = createStatusService({
     async load(key, previous) {
       if (key === HOME) return locate(deps.forges, { directory });
       const session = await ctx.session.get({ sessionID: key });
+      if (session.time?.archived !== undefined)
+        return { kind: 'none', reason: 'The session is archived' };
       if (session.location.directory !== directory) {
         // Not `markForeign`: invalidating would discard this very lookup.
         foreign.add(key);
@@ -289,19 +404,68 @@ export async function setupStatus(
         targets: classifyTargets(targetOutput(state.targets)),
         title: userTitle(session.title, state.prefix),
         previous,
+        request: (ref, load) => statusCache.get(requestKey(ref), load),
       });
     },
     isTarget,
     owns: (sessionID) => !foreign.has(sessionID),
     publish: host.publish,
     automated,
-    human,
+    human:
+      human || publishedFeedback
+        ? {
+            watches: (request) => !!human || !!traitsOf(request).automatedReview?.publishedFeedback,
+            async check(sessionID, request) {
+              await Promise.all([
+                human?.check(sessionID, request),
+                traitsOf(request).automatedReview?.publishedFeedback
+                  ? publishedFeedback?.check(sessionID, request)
+                  : undefined,
+              ]);
+            },
+          }
+        : undefined,
+    feedbackTargets: (sessionID, requests) => subscriptions.update(sessionID, requests),
     onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
     now: deps.now,
   });
   invalidate = (sessionID) => service.invalidate(sessionID);
+  const discovery = createFeedbackDiscovery({
+    directory,
+    candidates: async () =>
+      (await scanAll('sessions/')).flatMap(({ key, value }) => {
+        const targets = (value as { targets?: Target[] }).targets ?? [];
+        return classifyTargets(targetOutput(targets))?.some(
+          (target) => target.kind === 'merge-request',
+        )
+          ? [key.slice('sessions/'.length)]
+          : [];
+      }),
+    session: (sessionID) => ctx.session.get({ sessionID }),
+    activity: async (sessionID) => {
+      const messages = await ctx.session.context({ sessionID });
+      return messages.reduce<number | undefined>(
+        (latest, message) =>
+          message.type === 'user' ? Math.max(latest ?? 0, message.time.created) : latest,
+        undefined,
+      );
+    },
+    paused: async () => (await inbox.list()).paused,
+    watch: (ids) => service.discover(ids),
+    error: (error) => reportOnce('discovery', 'Could not discover recent review sessions', error),
+    now: deps.now,
+  });
+  void inbox
+    .list()
+    .then((state) => {
+      if (closing) return;
+      service.pauseFeedback(state.paused);
+      return discovery.refresh();
+    })
+    .catch((error) => reportOnce('discovery', 'Could not restore feedback monitoring', error));
+  const discoveryTimer = setInterval(() => void discovery.refresh(), DISCOVERY_INTERVAL);
 
   // Housekeeping, on the write queue so it doesn't hold up setup: removes
   // feedback records not seen for a long time.
@@ -314,6 +478,23 @@ export async function setupStatus(
 
   return {
     service,
+    inbox,
+    discovery,
+    async refresh(sessionID: string) {
+      const lookup = service.get(sessionID).lookup;
+      if (lookup?.kind === 'found')
+        for (const request of lookup.requests) {
+          human?.invalidate(sessionID, request);
+          publishedFeedback?.invalidate(sessionID, request);
+        }
+      for (const target of (await host.state(sessionID)).targets) {
+        const ref = parseUrl(target.url);
+        if (!ref) continue;
+        statusCache.invalidate(requestKey(ref));
+        feedbackCache.invalidate(requestKey(ref));
+      }
+      return service.refresh(sessionID);
+    },
     // Discards lookups of the old targets and looks the session up again.
     // Whether the new targets include a PR/MR is known now, so the footer
     // doesn't depend on that lookup succeeding.
@@ -324,6 +505,7 @@ export async function setupStatus(
         classified.some((target) => target.kind === 'merge-request'),
       );
       service.invalidate(sessionID);
+      void discovery.refresh();
     },
     // A title reference only counts without targets.
     async titleChanged(sessionID: string) {
@@ -332,7 +514,18 @@ export async function setupStatus(
     },
     // A turn may have pushed a branch or opened a PR/MR.
     turnEnded() {
-      for (const key of service.keys()) service.notify(key);
+      statusCache.clear();
+      feedbackCache.clear();
+      for (const key of service.keys()) {
+        const lookup = service.get(key).lookup;
+        if (lookup?.kind === 'found')
+          for (const request of lookup.requests) {
+            human?.invalidate(key, request);
+            publishedFeedback?.invalidate(key, request);
+          }
+        service.notify(key);
+      }
+      void discovery.refresh();
     },
     // Sessions without targets follow the checked-out branch.
     async branchChanged() {
@@ -351,6 +544,13 @@ export async function setupStatus(
     // so the replacement instance may send it again.
     async dispose() {
       closing = true;
+      subscriptions.dispose();
+      for (const timer of feedbackEvents.values()) clearTimeout(timer);
+      feedbackEvents.clear();
+      statusCache.clear();
+      feedbackCache.clear();
+      clearInterval(discoveryTimer);
+      discovery.stop();
       await service.dispose(DRAIN_TIME);
       closed = true;
       await writes;
