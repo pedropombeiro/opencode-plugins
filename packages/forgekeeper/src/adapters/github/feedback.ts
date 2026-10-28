@@ -1,6 +1,7 @@
-import type { FeedbackSnapshot, ReviewComment } from '../../forge';
+import type { CommentDetail, FeedbackSnapshot, ReviewComment } from '../../forge';
 import type { GraphQL } from './adapter';
 import { query, typed, type Query, type Typed } from '../../graphql';
+import { EXCERPT_RADIUS } from '../../review-summary';
 
 type Variables = Record<string, string | number>;
 
@@ -240,6 +241,75 @@ async function readOlderComments(
       return { comments: pages.toReversed().flat(), complete: false };
   }
   return { comments: pages.toReversed().flat(), complete: true };
+}
+
+interface DetailNode {
+  __typename?: string;
+  id?: string;
+  url?: string | null;
+  body?: string;
+  path?: string | null;
+  line?: number | null;
+  originalLine?: number | null;
+  diffHunk?: string | null;
+  replyTo?: { body: string; author: { login: string } | null } | null;
+  author?: { login: string } | null;
+}
+
+// `gh` passes only string and number variables, so the IDs are written into
+// the query. Node IDs are base64url-like, and anything else is dropped.
+const detailsQuery = (ids: string[]) =>
+  query<{ nodes?: Array<DetailNode | null> | null }>(`query {
+  nodes(ids: ${JSON.stringify(ids)}) {
+    __typename
+    ... on IssueComment { id url body author { login } }
+    ... on PullRequestReview { id url body author { login } }
+    ... on PullRequestReviewComment {
+      id url body path line originalLine diffHunk author { login }
+      replyTo { body author { login } }
+    }
+  }
+}`);
+
+const NODE_ID = /^[A-Za-z0-9_=-]+$/;
+const DETAIL_BATCH = 50;
+
+// Reads the comments with these node IDs. Unknown or inaccessible IDs are
+// left out.
+export async function fetchDetails(
+  transport: GraphQL,
+  host: string,
+  ids: string[],
+): Promise<CommentDetail[]> {
+  const graphql = typed<Variables>(transport);
+  const details: CommentDetail[] = [];
+  const valid = ids.filter((id) => NODE_ID.test(id));
+  for (let start = 0; start < valid.length; start += DETAIL_BATCH) {
+    const data = await graphql(host, detailsQuery(valid.slice(start, start + DETAIL_BATCH)), {});
+    for (const node of data.nodes ?? []) {
+      if (!node?.id || !node.url || !node.author || node.body === undefined) continue;
+      const line = node.line ?? node.originalLine ?? undefined;
+      // A diff hunk ends at the commented line, so its last lines are the context.
+      const hunk = node.diffHunk
+        ?.split('\n')
+        .slice(-(2 * EXCERPT_RADIUS + 1))
+        .join('\n');
+      const parent = node.replyTo?.author
+        ? [{ username: node.replyTo.author.login, body: node.replyTo.body }]
+        : [];
+      details.push({
+        id: node.id,
+        url: node.url,
+        username: node.author.login,
+        body: node.body,
+        ...(node.path ? { path: node.path } : {}),
+        ...(line !== undefined ? { line } : {}),
+        ...(node.path && hunk ? { code: { path: node.path, text: hunk } } : {}),
+        ...(parent.length ? { replies: parent } : {}),
+      });
+    }
+  }
+  return details;
 }
 
 export async function fetchComments(

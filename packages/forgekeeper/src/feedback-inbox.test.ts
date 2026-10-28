@@ -2,11 +2,114 @@ import { describe, expect, test } from 'bun:test';
 import {
   createFeedbackInbox,
   feedbackLinks,
+  feedbackTime,
+  formatTime,
+  linkOptions,
   type InboxState,
   type FeedbackItem,
 } from './feedback-inbox';
 
 describe('feedback inbox', () => {
+  test('offers comment links before the PR/MR, labeled by their anchor', () => {
+    const url = 'https://gitlab.com/g/p/-/merge_requests/1';
+    const options = linkOptions({
+      url,
+      links: [`${url}#note_7`, `${url}#note_8`, url, 'https://evil.example/#note_9'],
+    });
+    expect(options.map((option) => option.value)).toEqual([`${url}#note_7`, `${url}#note_8`, url]);
+    expect(options[0].title).toBe('Comment 1 of 2 (#note_7)');
+    expect(options.at(-1)?.title).toBe('PR/MR overview');
+    expect(linkOptions({ url, links: [`${url}#note_7`] })[0].title).toBe('Comment (#note_7)');
+    // An update stored without comment links offers only the PR/MR.
+    expect(linkOptions({ url, links: [url] })).toEqual([
+      { title: 'PR/MR overview', description: url, value: url },
+    ]);
+    // The PR/MR's own link passes the same filter as comment links.
+    const insecure = 'http://gitlab.com/g/p/-/merge_requests/1';
+    expect(linkOptions({ url: insecure, links: [`${insecure}#note_7`] })).toEqual([]);
+    expect(linkOptions({ url: 'javascript:alert(1)', links: [] })).toEqual([]);
+    const credentials = 'https://user:pass@gitlab.com/g/p/-/merge_requests/1';
+    expect(linkOptions({ url: credentials, links: [] })).toEqual([]);
+  });
+  test("labels an update with its newest comment's time, or its detection time without comments", () => {
+    const at = Date.UTC(2026, 9, 28, 14, 31);
+    const postedAt = Date.UTC(2026, 9, 28, 14, 25);
+    expect(feedbackTime({ at, postedAt })).toBe(`Latest comment: ${formatTime(postedAt)}`);
+    expect(feedbackTime({ at })).toBe(`Detected: ${formatTime(at)}`);
+    expect(formatTime(postedAt)).toContain('2026');
+  });
+  test('retries passive notifications after restart without replacing their stable identity', async () => {
+    let state: InboxState | undefined;
+    let fail = true;
+    const sent: string[] = [];
+    const options = {
+      read: async () => structuredClone(state),
+      write: async (value: InboxState) => {
+        state = structuredClone(value);
+      },
+      changed: () => {},
+      now: () => 10,
+      notify: async (item: FeedbackItem) => {
+        sent.push(item.id);
+        if (fail) throw new Error('session unavailable');
+      },
+    };
+    const item: FeedbackItem = {
+      id: 'a',
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: 'New feedback',
+      links: [],
+      delivery: 'passive',
+      at: 1,
+    };
+    const inbox = createFeedbackInbox(options);
+    await expect(inbox.add(item)).rejects.toThrow('session unavailable');
+    expect((await inbox.list()).items).toEqual([item]);
+    await inbox.pause(true);
+    await createFeedbackInbox(options).notifyPending();
+    expect(sent).toEqual(['a']);
+    fail = false;
+    await inbox.pause(false);
+    await createFeedbackInbox(options).notifyPending();
+    expect(sent).toEqual(['a', 'a']);
+    await inbox.add(item);
+    expect(sent).toEqual(['a', 'a']);
+    expect((await inbox.list()).items).toMatchObject([{ id: 'a', notifiedAt: 10 }]);
+  });
+
+  test('delivers each pending update on its own and never an update recorded in inbox mode', async () => {
+    let state: InboxState | undefined;
+    const sent: string[] = [];
+    const update = (id: string, delivery?: 'passive' | 'summary'): FeedbackItem => ({
+      id,
+      sessionID: id,
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: 'New feedback',
+      links: [],
+      ...(delivery ? { delivery } : {}),
+      at: 1,
+    });
+    state = {
+      paused: false,
+      items: [update('broken', 'summary'), update('ok', 'summary'), update('old')],
+    };
+    const inbox = createFeedbackInbox({
+      read: async () => structuredClone(state),
+      write: async (value) => void (state = structuredClone(value)),
+      changed: () => {},
+      notify: async (item) => {
+        sent.push(item.id);
+        if (item.id === 'broken') throw new Error('deleted session');
+      },
+    });
+    await expect(inbox.notifyPending()).rejects.toThrow('deleted session');
+    await expect(inbox.notifyPending()).rejects.toThrow('deleted session');
+    // The failing update doesn't hold the next one back, and the update
+    // recorded in inbox mode starts nothing after switching modes.
+    expect(sent).toEqual(['broken', 'ok', 'broken']);
+    expect(state?.items.find((item) => item.id === 'ok')?.notifiedAt).toBeDefined();
+  });
   test('opens only HTTPS links on the target origin without embedded credentials', () => {
     const url = 'https://gitlab.com/g/p/-/merge_requests/1';
     expect(

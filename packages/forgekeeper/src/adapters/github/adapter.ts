@@ -14,7 +14,7 @@ import {
   type ReviewRef,
 } from '../../forge';
 import type { RemoteProject, Repository } from '../../git';
-import { fetchComments } from './feedback';
+import { fetchComments, fetchDetails } from './feedback';
 import { gitlabTraits } from '../gitlab/adapter';
 import { query, typed, type Transport, type Typed } from '../../graphql';
 
@@ -216,6 +216,10 @@ export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
       return ref
         ? fetchComments(ghGraphQL(run, directory), ref.host, ref.project, ref.iid)
         : undefined;
+    },
+    async details(run, directory, request, ids) {
+      const ref = githubTraits.parseUrl(request.url);
+      return ref ? fetchDetails(ghGraphQL(run, directory), ref.host, ids) : [];
     },
   },
 };

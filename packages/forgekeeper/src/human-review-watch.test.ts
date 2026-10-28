@@ -126,6 +126,41 @@ describe('eligibleFeedback', () => {
     expect(sent).toBe(0);
   });
 
+  test('passes only fetches that no later change made obsolete to `accepted`', async () => {
+    let release!: (value: FeedbackSnapshot) => void;
+    let calls = 0;
+    let current = true;
+    const accepted: FeedbackSnapshot[] = [];
+    const watcher = createFeedbackWatcher({
+      record: async () => ({ baseline: 0, announced: [], seenAt: 0 }),
+      persist: () => {},
+      current: () => current,
+      fetch: async () => {
+        calls++;
+        return calls === 1
+          ? new Promise<FeedbackSnapshot>((resolve) => {
+              release = resolve;
+            })
+          : snapshot(comment('1'));
+      },
+      send: async () => {},
+      accepted: (_request, value) => void accepted.push(value),
+      now: () => SETTLE_TIME,
+    });
+    const first = watcher.check('one', mr);
+    watcher.invalidate('one', mr);
+    // The obsolete fetch says the comment was resolved.
+    release(snapshot(comment('1', { resolved: true })));
+    await first;
+    expect(accepted).toEqual([]);
+    await watcher.check('one', mr);
+    expect(accepted).toEqual([snapshot(comment('1'))]);
+    current = false;
+    watcher.invalidate('one', mr);
+    await watcher.check('one', mr);
+    expect(accepted).toHaveLength(1);
+  });
+
   test('recognizes unseen IDs at the baseline timestamp', () => {
     const comments = snapshot(comment('1', { order: 100 }), comment('2', { order: 100 }));
     expect(

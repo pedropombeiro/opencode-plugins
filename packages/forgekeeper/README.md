@@ -206,12 +206,16 @@ not shared between checkouts, whose CLI credentials and repository context may d
 The server discovers recent sessions at startup, every 5 minutes, and after target changes
 or completed turns. A session qualifies when it is a non-archived root session in the
 checkout, has an explicit PR/MR target, and has a user message in the last 72 hours.
-Viewing a tab, changing its title, or receiving a background notification does not extend
-that window. Sessions without readable conversation activity are skipped. Discovery reads
-conversation timestamps locally; it does not send conversations to a model.
+A compaction drops earlier messages from the session's context, so when the context has no
+user message, the newest compaction counts instead, since compactions run only during
+turns. Viewing a tab, changing its title, or receiving a background notification does not
+extend that window. Sessions without readable conversation activity are skipped. Discovery
+reads conversation timestamps locally; it does not send conversations to a model.
 
 Discovered sessions poll without a CLI lease while at least one explicit target is open.
-When all targets close or merge, polling stops. Discovery reevaluates the activity window
+Targets that couldn't be resolved, such as while the forge returns nothing for them, keep
+being retried with the same backoff as failed lookups. When all targets close or merge,
+polling stops. Discovery reevaluates the activity window
 every 5 minutes. It runs only while OpenCode has this checkout's plugin instance loaded;
 it is not a separate scheduler and cannot wake an unloaded location or stopped service.
 
@@ -249,13 +253,102 @@ sent again.
 For each explicit target that is an open PR/MR, the server records new review feedback.
 A target that merges or closes gets no more notifications, and a notification waiting for a
 retry is dropped.
-By default, feedback goes only to a persistent inbox. It does not queue an agent message,
-resume a session, or make a model request. `/forge-feedback` lists pending feedback for
+Feedback goes to a persistent inbox. The `reviewFeedbackDelivery` option sets what else
+an update does:
+
+- `inbox`, the default, posts nothing to the session.
+- `passive` queues a session message with `resume: false`, which starts no turn. It
+  doesn't mark the session unread, because the TUI marks sessions unread only when a
+  turn ends. When something else wakes the session, the message can run as its own
+  step; Forgekeeper then sends only the notice, without tools or the session's history.
+- `summary` queues a message that starts a summary turn, described below. A turn that
+  ends marks the session unread. Updates without comments, such as Copilot reviews,
+  get a passive message instead.
+
+Session messages contain the notification title, when the newest comment was written, and
+links, not review bodies or instructions to act. Updates without comments, such as Copilot
+reviews, show when Forgekeeper detected them instead. Times are absolute and local, with
+their time zone, such as `Oct 28, 2026 at 3:25 PM GMT+1`, so they stay accurate in the
+session's history. `/forge-feedback` shows the same time, and a summary starts by saying it.
+
+Each update keeps the mode it was recorded in, so changing `reviewFeedbackDelivery`
+affects later updates only: switching to `summary` never starts turns for updates already
+in the inbox. Summarize those with Ctrl+R instead. Stable message IDs deduplicate
+automatic retries, including after reloads. Updates that haven't reached their session are
+retried every minute and after a reload, each on its own, so one that keeps failing doesn't
+hold the others back. An update whose session was deleted, archived, or moved, or that no
+longer targets the PR/MR, is dropped, including when that changed while its comments were
+read. Switching to `inbox` stops retries. A summary requested from `/forge-feedback` is a
+new request each time.
+
+### Summary turns
+
+A summary turn runs after any active turn finishes, including its tool calls. Forgekeeper
+reads the announced comments, at most 20 of them and 4,000 characters each, with context
+the summary can't fetch itself, because it runs without tools:
+
+- Earlier replies in each comment's thread, at most 5 of 1,000 characters each. GitHub
+  provides only the comment a reply answers.
+- The code an inline comment is on, at most 3,000 characters. On GitLab, that's 10 lines
+  on either side of the commented line, from the MR's head commit, or from its base commit
+  for a removed line, for at most 10 files. On GitHub, it's the end of the diff hunk. A
+  file that can't be read leaves out only its code.
+
+The PR/MR's author wrote that code, so the summary treats it as untrusted, like the
+comments. Forgekeeper keeps all of this in plugin storage until the next user prompt, or for
+at most 7 days. It never enters the session's history, where later turns with tools could
+read it.
+
+Forgekeeper recognizes a step whose input is one of its messages in two independent ways:
+
+- Every message it posts ends with a tag naming its ID, such as
+  `[forgekeeper:msg_forgekeeper_…]`, which the context hook finds in the request it's
+  about to send. This doesn't depend on stored state, so a failed restore or an expired
+  record can't let the message run as an ordinary request.
+- It tracks every message it posts until a user prompt follows that message, and reads the
+  session's context before each request. A message still in the queue stays tracked while
+  earlier steps run, and a reminder sent after the message doesn't end its step.
+
+Before each model request that either way identifies, its context hook:
+
+- removes every tool from the request;
+- replaces the system prompt with summary instructions that treat comments as untrusted;
+- replaces the conversation with one message holding the comments, or the notice, so the
+  request doesn't resend the session's history;
+- caps the output at 1,200 tokens.
+
+If the review text is missing, such as after its record expired, the request asks for a
+short reply saying so, still without tools or history. If the hook can't build the
+replacement message, the request fails rather than keeping any of the session's messages.
+
+As backstops, Forgekeeper refuses every tool execution and permission request while the
+session's latest model request was one of these, and treats a step it can't classify as
+one, such as when the session's context can't be read, or when a compaction left no
+input in it. The turn ends at the next user prompt. A later turn that another plugin starts
+without a user prompt also runs without tools. The summary is the only part that stays in
+the session's history.
+
+`/forge-feedback` lists pending feedback for
 the current checkout. Select an update to open its PR/MR or comment links, press Ctrl+D
-to acknowledge it, or press Ctrl+S to pause or resume review monitoring. Acknowledgement
+to acknowledge it, press Ctrl+R to summarize it in its session in any delivery mode, or
+press Ctrl+S to pause or resume review monitoring. Acknowledgement
 only dismisses the local update; it does not reply to or resolve a remote discussion.
 The home and session footers show the pending count, and connected CLIs in the checkout
 show a toast even when the session's tab has never been visited.
+
+An update leaves the inbox when you acknowledge it, or when it no longer needs attention:
+
+- Once every comment it announced is resolved, by anyone. Comments that can't be resolved,
+  such as GitLab comments outside a thread or GitHub review bodies, need acknowledging,
+  and so do updates without comments, such as Copilot reviews.
+- Once its PR/MR merges or closes, or its session stops targeting it.
+
+Forgekeeper checks resolution and PR/MR state only for sessions it monitors. Resolution
+counts only from a fetch that no later change made obsolete, and state only after a lookup
+finishes, so a reload doesn't clear updates before the session's targets are known. A
+target change clears that target's updates right away, whether or not Forgekeeper
+monitors the session. Working on the feedback, with or without the agent, doesn't clear an
+update by itself.
 
 The inbox retains the newest 500 updates per checkout across plugin reloads. It stores
 session IDs, target URLs, notification titles, comment URLs, and timestamps, not comment
@@ -369,8 +462,10 @@ the existing concurrency limit of four, and time out after 30 seconds. Their cre
 and environment are those of the OpenCode service; monitoring does not provide OS-level
 isolation or reduce those credentials' scopes.
 
-The notification-only path never invokes a model or executes commands from review content.
-It does not edit repository files, commit, push, post replies, or resolve discussions.
+The `inbox` and `passive` modes never invoke a model. The `summary` mode sends review
+text to the session's model in a request without tools. No mode executes commands from
+review content, edits repository files, commits, pushes, posts replies, or resolves
+discussions.
 Comment links are opened only after user selection and must use HTTPS on the target's
 origin without embedded credentials. Review bodies remain external data, not trusted
 instructions. Analysis and remediation are outside this feature's scope.
@@ -389,14 +484,15 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 }
 ```
 
-| Option                   | Default          | Description                                                                                                                        |
-| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `reviewStatus`           | `true`           | Show the PR/MR status and monitor review feedback. Set to `false` to keep only session targets and titles.                  |
-| `hosts`                  | `["gitlab.com"]` | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                         |
-| `githubHosts`            | `["github.com"]` | GitHub hosts, including GitHub Enterprise hosts.                                                                                   |
-| `pollSeconds`            | `120`            | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                           |
-| `notifyAutomatedReviews` | `true`           | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                   |
-| `notifyHumanReviews`     | `true`           | Surface new human review feedback.                                                                                    |
+| Option                   | Default          | Description                                                                                                                  |
+| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `reviewStatus`           | `true`           | Show the PR/MR status and monitor review feedback. Set to `false` to keep only session targets and titles.                   |
+| `hosts`                  | `["gitlab.com"]` | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                   |
+| `githubHosts`            | `["github.com"]` | GitHub hosts, including GitHub Enterprise hosts.                                                                             |
+| `pollSeconds`            | `120`            | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                     |
+| `notifyAutomatedReviews` | `true`           | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                        |
+| `notifyHumanReviews`     | `true`           | Surface new human review feedback.                                                                                           |
+| `reviewFeedbackDelivery` | `"inbox"`        | What an update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns). |
 
 The server entry point reads every option, so changing one takes effect when the server
 plugin reloads. The CLI has no options of its own. Each checkout's server reads the
@@ -432,6 +528,9 @@ The server registers an [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) wit
 - `refresh({ key })` looks the key up now and returns `{ enabled, snapshot }`.
 - `feedback({})` returns `{ items, paused }` for this checkout's pending feedback.
 - `acknowledgeFeedback({ id })` dismisses a local update and returns the updated inbox.
+- `summarizeFeedback({ id })` starts a summary turn for an update in its session.
+- `monitoringStatus({ sessionID })` reports, without changing anything, whether the
+  session is monitored, and each target's fetch health and subscription state.
 - `pauseFeedback({ paused })` persists the checkout's review-monitoring pause state.
 - `feedbackChanged` fires with `{ directory }` when the inbox or pause state changes.
 - `targetChanged` fires after `set_session_target` runs, with the same fields as `target`
@@ -468,7 +567,8 @@ OpenCode scopes plugin storage by plugin ID, so nothing stored under the former 
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
 With default options, the footer and review monitoring start right away. All notifications
-stay in the feedback inbox without agent messages. The former `resumeSession` option has
+stay in the feedback inbox, and no session turn starts unless you set
+`reviewFeedbackDelivery` to `"summary"`. The former `resumeSession` option has
 been removed; saved values have no effect. Set `reviewStatus` to `false` to keep only titles.
 
 ## Code layout

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { GraphQL } from './adapter';
-import { fetchComments, MAX_COMMENT_PAGES, toComment } from './feedback';
+import { fetchComments, fetchDetails, MAX_COMMENT_PAGES, toComment } from './feedback';
 
 const node = (id: string, overrides: Record<string, unknown> = {}) => ({
   id: `gid://gitlab/DiscussionNote/${id}`,
@@ -167,5 +167,125 @@ describe('fetchComments', () => {
   test("marks a snapshot incomplete without the viewer's ID", async () => {
     const graphql: GraphQL = async () => page([node('1')], undefined, null);
     expect((await fetchComments(graphql, 'gitlab.com', 'g/p', '1'))?.complete).toBe(false);
+  });
+});
+
+describe('fetchDetails', () => {
+  const base = 'b'.repeat(40);
+  const head = 'a'.repeat(40);
+  const file = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n');
+  const note = (id: string, overrides: Record<string, unknown> = {}) => ({
+    id: `gid://gitlab/DiffNote/${id}`,
+    url: `https://gitlab.com/g/p/-/merge_requests/1#note_${id}`,
+    body: `Body ${id}`,
+    author: { username: 'GitLabDuo' },
+    position: null,
+    discussion: {
+      notes: { nodes: [{ id: `gid://gitlab/DiffNote/${id}`, body: 'x', author: null }] },
+    },
+    ...overrides,
+  });
+
+  function forge(notes: Record<string, unknown>, blobs: (query: string) => unknown) {
+    const queries: string[] = [];
+    const transport: GraphQL = async (_host, query) => {
+      queries.push(query);
+      if (query.includes('blobs(')) return blobs(query);
+      const ids = [...query.matchAll(/(n\d+): note\(id: "gid:\/\/gitlab\/Note\/(\d+)"\)/g)];
+      return Object.fromEntries(ids.map(([, alias, id]) => [alias, notes[id] ?? null]));
+    };
+    return { transport, queries };
+  }
+
+  test('reads notes in batches, with earlier thread replies and the code around their line', async () => {
+    const reply = { id: 'gid://gitlab/Note/1', body: 'Why?', author: { username: 'bob' } };
+    const notes: Record<string, unknown> = {
+      '2': note('2', {
+        position: {
+          diffRefs: { baseSha: base, headSha: head },
+          newPath: 'a.rb',
+          newLine: 15,
+          oldPath: 'a.rb',
+          oldLine: null,
+        },
+        discussion: {
+          notes: {
+            nodes: [
+              reply,
+              { id: 'gid://gitlab/DiffNote/2', body: 'x', author: null },
+              { id: 'gid://gitlab/Note/9', body: 'Later', author: { username: 'c' } },
+            ],
+          },
+        },
+      }),
+      // A removed line is read from the base commit.
+      '3': note('3', {
+        position: {
+          diffRefs: { baseSha: base, headSha: head },
+          newPath: 'b.rb',
+          newLine: null,
+          oldPath: 'old.rb',
+          oldLine: 2,
+        },
+      }),
+    };
+    for (let id = 10; id < 40; id++) notes[String(id)] = note(String(id));
+    // Commits are queried in the order the notes name them: head, then base.
+    const { transport, queries } = forge(notes, () => ({
+      b0: { repository: { blobs: { nodes: [{ path: 'a.rb', rawTextBlob: file }] } } },
+      b1: { repository: { blobs: { nodes: [{ path: 'old.rb', rawTextBlob: 'gone 1\ngone 2' }] } } },
+    }));
+    const ids = [
+      '2',
+      'gid://gitlab/Note/5"){ x }',
+      '3',
+      ...Object.keys(notes).filter((id) => Number(id) >= 10),
+    ];
+    const details = await fetchDetails(transport, 'gitlab.com', 'g/p', ids);
+    expect(queries.filter((query) => query.includes('note(id:'))).toHaveLength(2);
+    expect(queries.join('')).not.toContain('{ x }');
+    const blobQuery = queries.find((query) => query.includes('blobs('))!;
+    expect(blobQuery).toContain(`ref: "${head}"`);
+    expect(blobQuery).toContain('fullPath: "g/p"');
+    expect(details).toHaveLength(32);
+    expect(details[0]).toMatchObject({
+      id: '2',
+      path: 'a.rb',
+      line: 15,
+      replies: [{ username: 'bob', body: 'Why?' }],
+    });
+    expect(details[0].code?.text.split('\n')).toHaveLength(21);
+    expect(details[0].code?.text).toContain('>15: line 15');
+    expect(details[0].code?.text).toContain(' 5: line 5');
+    expect(details[1]).toMatchObject({
+      id: '3',
+      path: 'old.rb',
+      line: 2,
+      code: { path: 'old.rb', text: ' 1: gone 1\n>2: gone 2' },
+    });
+    expect(details[2]).not.toHaveProperty('code');
+    expect(details[2]).not.toHaveProperty('replies');
+  });
+
+  test('summarizes the comments without code when the files cannot be read', async () => {
+    const { transport } = forge(
+      {
+        '2': note('2', {
+          position: {
+            diffRefs: { baseSha: base, headSha: head },
+            newPath: 'a.rb',
+            newLine: 1,
+            oldPath: null,
+            oldLine: null,
+          },
+        }),
+      },
+      () => {
+        throw new Error('too large');
+      },
+    );
+    const [detail] = await fetchDetails(transport, 'gitlab.com', 'g/p', ['2']);
+    expect(detail).toMatchObject({ id: '2', body: 'Body 2', line: 1 });
+    expect(detail).not.toHaveProperty('code');
   });
 });

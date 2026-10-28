@@ -189,6 +189,27 @@ export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
   ): Promise<void>;
   // Undefined when the request doesn't exist.
   fetch(run: Exec, directory: string, request: Request): Promise<FeedbackSnapshot | undefined>;
+  // The text of the comments with these IDs, for summarizing feedback. Leaves
+  // out comments it can't read. The text is written by reviewers, so callers
+  // treat it as untrusted.
+  details?(run: Exec, directory: string, request: Request, ids: string[]): Promise<CommentDetail[]>;
+  // The comment ID a comment link names, for updates stored before they kept
+  // their comment IDs. Undefined when the link doesn't name one.
+  commentID?(url: string): string | undefined;
+}
+
+export interface CommentDetail {
+  id: string;
+  url: string;
+  username: string;
+  body: string;
+  path?: string;
+  line?: number;
+  // The code the comment is on: numbered file lines around it, or the diff
+  // hunk that ends at it. Written by the PR/MR's author, so also untrusted.
+  code?: { path: string; text: string };
+  // Earlier comments in the same thread, oldest first.
+  replies?: Array<{ username: string; body: string }>;
 }
 
 export interface FeedbackEvents {

@@ -94,6 +94,31 @@ function harness({
 }
 
 describe('createStatusService', () => {
+  test('inspection does not create store entries, leases, timers, or lookups', async () => {
+    const app = harness({ human: true });
+    expect(app.service.inspect('unknown')).toEqual({
+      discovered: false,
+      leased: false,
+      polling: false,
+      paused: false,
+      feedbackTargets: [],
+    });
+    expect(app.service.keys()).toEqual([]);
+    expect(app.loads).toEqual([]);
+    app.lookups.set('one', targets(mr()));
+    app.service.discover(['one']);
+    await app.advance(0);
+    expect(app.service.inspect('one')).toMatchObject({
+      discovered: true,
+      leased: false,
+      polling: true,
+    });
+    app.service.watch('cli', ['one']);
+    expect(app.service.inspect('one').leased).toBe(true);
+    await app.advance(301);
+    expect(app.service.inspect('one').leased).toBe(false);
+    await app.service.dispose();
+  });
   test('routes feedback events to active sessions and drops subscriptions on pause or expiry', async () => {
     const app = harness({ human: true });
     app.lookups.set('one', targets(mr()));
@@ -131,6 +156,30 @@ describe('createStatusService', () => {
     expect(app.service.polling('closed')).toBe(false);
     expect(app.checked).toEqual(['one 1']);
     app.service.discover([]);
+    expect(app.service.polling('one')).toBe(false);
+    await app.service.dispose();
+  });
+
+  test('keeps retrying a discovered session whose explicit targets could not be resolved', async () => {
+    const app = harness({ human: true });
+    app.lookups.set('one', { kind: 'none', reason: 'Not found', explicitTarget: true });
+    app.service.discover(['one']);
+    await app.advance(0);
+    expect(app.service.polling('one')).toBe(true);
+    // Backs off like a failure: 200, then 400 ms.
+    await app.advance(199);
+    expect(app.loads).toEqual(['one']);
+    await app.advance(1);
+    expect(app.loads).toEqual(['one', 'one']);
+    app.lookups.set('one', targets(mr()));
+    await app.advance(400);
+    expect(app.loads).toHaveLength(3);
+    expect(app.checked).toEqual(['one 1']);
+    expect(app.service.polling('one')).toBe(true);
+    // A lookup that names nothing explicit, such as an archived session, stops.
+    app.lookups.set('one', { kind: 'none', reason: 'The session is archived' });
+    await app.service.refresh('one');
+    await app.advance(0);
     expect(app.service.polling('one')).toBe(false);
     await app.service.dispose();
   });

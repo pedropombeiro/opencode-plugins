@@ -97,13 +97,20 @@ export async function setupServer(
   const revision = (sessionID: string) => revisions.get(sessionID) ?? 0;
   const bump = (sessionID: string) => revisions.set(sessionID, revision(sessionID) + 1);
 
-  async function stateFor(sessionID: string): Promise<SessionState> {
-    const started = revision(sessionID);
+  const readState = async (sessionID: string) => {
     const stored =
       ((await ctx.storage.get(`sessions/${sessionID}`)) as StoredState | undefined) ?? {};
-    const targets = Array.isArray(stored.targets) ? stored.targets : [];
-    if (revision(sessionID) === started) known.set(sessionID, targets);
-    return { targets, ...(stored.prefix ? { prefix: stored.prefix } : {}) };
+    return {
+      targets: Array.isArray(stored.targets) ? stored.targets : [],
+      ...(stored.prefix ? { prefix: stored.prefix } : {}),
+    };
+  };
+
+  async function stateFor(sessionID: string): Promise<SessionState> {
+    const started = revision(sessionID);
+    const state = await readState(sessionID);
+    if (revision(sessionID) === started) known.set(sessionID, state.targets);
+    return state;
   }
 
   // Bumps the revision before and after the write, so neither a read that
@@ -126,6 +133,22 @@ export async function setupServer(
   const rpc = await ctx.rpc.register(
     ForgeSessionRpc,
     implement({
+      monitoringStatus: async ({ sessionID }) =>
+        watcher
+          ? json(await watcher.monitoringStatus(sessionID))
+          : {
+              enabled: false,
+              directory: ctx.location.directory,
+              sessionID,
+              discovered: false,
+              leased: false,
+              polling: false,
+              paused: false,
+              humanFeedback: false,
+              automatedFeedback: false,
+              status: { loading: false },
+              targets: [],
+            },
       target: async ({ sessionID }) => targetOutput((await stateFor(sessionID)).targets),
       watch: async ({ clientID, keys, visible }) =>
         watcher
@@ -140,6 +163,10 @@ export async function setupServer(
       feedback: async () => (watcher ? watcher.inbox.list() : { items: [], paused: false }),
       acknowledgeFeedback: async ({ id }) =>
         watcher ? watcher.inbox.acknowledge(id) : { items: [], paused: false },
+      summarizeFeedback: async ({ id }) => {
+        if (!watcher) throw new Error('PR/MR status is disabled');
+        return watcher.summarize(id);
+      },
       pauseFeedback: async ({ paused }) => {
         if (!watcher) return { items: [], paused: false };
         const state = await watcher.inbox.pause(paused);
@@ -154,6 +181,7 @@ export async function setupServer(
   if (status && settings.enabled) {
     watcher = await setupStatus(ctx, settings, status, {
       state: stateFor,
+      storedTargets: async (sessionID) => (await readState(sessionID)).targets,
       isTarget: (sessionID, url) => includesRequest(known.get(sessionID) ?? [], url),
       publish: (key: string, snapshot: Snapshot) =>
         void rpc.events
@@ -306,8 +334,11 @@ export async function setupServer(
     return next;
   }
 
-  // A failure here must not block the model request, so it only skips the guidance.
+  // A summary turn's request is replaced before anything else runs, and its
+  // failures propagate, so the request never runs with the session's tools.
+  // A failure in the guidance must not block the request, so it's skipped.
   await ctx.session.hook('context', async (event) => {
+    if (await watcher?.prepareSummary(event)) return;
     try {
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (session.parentID || session.location.directory !== ctx.location.directory) return;
@@ -318,6 +349,21 @@ export async function setupServer(
       // The request goes ahead without the guidance.
     }
   });
+
+  // Backstops for a summary turn whose request still reached tools, such as
+  // after a hook ordering change. Each refuses the action outright.
+  if (watcher) {
+    const summaries = watcher;
+    await ctx.tool.hook('execute.before', async (event) => {
+      if (await summaries.summarizing(event.sessionID))
+        throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
+    });
+    await ctx.permission.hook('evaluate', async (event) => {
+      if (!(await summaries.summarizing(event.sessionID))) return;
+      event.effect = 'deny';
+      event.message = 'Forgekeeper review summaries run without tools.';
+    });
+  }
 
   void (async () => {
     for await (const event of ctx.event.subscribe({

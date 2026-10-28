@@ -8,7 +8,14 @@ describe('statusOptions', () => {
       pollSeconds: 120,
       notifyAutomatedReviews: true,
       notifyHumanReviews: true,
+      feedbackDelivery: 'inbox',
     });
+  });
+
+  test('reads the feedback delivery mode and falls back to the inbox for unknown values', () => {
+    expect(statusOptions({ reviewFeedbackDelivery: 'summary' }).feedbackDelivery).toBe('summary');
+    expect(statusOptions({ reviewFeedbackDelivery: 'passive' }).feedbackDelivery).toBe('passive');
+    expect(statusOptions({ reviewFeedbackDelivery: 'resume' }).feedbackDelivery).toBe('inbox');
   });
 
   test('reads explicit settings', () => {
@@ -24,6 +31,7 @@ describe('statusOptions', () => {
       pollSeconds: 45,
       notifyAutomatedReviews: false,
       notifyHumanReviews: false,
+      feedbackDelivery: 'inbox',
     });
   });
 

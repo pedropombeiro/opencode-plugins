@@ -6,7 +6,15 @@ export interface StatusOptions {
   pollSeconds: number;
   notifyAutomatedReviews: boolean;
   notifyHumanReviews: boolean;
+  feedbackDelivery: FeedbackDelivery;
 }
+
+// What a feedback update does besides entering the inbox. `passive` queues a
+// session message that starts no turn. `summary` starts a tool-free turn that
+// summarizes the feedback.
+export type FeedbackDelivery = 'inbox' | 'passive' | 'summary';
+
+const DELIVERIES = new Set<unknown>(['inbox', 'passive', 'summary']);
 
 export function statusOptions(options: unknown): StatusOptions {
   const source = options && typeof options === 'object' ? (options as Record<string, unknown>) : {};
@@ -17,5 +25,8 @@ export function statusOptions(options: unknown): StatusOptions {
     // `notifyDuoReview` is the option's former name.
     notifyAutomatedReviews: (source.notifyAutomatedReviews ?? source.notifyDuoReview) !== false,
     notifyHumanReviews: source.notifyHumanReviews !== false,
+    feedbackDelivery: DELIVERIES.has(source.reviewFeedbackDelivery)
+      ? (source.reviewFeedbackDelivery as FeedbackDelivery)
+      : 'inbox',
   };
 }

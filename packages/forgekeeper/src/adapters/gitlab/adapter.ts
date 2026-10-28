@@ -13,7 +13,7 @@ import {
   type ReviewRef,
 } from '../../forge';
 import type { RemoteProject, Repository } from '../../git';
-import { fetchComments } from './feedback';
+import { fetchComments, fetchDetails } from './feedback';
 import { duoFindings, duoReady } from './review-feedback';
 import { subscribeToNotes } from './subscription';
 import { query, typed, type Query, type Transport, type Typed } from '../../graphql';
@@ -240,6 +240,11 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
         ? fetchComments(glabGraphQL(run, directory), ref.host, ref.project, ref.iid)
         : undefined;
     },
+    async details(run, directory, request, ids) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      return ref ? fetchDetails(glabGraphQL(run, directory), ref.host, ref.project, ids) : [];
+    },
+    commentID: (url) => url.match(/#note_(\d+)$/)?.[1],
   },
 };
 

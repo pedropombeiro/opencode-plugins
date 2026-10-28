@@ -1,7 +1,8 @@
 // Reads a GitLab MR's comments for GitLab's `feedback` capability.
-import type { FeedbackSnapshot, ReviewComment } from '../../forge';
+import type { CommentDetail, FeedbackSnapshot, ReviewComment } from '../../forge';
 import type { GraphQL } from './adapter';
-import { query, typed, type Query } from '../../graphql';
+import { query, typed, type Query, type Typed } from '../../graphql';
+import { excerpt, MAX_EXCERPT_FILES } from '../../review-summary';
 
 interface NoteNode {
   id: string;
@@ -145,4 +146,138 @@ export async function fetchComments(
   }
   // A full window is complete: anything older is outside what the plugin watches.
   return snapshot(true);
+}
+
+interface DetailNode {
+  id: string;
+  url: string | null;
+  body: string;
+  position?: {
+    diffRefs?: { baseSha: string; headSha: string } | null;
+    newPath: string | null;
+    newLine: number | null;
+    oldPath: string | null;
+    oldLine: number | null;
+  } | null;
+  author: { username: string } | null;
+  discussion?: {
+    notes?: {
+      nodes: Array<{ id: string; body: string; author: { username: string } | null }>;
+    } | null;
+  } | null;
+}
+
+type BlobData = Record<
+  string,
+  {
+    repository?: {
+      blobs?: { nodes: Array<{ path: string; rawTextBlob: string | null }> } | null;
+    } | null;
+  } | null
+>;
+
+const DETAIL_BATCH = 25;
+// A thread's notes read for earlier replies. Longer threads show their first ones.
+const THREAD_NOTES = 20;
+const SHA = /^[0-9a-f]{40}$/;
+
+// The file and commit that a diff note's line is in. A note on a removed line
+// has only an old line, which is in the base commit.
+function codeAt(position: DetailNode['position']) {
+  const refs = position?.diffRefs;
+  if (!refs) return undefined;
+  if (position.newLine && position.newPath)
+    return { sha: refs.headSha, path: position.newPath, line: position.newLine };
+  if (position.oldLine && position.oldPath)
+    return { sha: refs.baseSha, path: position.oldPath, line: position.oldLine };
+  return undefined;
+}
+
+// Reads the notes with these numeric IDs, with their thread's earlier replies
+// and the code around diff notes. A note's global ID changes with its type,
+// but `Note` resolves every type.
+export async function fetchDetails(
+  transport: GraphQL,
+  host: string,
+  project: string,
+  ids: string[],
+): Promise<CommentDetail[]> {
+  const graphql = typed(transport);
+  const nodes: DetailNode[] = [];
+  const numeric = ids.filter((id) => /^\d+$/.test(id));
+  for (let start = 0; start < numeric.length; start += DETAIL_BATCH) {
+    const fields = numeric
+      .slice(start, start + DETAIL_BATCH)
+      .map(
+        (id, index) =>
+          `n${index}: note(id: "gid://gitlab/Note/${id}") { id url body author { username }
+            position { diffRefs { baseSha headSha } newPath newLine oldPath oldLine }
+            discussion { notes(first: ${THREAD_NOTES}) { nodes { id body author { username } } } } }`,
+      )
+      .join('\n');
+    const data = await graphql(
+      host,
+      query<Record<string, DetailNode | null>>(`query { ${fields} }`),
+      {},
+    );
+    for (const node of Object.values(data)) if (node?.author && node.url) nodes.push(node);
+  }
+  // Code is optional context, so the comments are summarized without it if
+  // the files can't be read.
+  const files = await readFiles(graphql, host, project, nodes).catch(
+    () => new Map<string, string>(),
+  );
+  return nodes.map((node) => {
+    const at = codeAt(node.position);
+    const content = at && files.get(JSON.stringify([at.sha, at.path]));
+    const text = content !== undefined && at ? excerpt(content, at.line) : undefined;
+    const thread = node.discussion?.notes?.nodes ?? [];
+    const position = thread.findIndex((note) => noteNumber(note.id) === noteNumber(node.id));
+    const replies = (position > 0 ? thread.slice(0, position) : []).flatMap((note) =>
+      note.author ? [{ username: note.author.username, body: note.body }] : [],
+    );
+    return {
+      id: noteNumber(node.id),
+      url: node.url ?? '',
+      username: node.author?.username ?? '',
+      body: node.body,
+      ...(at ? { path: at.path, line: at.line } : {}),
+      ...(text && at ? { code: { path: at.path, text } } : {}),
+      ...(replies.length ? { replies } : {}),
+    };
+  });
+}
+
+// Reads each commented file once per commit, for at most a few files.
+async function readFiles(
+  graphql: Typed<Record<string, string>>,
+  host: string,
+  project: string,
+  nodes: DetailNode[],
+): Promise<Map<string, string>> {
+  const wanted = new Map<string, Set<string>>();
+  let count = 0;
+  for (const node of nodes) {
+    const at = codeAt(node.position);
+    if (!at || !SHA.test(at.sha)) continue;
+    const paths = wanted.get(at.sha) ?? new Set<string>();
+    if (!paths.has(at.path) && count >= MAX_EXCERPT_FILES) continue;
+    if (!paths.has(at.path)) count++;
+    wanted.set(at.sha, paths.add(at.path));
+  }
+  const files = new Map<string, string>();
+  if (!wanted.size) return files;
+  const shas = [...wanted.keys()];
+  const fields = shas
+    .map(
+      (sha, index) =>
+        `b${index}: project(fullPath: ${JSON.stringify(project)}) { repository { blobs(paths: ${JSON.stringify([...wanted.get(sha)!])}, ref: ${JSON.stringify(sha)}) { nodes { path rawTextBlob } } } }`,
+    )
+    .join('\n');
+  const data = await graphql(host, query<BlobData>(`query { ${fields} }`), {});
+  shas.forEach((sha, index) => {
+    for (const blob of data[`b${index}`]?.repository?.blobs?.nodes ?? [])
+      if (blob.rawTextBlob !== null) files.set(JSON.stringify([sha, blob.path]), blob.rawTextBlob);
+  });
+  return files;
 }

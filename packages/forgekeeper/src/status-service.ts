@@ -6,7 +6,7 @@ import {
 import type { ReviewRequest } from './forge';
 import { traitsOf } from './forges';
 import { HOME, LEASE_TIME } from './rpc';
-import { createStatusStore, type Lookup, type Snapshot } from './store';
+import { createStatusStore, unresolved, type Lookup, type Snapshot } from './store';
 
 // A status key is a session ID, or HOME for the checkout outside a session.
 // Keys don't depend on the title or the targets, so a hidden session keeps
@@ -132,6 +132,7 @@ export function createStatusService(options: StatusServiceOptions) {
       (discovered.has(key) &&
         owns(key) &&
         (unknown(key) ||
+          unresolved(store.get(key).lookup) ||
           targets(key, store.get(key).lookup).some((request) => request.state === 'opened'))) ||
       (live.length > 0 && (live.some((lease) => lease.visible) || unknown(key) || needsWatch(key)));
     const release = holds.get(key);
@@ -224,6 +225,18 @@ export function createStatusService(options: StatusServiceOptions) {
       for (const key of forget(clientID)) sync(key);
     },
     get: (key: string) => store.get(key),
+    inspect(key: string) {
+      return {
+        discovered: discovered.has(key),
+        leased: liveLeases(key).length > 0,
+        polling: holds.has(key),
+        paused: feedbackPaused,
+        feedbackTargets:
+          holds.has(key) && !feedbackPaused
+            ? watchedForFeedback(key, store.get(key).lookup).map((request) => request.url)
+            : [],
+      };
+    },
     refresh: (key: string) => store.refresh(key),
     checkFeedback(url: string, invalidate: (sessionID: string, request: ReviewRequest) => void) {
       if (disposed || feedbackPaused) return;

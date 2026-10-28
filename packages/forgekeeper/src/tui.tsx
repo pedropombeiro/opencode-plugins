@@ -22,7 +22,7 @@ import { automatedReview } from './automated-review-watch';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
 import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
-import { feedbackLinks, type InboxState } from './feedback-inbox';
+import { feedbackTime, linkOptions, type InboxState } from './feedback-inbox';
 import type { Repository } from './git';
 import type { Lookup } from './store';
 
@@ -511,7 +511,7 @@ export default {
         title: `Review feedback${state.paused ? ' (monitoring paused)' : ''}`,
         options: state.items.map((item) => ({
           title: item.title,
-          description: `${context.data.session.get(item.sessionID)?.title ?? item.sessionID} · ${new Date(item.at).toLocaleString()}`,
+          description: `${context.data.session.get(item.sessionID)?.title ?? item.sessionID} · ${feedbackTime(item)}`,
           value: item.id,
         })),
         actions: [
@@ -522,6 +522,25 @@ export default {
               await rpc.acknowledgeFeedback({ id }, { location: { directory } });
               context.ui.dialog.clear();
               void showFeedback();
+            },
+          },
+          {
+            bind: 'ctrl+r',
+            title: 'Summarize in session',
+            onTrigger: async (id) => {
+              context.ui.dialog.clear();
+              try {
+                await rpc.summarizeFeedback({ id }, { location: { directory } });
+                context.ui.toast.show({
+                  message: 'Summarizing the review feedback in its session, without tools.',
+                  variant: 'info',
+                });
+              } catch (error) {
+                context.ui.toast.show({
+                  message: `Could not summarize: ${error instanceof Error ? error.message : String(error)}`,
+                  variant: 'error',
+                });
+              }
             },
           },
           {
@@ -540,7 +559,7 @@ export default {
       if (!item) return;
       const link = await context.ui.dialog.select({
         title: item.title,
-        options: feedbackLinks(item).map((url) => ({ title: url, value: url })),
+        options: linkOptions(item),
       });
       if (link) openUrl(link);
     }
