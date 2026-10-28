@@ -5,6 +5,13 @@ import { SubscriptionRateLimit } from './subscription-retry';
 
 export const RECONCILE_INTERVAL = 15 * 60_000;
 
+export interface SubscriptionStatus {
+  state: 'inactive' | 'polling-only' | 'connecting' | 'connected' | 'waiting';
+  retryAt?: number;
+  cooldownUntil?: number;
+  error?: { message: string; at: number };
+}
+
 export function createFeedbackSubscriptions(options: {
   exec: Exec;
   directory: string;
@@ -24,6 +31,8 @@ export function createFeedbackSubscriptions(options: {
       connected: boolean;
       timer?: unknown;
       failures: number;
+      retryAt?: number;
+      error?: { message: string; at: number };
     }
   >();
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
@@ -50,15 +59,20 @@ export function createFeedbackSubscriptions(options: {
         connected: false,
         failures: 0,
         timer: undefined as unknown,
+        retryAt: undefined as number | undefined,
+        error: undefined as SubscriptionStatus['error'],
       };
       entries.set(url, entry);
       const live = () => !stopped && entries.get(url) === entry;
       const host = new URL(url).origin;
       const schedule = (delay: number) => {
+        entry.retryAt = now() + delay;
         entry.timer = setTimer(() => void connect(), Math.min(delay, 2_147_483_647));
       };
       const connect = async () => {
         if (!live()) return;
+        entry.timer = undefined;
+        entry.retryAt = undefined;
         const remaining = (cooldowns.get(host) ?? 0) - now();
         if (remaining > 0) {
           schedule(remaining);
@@ -74,6 +88,7 @@ export function createFeedbackSubscriptions(options: {
               connected: () => {
                 if (!live()) return;
                 entry.connected = true;
+                entry.error = undefined;
                 options.changed(url);
               },
               changed: () => {
@@ -83,6 +98,11 @@ export function createFeedbackSubscriptions(options: {
             entry.abort.signal,
           );
         } catch (error) {
+          if (live())
+            entry.error = {
+              message: error instanceof Error ? error.message : String(error),
+              at: now(),
+            };
           if (live() && error instanceof SubscriptionRateLimit && Number.isFinite(error.retryAt))
             cooldowns.set(host, Math.max(cooldowns.get(host) ?? 0, error.retryAt));
           entry.connected = false;
@@ -106,6 +126,23 @@ export function createFeedbackSubscriptions(options: {
       reconcile();
     },
     connected: (url: string) => entries.get(url)?.connected === true,
+    inspect(sessionID: string, url: string): SubscriptionStatus {
+      const request = sessions.get(sessionID)?.find((request) => request.url === url);
+      if (!request) return { state: 'inactive' };
+      const entry = entries.get(url);
+      if (!entry) return { state: 'polling-only' };
+      const cooldownUntil = cooldowns.get(new URL(url).origin);
+      return structuredClone({
+        state: entry.connected
+          ? 'connected'
+          : entry.retryAt !== undefined
+            ? 'waiting'
+            : 'connecting',
+        ...(entry.retryAt !== undefined ? { retryAt: entry.retryAt } : {}),
+        ...(cooldownUntil !== undefined && cooldownUntil > now() ? { cooldownUntil } : {}),
+        ...(entry.error ? { error: entry.error } : {}),
+      });
+    },
     dispose() {
       stopped = true;
       sessions.clear();

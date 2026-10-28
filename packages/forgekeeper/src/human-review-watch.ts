@@ -154,6 +154,9 @@ export interface FeedbackWatcherOptions {
   interval?: (request: ReviewRequest) => number;
   select?: (snapshot: FeedbackSnapshot, request: ReviewRequest) => FeedbackSnapshot;
   ready?: (snapshot: FeedbackSnapshot, now: number, request: ReviewRequest) => boolean;
+  // Receives each complete fetch that no later change made obsolete, before
+  // `select` narrows it.
+  accepted?: (request: ReviewRequest, snapshot: FeedbackSnapshot) => void;
 }
 
 export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
@@ -262,6 +265,7 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
           return;
         }
         if (dirty.has(key) || !options.current(sessionID, request)) return;
+        if (fetched) options.accepted?.(request, fetched);
         snapshots.set(key, snapshot);
         await observe(sessionID, request, snapshot);
       } catch (error) {

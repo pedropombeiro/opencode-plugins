@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   fetchComments,
+  fetchDetails,
   MAX_COMMENT_PAGES,
   toInlineComment,
   toIssueComment,
@@ -543,5 +544,58 @@ describe('GitHub comments through the human review watcher', () => {
     clock += RETRY_DELAY;
     await watcher.check('ses_1', request);
     expect(sent).toEqual([['IC_new']]);
+  });
+});
+
+describe('fetchDetails', () => {
+  test('reads comments by node ID and drops IDs that could change the query', async () => {
+    const queries: string[] = [];
+    const transport: GraphQL = async (_host, query) => {
+      queries.push(query);
+      return {
+        nodes: [
+          {
+            __typename: 'PullRequestReviewComment',
+            id: 'PRRC_1',
+            url: 'https://github.com/o/r/pull/1#discussion_r1',
+            body: 'Inline',
+            path: 'src/a.ts',
+            line: null,
+            originalLine: 9,
+            diffHunk: [
+              '@@ -1,30 +1,30 @@',
+              ...Array.from({ length: 30 }, (_, i) => ` line ${i}`),
+            ].join('\n'),
+            replyTo: { body: 'Parent', author: { login: 'bob' } },
+            author: { login: 'copilot-pull-request-reviewer[bot]' },
+          },
+          { __typename: 'IssueComment', id: 'IC_2', url: null, body: 'x', author: { login: 'a' } },
+          null,
+        ],
+      };
+    };
+    const details = await fetchDetails(transport, 'github.com', [
+      'PRRC_1',
+      'IC_2',
+      'x"]) { evil }',
+    ]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('["PRRC_1","IC_2"]');
+    expect(queries[0]).not.toContain('evil');
+    expect(details).toHaveLength(1);
+    expect(details[0]).toMatchObject({
+      id: 'PRRC_1',
+      url: 'https://github.com/o/r/pull/1#discussion_r1',
+      username: 'copilot-pull-request-reviewer[bot]',
+      body: 'Inline',
+      path: 'src/a.ts',
+      line: 9,
+      replies: [{ username: 'bob', body: 'Parent' }],
+    });
+    // The hunk ends at the commented line, so its last 21 lines are kept.
+    const hunk = details[0].code!.text.split('\n');
+    expect(hunk).toHaveLength(21);
+    expect(hunk.at(-1)).toBe(' line 29');
+    expect(details[0].code?.path).toBe('src/a.ts');
   });
 });

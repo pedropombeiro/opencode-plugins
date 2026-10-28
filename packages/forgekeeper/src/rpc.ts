@@ -12,6 +12,7 @@
 import type { FromSchema, JSONSchema } from 'json-schema-to-ts';
 import type { Snapshot } from './store';
 import type { InboxState } from './feedback-inbox';
+import type { MonitoringStatus } from './monitoring-status';
 
 const urls = {
   url: { type: 'string' },
@@ -48,11 +49,30 @@ const status = {
 export const ForgeSessionRpc = {
   id: 'opencode-forgekeeper',
   methods: {
+    monitoringStatus: {
+      input: {
+        type: 'object',
+        properties: { sessionID: { type: 'string' } },
+        required: ['sessionID'],
+        additionalProperties: false,
+      },
+      output: { type: 'object', title: 'MonitoringStatus' },
+    },
     feedback: {
       input: { type: 'object', additionalProperties: false },
       output: inboxState,
     },
     acknowledgeFeedback: {
+      input: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: inboxState,
+    },
+    // Starts a tool-free summary turn for an update in its session.
+    summarizeFeedback: {
       input: {
         type: 'object',
         properties: { id: { type: 'string' } },
@@ -185,6 +205,7 @@ type Typed<S extends JSONSchema> = FromSchema<
     deserialize: [
       { pattern: { type: 'object'; title: 'Snapshot' }; output: Snapshot },
       { pattern: { type: 'object'; title: 'InboxState' }; output: InboxState },
+      { pattern: { type: 'object'; title: 'MonitoringStatus' }; output: MonitoringStatus },
     ];
   }
 >;
@@ -204,9 +225,13 @@ export type Handlers = { [M in MethodName]: (input: Input<M>) => Promise<Output<
 // OpenCode checks each call against the schemas before it reaches a handler,
 // and types the input as `unknown`. This is the one place that narrows it.
 export const implement = (handlers: Handlers) => ({
+  monitoringStatus: (input: unknown) =>
+    handlers.monitoringStatus(input as Input<'monitoringStatus'>),
   feedback: () => handlers.feedback({}),
   acknowledgeFeedback: (input: unknown) =>
     handlers.acknowledgeFeedback(input as Input<'acknowledgeFeedback'>),
+  summarizeFeedback: (input: unknown) =>
+    handlers.summarizeFeedback(input as Input<'summarizeFeedback'>),
   pauseFeedback: (input: unknown) => handlers.pauseFeedback(input as Input<'pauseFeedback'>),
   target: (input: unknown) => handlers.target(input as Input<'target'>),
   watch: (input: unknown) => handlers.watch(input as Input<'watch'>),

@@ -34,6 +34,11 @@ describe('feedback subscriptions', () => {
     await flush();
     expect([...timers.values()]).toEqual([3_600_000]);
     expect(manager.connected(mr.url)).toBe(false);
+    expect(manager.inspect('one', mr.url)).toMatchObject({
+      state: 'waiting',
+      retryAt: 3_600_000,
+      cooldownUntil: 3_600_000,
+    });
     manager.update('two', [{ ...mr, url: `${mr.url}2` }]);
     expect(calls).toEqual([mr.url]);
     manager.update('one', []);
@@ -88,9 +93,12 @@ describe('feedback subscriptions', () => {
     manager.update('two', [mr]);
     expect(connections).toHaveLength(1);
     expect(manager.connected(mr.url)).toBe(false);
+    expect(manager.inspect('one', mr.url)).toEqual({ state: 'connecting' });
+    expect(manager.inspect('unknown', mr.url)).toEqual({ state: 'inactive' });
     connections[0].events.connected();
     connections[0].events.changed();
     expect(manager.connected(mr.url)).toBe(true);
+    expect(manager.inspect('one', mr.url)).toEqual({ state: 'connected' });
     expect(changes).toEqual([mr.url, mr.url]);
     manager.update('one', []);
     expect(connections[0].signal.aborted).toBe(false);
@@ -141,9 +149,16 @@ describe('feedback subscriptions', () => {
       { ...mr, forge: 'github', url: 'https://github.com/g/p/pull/1' } as ReviewRequest,
     ]);
     expect(calls).toBe(0);
+    expect(manager.inspect('github', 'https://github.com/g/p/pull/1')).toEqual({
+      state: 'polling-only',
+    });
     manager.update('gitlab', [mr]);
     await flush();
     expect(manager.connected(mr.url)).toBe(false);
+    expect(manager.inspect('gitlab', mr.url)).toMatchObject({
+      state: 'waiting',
+      error: { message: 'Rejected' },
+    });
     const retry = [...timers.keys()][0];
     timers.delete(retry);
     retry();
