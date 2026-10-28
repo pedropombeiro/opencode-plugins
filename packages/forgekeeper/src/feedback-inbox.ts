@@ -120,58 +120,65 @@ export function createFeedbackInbox(options: {
       options.changed();
       return state;
     });
+  // Deliveries run outside the queue, because they can take a while, such as
+  // reading comments for a summary, and listing, pausing, or acknowledging
+  // updates mustn't wait for them. Each update is delivered once at a time:
+  // a retry that finds it in flight waits for that delivery instead.
+  const delivering = new Map<string, Promise<void>>();
+  const deliver = (id: string): Promise<void> => {
+    const running = delivering.get(id);
+    if (running) return running;
+    const task = (async () => {
+      // The update as it is now: still pending, undelivered, and not paused.
+      const state = await run(read);
+      const item = state.items.find((entry) => entry.id === id);
+      if (!options.notify || state.paused || !item) return;
+      if (item.notifiedAt !== undefined || !item.delivery) return;
+      if (options.enabled && !options.enabled(item)) return;
+      await options.notify(item);
+      await change((current) => ({
+        ...current,
+        items: current.items.map((entry) =>
+          entry.id === id ? { ...entry, notifiedAt: (options.now ?? Date.now)() } : entry,
+        ),
+      }));
+    })().finally(() => delivering.delete(id));
+    delivering.set(id, task);
+    return task;
+  };
   // Each update is delivered on its own, so one that keeps failing doesn't
   // hold back the others. Rejects with the first failure, after trying all.
-  const notify = async (state: InboxState, items: FeedbackItem[]) => {
-    if (!options.notify || state.paused) return state;
+  const notify = async (items: readonly FeedbackItem[]) => {
     let failure: { error: unknown } | undefined;
     for (const item of items) {
       if (item.notifiedAt !== undefined || !item.delivery) continue;
-      if (options.enabled && !options.enabled(item)) continue;
-      try {
-        await options.notify(item);
-      } catch (error) {
-        failure ??= { error };
-        continue;
-      }
-      state = {
-        ...state,
-        items: state.items.map((entry) =>
-          entry.id === item.id ? { ...entry, notifiedAt: (options.now ?? Date.now)() } : entry,
-        ),
-      };
-      await options.write(state);
+      await deliver(item.id).catch((error) => (failure ??= { error }));
     }
     if (failure) throw failure.error;
-    return state;
+    return run(read);
   };
   return {
     list: () => run(read),
     // Adds an update, unless one with its ID exists. `supersedes` names the
     // updates it replaces, such as an earlier one about the same pipeline.
-    add: (item: FeedbackItem, supersedes: (entry: FeedbackItem) => boolean = () => false) =>
-      run(async () => {
-        const previous = await read();
-        if (previous.paused) throw new Error('Feedback monitoring is paused');
+    add: async (item: FeedbackItem, supersedes: (entry: FeedbackItem) => boolean = () => false) => {
+      let added = item;
+      await change((previous) => {
         const existing = previous.items.find((entry) => entry.id === item.id);
-        const state = {
+        added = existing ?? item;
+        return {
           ...previous,
           items: [
-            existing ?? item,
+            added,
             ...previous.items.filter(
               (entry) => entry.id !== item.id && (existing !== undefined || !supersedes(entry)),
             ),
           ].slice(0, 500),
         };
-        await options.write(state);
-        options.changed();
-        return notify(state, [existing ?? item]);
-      }),
-    notifyPending: () =>
-      run(async () => {
-        const state = await read();
-        return notify(state, state.items);
-      }),
+      }, true);
+      return notify([added]);
+    },
+    notifyPending: async () => notify((await run(read)).items),
     acknowledge: (id: string) =>
       change((state) => ({ ...state, items: state.items.filter((item) => item.id !== id) })),
     // Removes the updates that no longer need attention, such as ones whose

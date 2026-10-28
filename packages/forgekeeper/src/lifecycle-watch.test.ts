@@ -4,6 +4,7 @@ import {
   createLifecycleWatcher,
   observe,
   unchanged,
+  MAX_SEEN_FAILURES,
   UNLISTED_FAILURE,
   type LifecycleEvent,
   type LifecycleRecord,
@@ -137,6 +138,39 @@ describe('observe', () => {
       failure('p1', 'rspec#2'),
       failure('p2', 'rspec'),
     ]);
+  });
+
+  test('announces a job attempt once, even when it leaves the listed jobs and comes back', () => {
+    // Each lookup's events are delivered, as the watcher does, so an event
+    // ID that repeats counts again.
+    let records = new Map<string, LifecycleRecord>();
+    const announced: string[] = [];
+    for (const [at, failed] of [[], ['a'], ['b'], ['a']].entries()) {
+      const [record] = observe(
+        'one',
+        [mr('1', pipeline('p1', failed, 'RUNNING', at === 0))],
+        records,
+        reference,
+        at,
+      );
+      announced.push(...record.pending.map((event) => event.id));
+      records = new Map([[record.url, { ...record, pending: [] }]]);
+    }
+    // Newer failures push `a` past the jobs the forge reads, then retries of
+    // those let it back in.
+    expect(announced).toEqual([failure('p1', 'a'), failure('p1', 'b')]);
+    expect(records.get(mr('1').url)?.ci?.seen).toEqual(['job-a', 'job-b']);
+    // Another pipeline starts afresh.
+    const next = run([mr('1', pipeline('p1', ['a']))], [mr('1', pipeline('p2', ['a']))]);
+    expect(next.get(mr('1').url)?.ci?.seen).toEqual(['job-a']);
+  });
+
+  test('keeps only the newest failed job attempts it has seen', () => {
+    const many = Array.from({ length: MAX_SEEN_FAILURES + 5 }, (_, index) => `j${index}`);
+    const records = run([mr('1', pipeline('p1', []))], [mr('1', pipeline('p1', many))]);
+    const seen = records.get(mr('1').url)?.ci?.seen ?? [];
+    expect(seen).toHaveLength(MAX_SEEN_FAILURES);
+    expect(seen.at(-1)).toBe(`job-j${MAX_SEEN_FAILURES + 4}`);
   });
 
   test('records whether the forge listed every failed job', () => {

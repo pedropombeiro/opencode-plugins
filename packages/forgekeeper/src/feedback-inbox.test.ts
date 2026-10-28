@@ -147,6 +147,77 @@ describe('feedback inbox', () => {
     expect(delivered).toEqual(['a']);
   });
 
+  test('stays usable while a delivery runs, and delivers an update once at a time', async () => {
+    let state: InboxState | undefined;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const sent: string[] = [];
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+      now: () => 7,
+      notify: async (item) => {
+        sent.push(item.id);
+        await gate;
+      },
+    });
+    const update = (id: string): FeedbackItem => ({
+      id,
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: id,
+      links: [],
+      delivery: 'summary',
+      at: 0,
+    });
+    const adding = inbox.add(update('slow'));
+    await Bun.sleep(0);
+    expect(sent).toEqual(['slow']);
+    // Reads and changes don't wait for the delivery.
+    expect((await inbox.list()).items.map((item) => item.id)).toEqual(['slow']);
+    await inbox.add({ ...update('other'), delivery: undefined });
+    const retries = Promise.all([inbox.notifyPending(), inbox.notifyPending()]);
+    await Bun.sleep(0);
+    expect(sent).toEqual(['slow']);
+    release();
+    await Promise.all([adding, retries]);
+    expect(sent).toEqual(['slow']);
+    expect(state?.items.find((item) => item.id === 'slow')?.notifiedAt).toBe(7);
+  });
+
+  test('skips an update acknowledged or paused before its delivery starts', async () => {
+    let state: InboxState | undefined = {
+      paused: false,
+      items: [
+        {
+          id: 'a',
+          sessionID: 'one',
+          url: 'https://gitlab.com/g/p/-/merge_requests/1',
+          title: 'a',
+          links: [],
+          delivery: 'passive',
+          at: 0,
+        },
+      ],
+    };
+    const sent: string[] = [];
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+      notify: async (item) => void sent.push(item.id),
+    });
+    await inbox.pause(true);
+    await inbox.notifyPending();
+    expect(sent).toEqual([]);
+    await inbox.pause(false);
+    const pending = inbox.notifyPending();
+    await inbox.acknowledge('a');
+    await pending;
+    expect(sent).toEqual([]);
+  });
+
   test('replaces the updates a new one supersedes, but not when it already exists', async () => {
     let state: InboxState | undefined;
     const inbox = createFeedbackInbox({

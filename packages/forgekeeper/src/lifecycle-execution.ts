@@ -87,7 +87,12 @@ export async function retargetChildren(options: RetargetOptions): Promise<Retarg
       };
     const entry = await options.journal.get(child.url);
     if (entry?.state === 'done' && entry.outcome) return { line: entry.outcome };
-    const attempts = (entry?.attempts ?? 0) + (applying ? 1 : 0);
+    const previous = entry?.attempts ?? 0;
+    // A reload during the last attempt leaves its budget spent. Forgekeeper
+    // then only reads what that attempt did, and never sends another change.
+    const exhausted = applying && previous >= MAX_RETARGET_ATTEMPTS;
+    const attempts = previous + (applying && !exhausted ? 1 : 0);
+    const gaveUp = (line: string) => `${line} Forgekeeper gave up after ${attempts} attempts.`;
     let sent = entry?.sent === true;
     const save = (next: Partial<RetargetEntry>) => {
       sent ||= next.sent === true;
@@ -107,12 +112,12 @@ export async function retargetChildren(options: RetargetOptions): Promise<Retarg
     // While applying, a failure is tried again, up to the attempt limit.
     const failed = async (line: string) => {
       if (!applying) return { line };
-      if (attempts < MAX_RETARGET_ATTEMPTS) return { line, retry: true };
-      return done(`${line} Forgekeeper gave up after ${attempts} attempts.`);
+      if (!exhausted && attempts < MAX_RETARGET_ATTEMPTS) return { line, retry: true };
+      return done(gaveUp(line));
     };
     // The attempt is spent before anything else, so neither a failure nor a
     // reload gives it back.
-    if (applying) await save({});
+    if (applying && !exhausted) await save({});
     let current: ReviewRequest | undefined;
     try {
       current = await options.fetch(child.url);
@@ -142,6 +147,8 @@ export async function retargetChildren(options: RetargetOptions): Promise<Retarg
             : ''
         }`,
       };
+    if (exhausted)
+      return done(gaveUp(`Could not retarget ${child.reference} from ${from} to ${to}.`));
     // The session may have dropped the dependent while it was read.
     let allowed: boolean;
     try {
