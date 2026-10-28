@@ -147,7 +147,9 @@ export function createFeedbackInbox(options: {
   };
   return {
     list: () => run(read),
-    add: (item: FeedbackItem) =>
+    // Adds an update, unless one with its ID exists. `supersedes` names the
+    // updates it replaces, such as an earlier one about the same pipeline.
+    add: (item: FeedbackItem, supersedes: (entry: FeedbackItem) => boolean = () => false) =>
       run(async () => {
         const previous = await read();
         if (previous.paused) throw new Error('Feedback monitoring is paused');
@@ -156,7 +158,9 @@ export function createFeedbackInbox(options: {
           ...previous,
           items: [
             existing ?? item,
-            ...previous.items.filter((entry) => entry.id !== item.id),
+            ...previous.items.filter(
+              (entry) => entry.id !== item.id && (existing !== undefined || !supersedes(entry)),
+            ),
           ].slice(0, 500),
         };
         await options.write(state);

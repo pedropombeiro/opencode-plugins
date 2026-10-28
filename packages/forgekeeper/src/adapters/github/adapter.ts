@@ -25,6 +25,8 @@ interface Connection<T> {
 
 interface Check {
   __typename: string;
+  // Each run of a check has its own ID.
+  id?: string;
   // A check run's name, or a status context's.
   name?: string;
   context?: string;
@@ -69,7 +71,7 @@ const fields = `number title url state isDraft mergeable reviewDecision headRefO
   reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
   copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
   commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
-    nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } }
+    nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } }
     pageInfo { hasNextPage endCursor }
   } } } } }`;
 
@@ -119,9 +121,6 @@ export function classifyError(message: string, code: number): ForgeError {
   return new ForgeError('request', text.split('\n')[0]);
 }
 
-// The failed checks named per run. More are only counted.
-const MAX_FAILED_CHECKS = 10;
-
 const FAILED = [
   'FAILURE',
   'ERROR',
@@ -154,12 +153,14 @@ export function checks(nodes: Check[], complete: boolean, url: string, id?: stri
   const run = id
     ? {
         id,
-        failedJobs: failing.slice(0, MAX_FAILED_CHECKS).flatMap((node) => {
+        failedJobs: failing.flatMap((node) => {
           const name = node.name ?? node.context;
           const link = node.detailsUrl ?? node.targetUrl;
-          return name ? [{ name, ...(link ? { url: link } : {}) }] : [];
+          return name
+            ? [{ ...(node.id ? { id: node.id } : {}), name, ...(link ? { url: link } : {}) }]
+            : [];
         }),
-        failedCount: failed,
+        failedJobsComplete: complete,
       }
     : {};
   const pending = nodes.filter((node) =>
@@ -430,7 +431,7 @@ export class GitHubForge implements Forge {
           }>
         >(`query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String!) {
         repository(owner:$owner,name:$repo) { object(oid:$oid) { ... on Commit { statusCheckRollup {
-          contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl } } pageInfo { hasNextPage endCursor } }
+          contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } } pageInfo { hasNextPage endCursor } }
         } } } } }`),
         { owner, repo, oid: node.headRefOid, after: cursor.endCursor },
       );

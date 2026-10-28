@@ -1247,6 +1247,51 @@ describe('PR/MR status lifecycle', () => {
     return { app, reader };
   }
 
+  test("tells the session about security reviewers' comments, under the automated review setting", async () => {
+    const security = (reader: ReturnType<typeof feedbackReader>, id: string) => ({
+      ...reader.comment(id),
+      bot: true,
+      authorID: 'security',
+      username: 'duo-security-review-gitlab-org',
+    });
+    for (const [pluginOptions, announced] of [
+      [{}, true],
+      // People's comments are off, but security reviews are automated ones.
+      [{ notifyHumanReviews: false }, true],
+      [{ notifyAutomatedReviews: false }, false],
+      [{ reviewBots: {} }, false],
+    ] as const) {
+      const { app, reader } = await watchedFeedback({ pluginOptions });
+      reader.set([
+        security(reader, '7'),
+        { ...reader.comment('8'), bot: true, username: 'renovate' },
+      ]);
+      await app.refresh();
+      await settle();
+      expect((await app.feedback()).items.map((item) => item.commentIDs)).toEqual(
+        announced ? [['7']] : [],
+      );
+      await app.cleanup();
+    }
+  });
+
+  test('ignores bots whose names only resemble a review bot, or that it lists for another host', async () => {
+    for (const [username, reviewBots] of [
+      ['duo-security-review-gitlab-org-evil', undefined],
+      ['duo-security-review-acme', undefined],
+      ['sast-bot', { 'gitlab.example.com': ['sast-bot'] }],
+    ] as const) {
+      const { app, reader } = await watchedFeedback({
+        pluginOptions: { notifyHumanReviews: false, ...(reviewBots ? { reviewBots } : {}) },
+      });
+      reader.set([{ ...reader.comment('7'), bot: true, authorID: 'impostor', username }]);
+      await app.refresh();
+      await settle();
+      expect((await app.feedback()).items).toEqual([]);
+      await app.cleanup();
+    }
+  });
+
   test('tells the session about settled human feedback', async () => {
     const { app } = await watchedFeedback();
     await app.refresh();
@@ -1926,11 +1971,12 @@ describe('PR/MR status lifecycle', () => {
         status: 'RUNNING',
         label: 'running',
         failedJobs: failed.map((name) => ({
+          id: `job-${name}`,
           name,
           url: `https://gitlab.com/group/a/-/jobs/${name}`,
           stage: 'test',
         })),
-        failedCount: failed.length,
+        failedJobsComplete: true,
       },
     });
     const forge = new StatusForge();
@@ -1956,11 +2002,62 @@ describe('PR/MR status lifecycle', () => {
     expect(summary.tools).toEqual({});
     expect(textOf(summary)).toContain(`<mr-event kind="ci-failed" link="${projectA}">`);
     expect(textOf(summary)).toContain('<mr-detail>rspec failed in stage test.</mr-detail>');
+    // Another job fails in the same pipeline: its update replaces the first,
+    // lists both, and reaches the session again.
+    forge.set('group/a', '1', running('p1', ['rspec', 'lint']));
+    await app.refresh();
+    await settle();
+    const updates = (await app.feedback()).items;
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      title: '!1: job lint failed in its pipeline, which is still running',
+      links: [
+        'https://gitlab.com/group/a/-/jobs/lint',
+        'https://gitlab.com/group/a/-/jobs/rspec',
+        projectA,
+      ],
+      details: [
+        'lint failed in stage test.',
+        'rspec failed earlier in stage test.',
+        'Other jobs are still running.',
+      ],
+    });
+    expect(updates[0].id).not.toBe(item.id);
+    expect(app.synthetic).toHaveLength(2);
     // A new pipeline, such as after a push, replaces the failed one.
     forge.set('group/a', '1', running('p2', []));
     await app.refresh();
     await settle();
     expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+  });
+
+  test("reports a failure past the jobs it reads once the pipeline's status shows it", async () => {
+    // Only jobs allowed to fail were read, and more failed.
+    const unread = (status: string) => ({
+      pipeline: {
+        id: 'p1',
+        status,
+        label: status.toLowerCase(),
+        failedJobs: [],
+        failedJobsComplete: false,
+      },
+    });
+    const forge = new StatusForge();
+    forge.set('group/a', '1', unread('RUNNING'));
+    const { app } = await watchedTargets([projectA], { status: forge });
+    forge.set('group/a', '1', unread('FAILED'));
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toMatchObject([
+      {
+        kind: 'ci-failed',
+        title: '!1: its pipeline failed',
+        details: [
+          'A job that is not allowed to fail failed the pipeline, but it is not among the failed jobs Forgekeeper reads.',
+        ],
+      },
+    ]);
     await app.cleanup();
   });
 

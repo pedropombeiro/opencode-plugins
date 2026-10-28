@@ -150,12 +150,13 @@ test('check rollup names the failed checks of a commit while others still run', 
     [
       {
         __typename: 'CheckRun',
+        id: 'CR_1',
         name: 'test',
         status: 'COMPLETED',
         conclusion: 'FAILURE',
         detailsUrl: 'https://github.com/o/r/actions/runs/1',
       },
-      { __typename: 'StatusContext', context: 'ci/legacy', state: 'ERROR' },
+      { __typename: 'StatusContext', id: 'SC_1', context: 'ci/legacy', state: 'ERROR' },
       { __typename: 'CheckRun', name: 'build', status: 'IN_PROGRESS' },
     ],
     true,
@@ -166,10 +167,10 @@ test('check rollup names the failed checks of a commit while others still run', 
     status: 'FAILED',
     id: 'abc123',
     running: true,
-    failedCount: 2,
+    failedJobsComplete: true,
     failedJobs: [
-      { name: 'test', url: 'https://github.com/o/r/actions/runs/1' },
-      { name: 'ci/legacy' },
+      { id: 'CR_1', name: 'test', url: 'https://github.com/o/r/actions/runs/1' },
+      { id: 'SC_1', name: 'ci/legacy' },
     ],
   });
   // Without the commit, the checks aren't one identified run.

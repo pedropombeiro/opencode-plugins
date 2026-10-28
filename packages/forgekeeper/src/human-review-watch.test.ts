@@ -190,6 +190,28 @@ describe('eligibleFeedback', () => {
     ]);
   });
 
+  test("counts configured review bots' comments, but never ones another watcher owns", () => {
+    const security = { bot: true, username: 'duo-security-review-gitlab-org' };
+    const comments = snapshot(
+      comment('11', security),
+      comment('12', { bot: true, username: 'gitlab-bot' }),
+      // GitLab Duo's findings belong to the automated review watcher.
+      comment('13', {
+        ...security,
+        automated: { reviewer: 'GitLab Duo', finding: true },
+      }),
+      comment('14'),
+    );
+    const reviewBot = (entry: { username: string }) =>
+      entry.username.startsWith('duo-security-review-');
+    const ids = (counts?: Parameters<typeof eligibleFeedback>[3]) =>
+      eligibleFeedback(comments, seen(10), SETTLE_TIME, counts).map((entry) => entry.id);
+    expect(ids()).toEqual(['14']);
+    expect(ids({ reviewBot })).toEqual(['11', '14']);
+    // With human feedback off, only the review bots count.
+    expect(ids({ humans: false, reviewBot })).toEqual(['11']);
+  });
+
   test('treats comments at or below the baseline as old after deletions shift the window', () => {
     // Comments 3 and 4 predate the baseline of 9, but only now appear in the window.
     const comments = snapshot(comment('3'), comment('4'), comment('12'));
