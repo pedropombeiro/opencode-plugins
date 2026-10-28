@@ -32,10 +32,18 @@ export interface PipelineState {
   complete: boolean;
   // Whether only the pipeline's status says that an unread job failed it.
   unlisted: boolean;
+  // Every failed job attempt seen in this pipeline, by `jobKey`, newest
+  // last, including ones the forge no longer lists, such as when newer
+  // failures push them past the jobs it reads. Absent in older records.
+  seen?: string[];
 }
 
 // The failure the pipeline's status reports when no read job explains it.
 export const UNLISTED_FAILURE = 'unlisted';
+
+// The failed job attempts a pipeline remembers. Older ones may count as new
+// again if they return to the jobs the forge reads.
+export const MAX_SEEN_FAILURES = 500;
 
 // The pipeline's failures, by `jobKey`, and the status's own one.
 export const failureKeys = (ci: PipelineState) => [
@@ -122,11 +130,24 @@ function pipelineState(request: ReviewRequest): PipelineState {
   };
 }
 
+// The job attempts seen in the pipeline so far, after this lookup. Another
+// pipeline starts afresh. The status's own failure isn't a job, so it counts
+// again whenever it returns, such as after a retry.
+function seenFailures(previous: PipelineState | undefined, current: PipelineState): string[] {
+  const earlier =
+    previous && previous.id === current.id ? (previous.seen ?? previous.jobs.map(jobKey)) : [];
+  const now = current.jobs.map(jobKey).filter((key) => !earlier.includes(key));
+  return [...earlier, ...now].slice(-MAX_SEEN_FAILURES);
+}
+
 // The failures since the previous lookup: every one in a pipeline the
-// previous lookup didn't see, and in the same pipeline, the ones it didn't
-// list, such as a retry that failed again.
+// previous lookup didn't see, and in the same pipeline, the ones it never
+// saw, such as a retry that failed again. A job attempt that comes back to
+// the listed jobs isn't new.
 function newFailures(previous: PipelineState, current: PipelineState): string[] {
-  const known = new Set(previous.id === current.id ? failureKeys(previous) : []);
+  const known = new Set(
+    previous.id === current.id ? [...failureKeys(previous), ...(previous.seen ?? [])] : [],
+  );
   return failureKeys(current).filter((key) => !known.has(key));
 }
 
@@ -171,12 +192,13 @@ export function observe(
         ...extra,
       });
     };
-    const ci = pipelineState(request);
-    // Jobs that newly failed, whether the pipeline still runs or not, as one
-    // event per lookup.
     // Records from before Forgekeeper told job attempts apart lack
     // `unlisted`, and only record the jobs.
     const known = previous?.ci && 'unlisted' in previous.ci ? previous.ci : undefined;
+    const current = pipelineState(request);
+    const ci = current.id ? { ...current, seen: seenFailures(known, current) } : current;
+    // Jobs that newly failed, whether the pipeline still runs or not, as one
+    // event per lookup.
     const failures = known && request.state === 'opened' && ci.id ? newFailures(known, ci) : [];
     if (ci.id && failures.length) {
       const jobs = failures.sort();

@@ -276,7 +276,9 @@ affects later updates only: switching to `summary` never starts turns for update
 in the inbox. Summarize those with Ctrl+R instead. Stable message IDs deduplicate
 automatic retries, including after reloads. Updates that haven't reached their session are
 retried every minute and after a reload, each on its own, so one that keeps failing doesn't
-hold the others back. An update whose session was deleted, archived, or moved, or that no
+hold the others back. Delivery doesn't hold up the inbox: `/forge-feedback`, pausing, and
+acknowledging work while a summary reads its comments, and an update in flight isn't sent
+again by a retry. An update whose session was deleted, archived, or moved, or that no
 longer targets the PR/MR, is dropped, including when that changed while its comments were
 read. Switching `reviewFeedbackDelivery` to `inbox` stops retries of review updates, and
 leaves them undelivered, so they go again once it's switched back. Merge request updates
@@ -550,7 +552,9 @@ Each job attempt counts once. A lookup that finds new failed jobs makes one upda
 them, which names and links them, lists the jobs that failed earlier in that pipeline,
 and says whether the pipeline still runs. That update replaces the pipeline's earlier one
 in the inbox, and reaches the session again. A retry that fails again is a new attempt,
-so it's a new failure. Another pipeline that fails, such as after a push, is new too. At
+so it's a new failure. Forgekeeper remembers the newest 500 attempts it saw in a pipeline,
+so one that newer failures push past the jobs it reads isn't new when it comes back.
+Another pipeline that fails, such as after a push, is new too. At
 most 10 jobs are named, and more are counted. Records stored before Forgekeeper told job
 attempts apart only record the jobs, without an update. The update clears once the
 pipeline no longer has failed jobs, another pipeline replaces it, or the PR/MR closes.
@@ -606,7 +610,8 @@ Each retarget's progress is stored: a reload doesn't repeat a finished one, and 
 whose response was lost counts as done once the dependent targets the new branch. A failed
 read or retarget is tried again every minute and after a reload, at most 3 times, failed
 reads included. Until then, the merge's update waits, so it reports the outcome. After the
-last attempt, the update reports the failure. The update's details report each outcome.
+last attempt, the update reports the failure. A reload during the last attempt doesn't
+earn another: Forgekeeper only reads the dependent again to report what that attempt did. The update's details report each outcome.
 
 This is Forgekeeper's own action, through one fixed forge operation: no model or agent
 tool takes part, and nothing touches your checkout, so it doesn't wait for the session to

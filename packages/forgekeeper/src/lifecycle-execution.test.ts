@@ -210,6 +210,50 @@ describe('retargetChildren', () => {
     expect(app.calls).toEqual([]);
   });
 
+  test('never sends another change after a reload interrupts the last attempt', async () => {
+    const interrupted: RetargetEntry = {
+      state: 'running',
+      from: 'branch-1',
+      to: 'main',
+      attempts: MAX_RETARGET_ATTEMPTS,
+      sent: true,
+    };
+    const app = harness();
+    app.journal.set(url('2'), interrupted);
+    expect(await app.run()).toEqual({
+      lines: [
+        `Could not retarget !2 from branch-1 to main. Forgekeeper gave up after ${MAX_RETARGET_ATTEMPTS} attempts.`,
+      ],
+      retry: false,
+    });
+    expect(app.calls).toEqual([]);
+    expect(app.journal.get(url('2'))).toMatchObject({
+      state: 'done',
+      attempts: MAX_RETARGET_ATTEMPTS,
+    });
+    // It still reports a change that the interrupted attempt made.
+    const landed = harness({ targetBranch: 'main' });
+    landed.journal.set(url('2'), interrupted);
+    expect(await landed.lines()).toEqual(['Retargeted !2 from branch-1 to main.']);
+    expect(landed.calls).toEqual([]);
+    // And a read that fails then doesn't earn another attempt.
+    const unreadable = harness(
+      {},
+      {
+        fetch: async () => {
+          throw new Error('timeout');
+        },
+      },
+    );
+    unreadable.journal.set(url('2'), interrupted);
+    expect(await unreadable.run()).toEqual({
+      lines: [
+        `Could not read !2: timeout. Forgekeeper gave up after ${MAX_RETARGET_ATTEMPTS} attempts.`,
+      ],
+      retry: false,
+    });
+  });
+
   test('retries when it cannot tell whether the session still targets the dependent', async () => {
     const app = harness(
       {},
