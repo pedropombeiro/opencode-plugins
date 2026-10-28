@@ -2,9 +2,17 @@ import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
 import { statusOptions } from './options';
-import { LINKED_NOTE_TOOL } from './review-summary';
+import {
+  LINKED_NOTE_TOOL,
+  restrictRequest,
+  summarySystem,
+  taggedInput,
+  turnInput,
+  UNAVAILABLE_TEXT,
+  type SummaryRequest,
+} from './review-summary';
 import { ForgeSessionRpc, implement } from './rpc';
-import { setupStatus, type Status, type StatusDependencies } from './status-server';
+import { setupStatus, summaryPrefix, type Status, type StatusDependencies } from './status-server';
 import type { Snapshot } from './store';
 import {
   applyTargetChange,
@@ -357,11 +365,35 @@ export async function setupServer(
     return next;
   }
 
+  // Without monitoring, such as after `reviewStatus` is turned off, a
+  // Forgekeeper message queued earlier can still start a step. Its record
+  // isn't read then: the step only says the review text is unavailable.
+  // Sessions whose latest request was such a step, for the backstops.
+  const orphaned = new Set<string>();
+  async function orphanedStep(event: SummaryRequest): Promise<boolean> {
+    if (taggedInput(event.messages)) return true;
+    const records = await ctx.storage.scan({ prefix: summaryPrefix(event.sessionID) });
+    if (!records.entries.length) return false;
+    try {
+      const input = turnInput(await ctx.session.context({ sessionID: event.sessionID }));
+      // Without an input, such as after a compaction, the step may be one.
+      return !input || input.type !== 'user';
+    } catch {
+      return true;
+    }
+  }
+
   // A summary turn's request is replaced before anything else runs, and its
   // failures propagate, so the request never runs with the session's tools.
   // A failure in the guidance must not block the request, so it's skipped.
   await ctx.session.hook('context', async (event) => {
-    if (await watcher?.prepareSummary(event)) return;
+    if (watcher) {
+      if (await watcher.prepareSummary(event)) return;
+    } else if (await orphanedStep(event)) {
+      orphaned.add(event.sessionID);
+      restrictRequest(event, summarySystem(false), UNAVAILABLE_TEXT);
+      return;
+    } else orphaned.delete(event.sessionID);
     if (event.tools) delete event.tools[LINKED_NOTE_TOOL];
     try {
       const session = await ctx.session.get({ sessionID: event.sessionID });
@@ -377,19 +409,19 @@ export async function setupServer(
   // Backstops for a summary turn whose request still reached tools, such as
   // after a hook ordering change. Each refuses the action outright. The
   // linked-note tool checks its own calls, and asks for no permissions.
-  if (watcher) {
-    const summaries = watcher;
-    await ctx.tool.hook('execute.before', async (event) => {
-      if (event.tool === LINKED_NOTE_TOOL) return;
-      if (await summaries.summarizing(event.sessionID))
-        throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
-    });
-    await ctx.permission.hook('evaluate', async (event) => {
-      if (!(await summaries.summarizing(event.sessionID))) return;
-      event.effect = 'deny';
-      event.message = 'Forgekeeper review summaries run without tools.';
-    });
-  }
+  // They stay without monitoring too, for steps of messages queued earlier.
+  const summarizing = async (sessionID: string) =>
+    watcher ? watcher.summarizing(sessionID) : orphaned.has(sessionID);
+  await ctx.tool.hook('execute.before', async (event) => {
+    if (watcher && event.tool === LINKED_NOTE_TOOL) return;
+    if (await summarizing(event.sessionID))
+      throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
+  });
+  await ctx.permission.hook('evaluate', async (event) => {
+    if (!(await summarizing(event.sessionID))) return;
+    event.effect = 'deny';
+    event.message = 'Forgekeeper review summaries run without tools.';
+  });
 
   void (async () => {
     for await (const event of ctx.event.subscribe({
