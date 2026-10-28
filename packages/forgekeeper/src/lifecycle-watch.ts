@@ -1,6 +1,6 @@
 // Lifecycle events for a session's PRs/MRs: one that starts to conflict with
-// its target branch, one whose pipeline gets its first failed job, even while
-// the pipeline still runs, and one that merges. Each comes from a change
+// its target branch, one whose pipeline gets new failed jobs, even while the
+// pipeline still runs, and one that merges. Each comes from a change
 // between two lookups, never from the state alone, so the first lookup of a
 // PR/MR only records it, and nothing old is announced after a restart.
 //
@@ -8,7 +8,14 @@
 // and its new events are one storage write, so a crash neither loses an
 // event nor repeats it, and a merged PR/MR that nothing polls anymore still
 // gets its event delivered.
-import { failedJobCount, pipelineRunning, type FailedJob, type ReviewRequest } from './forge';
+import {
+  jobKey,
+  pipelineFails,
+  pipelineRunning,
+  unlistedFailure,
+  type FailedJob,
+  type ReviewRequest,
+} from './forge';
 import type { EventPolicy, FeedbackDelivery } from './options';
 
 export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed';
@@ -19,12 +26,22 @@ export interface PipelineState {
   id?: string;
   failed: boolean;
   running: boolean;
+  // The read failed jobs that fail the pipeline.
   jobs: FailedJob[];
-  // Failed jobs past `jobs`.
-  more: number;
-  // How many times a pipeline got its first failed job, for distinct IDs.
-  cycles: number;
+  // False when the pipeline has more failed jobs than the forge listed.
+  complete: boolean;
+  // Whether only the pipeline's status says that an unread job failed it.
+  unlisted: boolean;
 }
+
+// The failure the pipeline's status reports when no read job explains it.
+export const UNLISTED_FAILURE = 'unlisted';
+
+// The pipeline's failures, by `jobKey`, and the status's own one.
+export const failureKeys = (ci: PipelineState) => [
+  ...ci.jobs.map(jobKey),
+  ...(ci.unlisted ? [UNLISTED_FAILURE] : []),
+];
 
 export interface LifecycleEvent {
   kind: LifecycleKind;
@@ -37,8 +54,10 @@ export interface LifecycleEvent {
   // How the event reaches its session, as the mode was when it happened.
   // Absent in inbox mode, so enabling summaries never starts turns for it.
   delivery?: 'passive' | 'summary';
-  // The pipeline a `ci-failed` event is about.
+  // The pipeline a `ci-failed` event is about, and the jobs that newly
+  // failed in it, by `jobKey`.
   pipeline?: string;
+  jobs?: string[];
 }
 
 export interface LifecycleRecord {
@@ -91,18 +110,24 @@ function parentOf(child: ReviewRequest, requests: readonly ReviewRequest[]) {
 
 // What a lookup says of the request's head pipeline. A pipeline the forge
 // doesn't identify counts as none.
-function pipelineState(request: ReviewRequest, previous: PipelineState | undefined): PipelineState {
+function pipelineState(request: ReviewRequest): PipelineState {
   const pipeline = request.pipeline?.id ? request.pipeline : undefined;
-  const jobs = pipeline?.failedJobs ?? [];
-  const count = failedJobCount(pipeline);
   return {
     ...(pipeline ? { id: pipeline.id } : {}),
-    failed: count > 0,
+    failed: pipelineFails(pipeline),
     running: pipelineRunning(pipeline),
-    jobs,
-    more: Math.max(0, count - jobs.length),
-    cycles: previous?.cycles ?? 0,
+    jobs: pipeline?.failedJobs ?? [],
+    complete: pipeline?.failedJobsComplete !== false,
+    unlisted: unlistedFailure(pipeline),
   };
+}
+
+// The failures since the previous lookup: every one in a pipeline the
+// previous lookup didn't see, and in the same pipeline, the ones it didn't
+// list, such as a retry that failed again.
+function newFailures(previous: PipelineState, current: PipelineState): string[] {
+  const known = new Set(previous.id === current.id ? failureKeys(previous) : []);
+  return failureKeys(current).filter((key) => !known.has(key));
 }
 
 // The session's records after a lookup of its targets. Returns a record for
@@ -146,19 +171,18 @@ export function observe(
         ...extra,
       });
     };
-    const ci = pipelineState(request, previous?.ci);
-    // A pipeline's first failed job, whether the pipeline still runs or not.
-    // Another pipeline, such as after a push or a new run, is new.
-    if (
-      previous?.ci &&
-      request.state === 'opened' &&
-      ci.id &&
-      ci.failed &&
-      !(previous.ci.id === ci.id && previous.ci.failed)
-    ) {
-      ci.cycles++;
-      add('ci-failed', JSON.stringify([sessionID, request.url, 'ci-failed', ci.id, ci.cycles]), {
+    const ci = pipelineState(request);
+    // Jobs that newly failed, whether the pipeline still runs or not, as one
+    // event per lookup.
+    // Records from before Forgekeeper told job attempts apart lack
+    // `unlisted`, and only record the jobs.
+    const known = previous?.ci && 'unlisted' in previous.ci ? previous.ci : undefined;
+    const failures = known && request.state === 'opened' && ci.id ? newFailures(known, ci) : [];
+    if (ci.id && failures.length) {
+      const jobs = failures.sort();
+      add('ci-failed', JSON.stringify([sessionID, request.url, 'ci-failed', ci.id, jobs]), {
         pipeline: ci.id,
+        jobs,
       });
     }
     if (previous) {

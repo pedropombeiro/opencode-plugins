@@ -50,6 +50,8 @@ import {
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
 import {
   createLifecycleWatcher,
+  failureKeys,
+  UNLISTED_FAILURE,
   type LifecycleEvent,
   type LifecycleKind,
   type LifecycleRecord,
@@ -57,8 +59,10 @@ import {
 } from './lifecycle-watch';
 import { retargetChildren, stricter, type RetargetEntry } from './lifecycle-execution';
 import {
-  failedJobCount,
+  pipelineFails,
+  jobKey,
   type CommentDetail,
+  type FailedJob,
   type FeedbackSnapshot,
   type LinkedNote,
   type ReviewComment,
@@ -70,10 +74,11 @@ import {
   FETCH_INTERVAL,
   createFeedbackWatcher,
   isExpired,
+  type Counts,
   type FeedbackRecord,
 } from './human-review-watch';
 import { locate } from './locate';
-import type { StatusOptions } from './options';
+import { matchesReviewBot, type StatusOptions } from './options';
 import type { Notice } from './rpc';
 import type { MonitoringStatus } from './monitoring-status';
 import { createStatusService, HOME } from './status-service';
@@ -114,20 +119,55 @@ const receipt = (note: LinkedResult) =>
       ? `${note.url} was left out because of size limits.`
       : `Could not read ${note.url}.`;
 
+// The failed jobs a failed-pipeline update lists by name. More are counted.
+const MAX_LISTED_JOBS = 10;
+
+// A pipeline's failed jobs: the event's new ones that still fail, and the
+// ones that failed before them. `unlisted` is whether the event is the
+// pipeline's status reporting a failure no read job explains.
+function splitFailures(ci: PipelineState, keys: readonly string[]) {
+  const wanted = new Set(keys);
+  return {
+    fresh: ci.jobs.filter((job) => wanted.has(jobKey(job))),
+    earlier: ci.jobs.filter((job) => !wanted.has(jobKey(job))),
+    unlisted: ci.unlisted && wanted.has(UNLISTED_FAILURE),
+  };
+}
+
 // A failed-pipeline update's title, such as `!1: job rspec failed in its
-// pipeline, which is still running`. `ci` is the forge's word for it.
-function failureTitle(reference: string, ci: PipelineState, word: string) {
-  const count = ci.jobs.length + ci.more;
-  const what =
-    count === 1 && ci.jobs.length === 1 ? `job ${ci.jobs[0].name} failed` : `${count} jobs failed`;
+// pipeline, which is still running`. `word` is the forge's word for it.
+function failureTitle(
+  reference: string,
+  ci: PipelineState,
+  failures: ReturnType<typeof splitFailures>,
+  word: string,
+) {
+  const { fresh } = failures;
+  if (!fresh.length) return `${reference}: its ${word} failed`;
+  const what = fresh.length === 1 ? `job ${fresh[0].name} failed` : `${fresh.length} jobs failed`;
   return `${reference}: ${what} in its ${word}${ci.running ? ', which is still running' : ''}`;
 }
 
-// One line per failed job, from forge data, for the update's details.
-function failureDetails(ci: PipelineState): string[] {
+// One line per failed job, new ones first, from forge data, for the update's
+// details.
+function failureDetails(ci: PipelineState, failures: ReturnType<typeof splitFailures>): string[] {
+  const line = (job: FailedJob, when = '') =>
+    `${job.name} failed${when}${job.stage ? ` in stage ${job.stage}` : ''}.`;
+  const listed = [
+    ...failures.fresh.map((job) => line(job)),
+    ...failures.earlier.map((job) => line(job, ' earlier')),
+  ];
+  const more = listed.length - MAX_LISTED_JOBS;
   return [
-    ...ci.jobs.map((job) => `${job.name} failed${job.stage ? ` in stage ${job.stage}` : ''}.`),
-    ...(ci.more ? [`${ci.more} more jobs failed.`] : []),
+    ...listed.slice(0, MAX_LISTED_JOBS),
+    ...(more > 0 ? [`${more} more jobs failed.`] : []),
+    ...(failures.unlisted
+      ? [
+          'A job that is not allowed to fail failed the pipeline, but it is not among the failed jobs Forgekeeper reads.',
+        ]
+      : ci.complete
+        ? []
+        : ['More jobs failed than Forgekeeper reads.']),
     ...(ci.running ? ['Other jobs are still running.'] : []),
   ];
 }
@@ -351,7 +391,7 @@ export async function setupStatus(
     if (request.state !== 'opened') return true;
     if (item.kind === 'conflict') return request.conflictsKnown && !request.conflicts;
     const pipeline = request.pipeline;
-    return !!pipeline?.id && (pipeline.id !== item.pipeline || failedJobCount(pipeline) === 0);
+    return !!pipeline?.id && (pipeline.id !== item.pipeline || !pipelineFails(pipeline));
   }
 
   // Whether an error says the session doesn't exist, which ends its delivery.
@@ -810,8 +850,9 @@ export async function setupStatus(
     return `${namespace ?? 'automated'} ${key}`;
   };
 
-  const feedbackWatcher = (automatedFeedback: boolean) =>
+  const feedbackWatcher = (automatedFeedback: boolean, counts?: Counts) =>
     createFeedbackWatcher({
+      ...(counts ? { counts } : {}),
       ...(automatedFeedback
         ? {
             select: (snapshot: FeedbackSnapshot, request: ReviewRequest) =>
@@ -893,7 +934,27 @@ export async function setupStatus(
       },
     });
 
-  const human = settings.notifyHumanReviews ? feedbackWatcher(false) : undefined;
+  // People's comments, and review bots' such as security reviewers', which
+  // count as automated reviews, so each follows its own setting.
+  // A review bot counts only on its own host, which its comment's URL names.
+  const reviewBots = settings.notifyAutomatedReviews ? settings.reviewBots : {};
+  const commentHost = (url: string) => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return undefined;
+    }
+  };
+  const human =
+    settings.notifyHumanReviews || Object.values(reviewBots).some((names) => names.length)
+      ? feedbackWatcher(false, {
+          humans: settings.notifyHumanReviews,
+          reviewBot: (comment) => {
+            const host = commentHost(comment.url);
+            return !!host && matchesReviewBot(reviewBots, host, comment.username);
+          },
+        })
+      : undefined;
   const publishedFeedback = settings.notifyAutomatedReviews ? feedbackWatcher(true) : undefined;
 
   const readLifecycle = async (prefix: string) =>
@@ -943,9 +1004,13 @@ export async function setupStatus(
     // passed on a retry or that another pipeline replaced.
     if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
       return false;
+    // The same goes for failed jobs that passed on a retry since.
+    const still = new Set(record.ci ? failureKeys(record.ci) : []);
     if (
       event.kind === 'ci-failed' &&
-      (record.state !== 'opened' || record.ci?.id !== event.pipeline || !record.ci?.failed)
+      (record.state !== 'opened' ||
+        record.ci?.id !== event.pipeline ||
+        !(event.jobs ?? []).some((key) => still.has(key)))
     )
       return false;
     // Only dependents the session still targets. A dropped one's record stays
@@ -1012,21 +1077,30 @@ export async function setupStatus(
     // or until its attempts run out, so the update reports the outcome.
     if (execution?.retry) return 'retry';
     const ci = event.kind === 'ci-failed' ? record.ci : undefined;
-    const details = ci ? failureDetails(ci) : (execution?.lines ?? []);
+    const failures = ci && splitFailures(ci, event.jobs ?? []);
+    const details = ci && failures ? failureDetails(ci, failures) : (execution?.lines ?? []);
     const forge = requestOf(record);
-    const title = ci
-      ? failureTitle(record.reference, ci, forge ? traitsOf(forge).ci : 'pipeline')
-      : event.kind === 'conflict'
-        ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
-        : `${record.reference} merged into ${record.targetBranch}`;
+    const title =
+      ci && failures
+        ? failureTitle(record.reference, ci, failures, forge ? traitsOf(forge).ci : 'pipeline')
+        : event.kind === 'conflict'
+          ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
+          : `${record.reference} merged into ${record.targetBranch}`;
     const item: FeedbackItem = {
       id: event.id,
       kind: event.kind,
       sessionID: record.sessionID,
       url: record.url,
       title,
-      // The failed jobs first, so Enter opens the first of them.
-      links: [...(ci?.jobs.flatMap((job) => job.url ?? []) ?? []), record.url],
+      // The new failures first, so Enter opens the first of them.
+      links: [
+        ...(failures
+          ? [...failures.fresh, ...failures.earlier]
+              .slice(0, MAX_LISTED_JOBS)
+              .flatMap((job) => job.url ?? [])
+          : []),
+        record.url,
+      ],
       ...(details.length ? { details } : {}),
       ...(event.pipeline ? { pipeline: event.pipeline } : {}),
       // The mode when the event happened, so a change since then affects only
@@ -1035,8 +1109,15 @@ export async function setupStatus(
       at: event.detectedAt,
     };
     // A delivery that fails leaves the update in the inbox, which retries it,
-    // so only a failure to store it keeps the event.
-    await inbox.add(item).catch(async (error) => {
+    // so only a failure to store it keeps the event. A pipeline's new failures
+    // replace its earlier update, which they list too.
+    const samePipeline = (entry: FeedbackItem) =>
+      item.kind === 'ci-failed' &&
+      entry.kind === 'ci-failed' &&
+      entry.sessionID === item.sessionID &&
+      entry.url === item.url &&
+      entry.pipeline === item.pipeline;
+    await inbox.add(item, samePipeline).catch(async (error) => {
       if (!(await inbox.list()).items.some((entry) => entry.id === item.id)) throw error;
     });
     notice({

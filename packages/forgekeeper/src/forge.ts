@@ -14,30 +14,42 @@ export interface Pipeline {
   // or the commit GitHub's checks ran on.
   id?: string;
   // Jobs or checks that failed and fail the run, not ones allowed to fail or
-  // retried, at most as many as the adapter reads. Absent when the forge
-  // doesn't say.
+  // retried. Absent when the forge doesn't say.
   failedJobs?: FailedJob[];
-  // How many such jobs failed, when more than `failedJobs` lists.
-  failedCount?: number;
+  // False when the run has more failed jobs than the adapter reads, which may
+  // or may not fail it.
+  failedJobsComplete?: boolean;
   // Whether jobs are still running, when the status doesn't say, such as for
   // GitHub checks that report a failure while others run.
   running?: boolean;
 }
 
 export interface FailedJob {
+  // Identifies the attempt, so a retry that fails again is a new failure.
+  id?: string;
   name: string;
   url?: string;
   stage?: string;
 }
+
+// A failed job's identity, falling back to its name.
+export const jobKey = (job: FailedJob) => job.id ?? `name:${job.name}`;
 
 // Pipeline statuses that mean the run is over, on either forge.
 const FINISHED = new Set(['SUCCESS', 'FAILED', 'CANCELED', 'CANCELLED', 'SKIPPED', 'MANUAL']);
 export const pipelineRunning = (pipeline: Pipeline | undefined) =>
   !!pipeline && (pipeline.running ?? !FINISHED.has(pipeline.status));
 
-// How many jobs fail the run.
-export const failedJobCount = (pipeline: Pipeline | undefined) =>
-  pipeline?.failedCount ?? pipeline?.failedJobs?.length ?? 0;
+// Whether a failed job the adapter didn't read fails the run. Only the run's
+// status can tell, once it's over: jobs allowed to fail never fail it.
+export const unlistedFailure = (pipeline: Pipeline | undefined) =>
+  pipeline?.failedJobsComplete === false &&
+  !pipeline.failedJobs?.length &&
+  pipeline.status === 'FAILED';
+
+// Whether a job that isn't allowed to fail failed the run. One is enough.
+export const pipelineFails = (pipeline: Pipeline | undefined) =>
+  !!pipeline?.failedJobs?.length || unlistedFailure(pipeline);
 
 interface Common {
   iid: string;

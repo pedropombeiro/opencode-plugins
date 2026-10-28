@@ -6,6 +6,9 @@ export interface StatusOptions {
   pollSeconds: number;
   notifyAutomatedReviews: boolean;
   notifyHumanReviews: boolean;
+  // Bot accounts whose comments count as review feedback, such as security
+  // reviewers: exact usernames, by host.
+  reviewBots: ReviewBots;
   feedbackDelivery: FeedbackDelivery;
   // Merge conflicts and merges of the session's PRs/MRs.
   notifyLifecycle: boolean;
@@ -36,6 +39,52 @@ export interface LifecycleExecution {
   parentMerged: EventPolicy;
   // A PR/MR started to conflict with its target branch. Only `notify` exists.
   conflict: EventPolicy;
+}
+
+// Review bot usernames by host, both lowercase.
+export type ReviewBots = Readonly<Record<string, readonly string[]>>;
+
+// GitLab.com's security review agents for `gitlab-org`. Duo Security Review
+// has one account per top-level group, so other groups add theirs. Names are
+// exact: anyone can create a bot account whose name only starts the same.
+export const DEFAULT_REVIEW_BOTS: ReviewBots = {
+  'gitlab.com': ['duo-security-review-gitlab-org', 'ai-appsec-security-mr-reviewer-gitlab-org'],
+};
+
+const HOST = /^[a-z0-9.-]+(:\d+)?$/;
+const USERNAME = /^[a-z0-9_.[\]-]+$/;
+
+// The configured usernames. An invalid value keeps the defaults, with a
+// problem saying so.
+function reviewBots(value: unknown, problems: string[]): ReviewBots {
+  if (value === undefined) return DEFAULT_REVIEW_BOTS;
+  const fail = (reason: string) => {
+    problems.push(`reviewBots: ${reason}; using the defaults`);
+    return DEFAULT_REVIEW_BOTS;
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return fail('must map hosts to lists of usernames, such as {"gitlab.com": ["name"]}');
+  const bots: Record<string, string[]> = {};
+  for (const [key, names] of Object.entries(value)) {
+    const host = key.toLowerCase();
+    if (!HOST.test(host)) return fail(`${JSON.stringify(key)} isn't a host name`);
+    if (!Array.isArray(names) || names.some((name) => typeof name !== 'string'))
+      return fail(`${key} must list usernames`);
+    const wanted = (names as string[]).map((name) => name.toLowerCase());
+    const invalid = wanted.filter((name) => !USERNAME.test(name));
+    if (invalid.length)
+      return fail(
+        `${key} lists ${JSON.stringify(invalid)}, but usernames must be exact, without wildcards`,
+      );
+    bots[host] = [...new Set([...(bots[host] ?? []), ...wanted])];
+  }
+  return bots;
+}
+
+// Whether the username is one of the host's review bots, ignoring case, as
+// forges do.
+export function matchesReviewBot(bots: ReviewBots, host: string, username: string): boolean {
+  return bots[host.toLowerCase()]?.includes(username.toLowerCase()) ?? false;
 }
 
 const DELIVERIES = new Set<unknown>(['inbox', 'passive', 'summary']);
@@ -89,6 +138,7 @@ export function statusOptions(options: unknown): StatusOptions {
     // `notifyDuoReview` is the option's former name.
     notifyAutomatedReviews: (source.notifyAutomatedReviews ?? source.notifyDuoReview) !== false,
     notifyHumanReviews: source.notifyHumanReviews !== false,
+    reviewBots: reviewBots(source.reviewBots, problems),
     feedbackDelivery: DELIVERIES.has(source.reviewFeedbackDelivery)
       ? (source.reviewFeedbackDelivery as FeedbackDelivery)
       : 'inbox',

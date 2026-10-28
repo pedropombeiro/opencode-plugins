@@ -87,11 +87,28 @@ const isNew = (comment: ReviewComment, seen: SeenComments) =>
       !seen.baselineIDs.includes(comment.id))) &&
   !seen.announced.has(comment.id);
 
-// Unresolved comments from people other than the viewer.
-const humanFeedback = (snapshot: FeedbackSnapshot) =>
+// Unresolved comments from people other than the viewer, and from the bots
+// `reviewBot` accepts, such as security reviewers. Comments an automated
+// review watcher owns, such as GitLab Duo's, never count here.
+const humanFeedback = (snapshot: FeedbackSnapshot, counts: Counts = {}) =>
   snapshot.comments.filter(
-    (comment) => !comment.bot && comment.authorID !== snapshot.viewerID && !comment.resolved,
+    (comment) =>
+      (comment.bot
+        ? !comment.automated && !!counts.reviewBot?.(comment)
+        : counts.humans !== false) &&
+      comment.authorID !== snapshot.viewerID &&
+      !comment.resolved,
   );
+
+// Whether a bot's comment counts as review feedback.
+export type ReviewBot = (comment: ReviewComment) => boolean;
+
+// Whose comments count: people's, unless `humans` is false, and bots that
+// `reviewBot` accepts.
+export interface Counts {
+  humans?: boolean;
+  reviewBot?: ReviewBot;
+}
 
 // New human comments, but only once no human comment, announced or not, has
 // been added or edited for SETTLE_TIME. Any activity restarts the wait for the
@@ -100,8 +117,9 @@ export function eligibleFeedback(
   snapshot: FeedbackSnapshot,
   seen: SeenComments,
   now: number,
+  counts?: Counts,
 ): ReviewComment[] {
-  const human = humanFeedback(snapshot);
+  const human = humanFeedback(snapshot, counts);
   const pending = human.filter((comment) => isNew(comment, seen));
   if (pending.length === 0) return [];
   const lastActivity = Math.max(...human.map((comment) => comment.editedAt));
@@ -157,6 +175,7 @@ export interface FeedbackWatcherOptions {
   // Receives each complete fetch that no later change made obsolete, before
   // `select` narrows it.
   accepted?: (request: ReviewRequest, snapshot: FeedbackSnapshot) => void;
+  counts?: Counts;
 }
 
 export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
@@ -208,7 +227,7 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
     }
     if (options.ready && !options.ready(snapshot, at, request)) return;
     if (at < (retryAt.get(key) ?? 0)) return;
-    const comments = eligibleFeedback(snapshot, previous, at).filter(
+    const comments = eligibleFeedback(snapshot, previous, at, options.counts).filter(
       (comment) => !reserved.has(`${key} ${comment.id}`),
     );
     if (comments.length === 0) {
@@ -251,7 +270,11 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
           if (now() - (fetchedAt.get(key) ?? -Infinity) < FETCH_INTERVAL) return;
           const snapshot = snapshots.get(key);
           const previous = seen(key, await options.record(key));
-          if (!snapshot || !previous || eligibleFeedback(snapshot, previous, now()).length === 0)
+          if (
+            !snapshot ||
+            !previous ||
+            eligibleFeedback(snapshot, previous, now(), options.counts).length === 0
+          )
             return;
           if (now() < (retryAt.get(key) ?? 0)) return;
         }

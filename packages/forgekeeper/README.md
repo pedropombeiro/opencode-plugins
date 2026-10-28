@@ -407,10 +407,11 @@ Before it sends a notification, the server checks that the PR/MR is still one of
 session's targets. A lookup that started before the targets changed is discarded, so a
 removed target never triggers a notification.
 
-| Notification                               | GitLab      | GitHub         |
-| ------------------------------------------ | ----------- | -------------- |
-| An automated review finished with feedback | GitLab Duo  | GitHub Copilot |
-| New human review feedback                  | MR comments | PR comments    |
+| Notification                               | GitLab                           | GitHub         |
+| ------------------------------------------ | -------------------------------- | -------------- |
+| An automated review finished with feedback | GitLab Duo                       | GitHub Copilot |
+| Comments from review bots                  | Security reviewers, `reviewBots` | `reviewBots`   |
+| New human review feedback                  | MR comments                      | PR comments    |
 
 - **Duo reviews**: new unresolved inline findings from the GitLab Duo bot create inbox
   updates after the findings remain unchanged for five minutes. Forgekeeper does not need
@@ -433,6 +434,28 @@ removed target never triggers a notification.
 - **Human reviews**: new comments and replies from people other than you and bots are
   announced once none of their unresolved comments has changed for 5 minutes. Expect one
   update 5 to 7 minutes after the review goes quiet. Resolved threads are skipped.
+- **Review bots**: comments from the bot accounts that `reviewBots` names are announced
+  like human reviews, including comments without a file or line, such as a security
+  review's findings. `reviewBots` maps each host to exact usernames, ignoring case. By
+  default, it names GitLab.com's security reviewers for `gitlab-org`:
+
+  ```json
+  {
+    "reviewBots": {
+      "gitlab.com": ["duo-security-review-gitlab-org", "ai-appsec-security-mr-reviewer-gitlab-org"]
+    }
+  }
+  ```
+
+  Duo Security Review has one account per top-level group, so add yours, such as
+  `duo-security-review-acme`, and a self-managed instance's accounts under its host. Your
+  list replaces the defaults, and `{}` turns this off. Names have no wildcards, since a
+  group owner can create a bot account with any free name, such as one that starts like
+  a security reviewer's. Only accounts that the forge flags as bots count, and only on the
+  host they're listed for. They count as automated reviews, so `notifyAutomatedReviews`
+  controls them, whether or not `notifyHumanReviews` is on. GitLab Duo's code review
+  findings always go through their own watcher instead. Internal notes, such as Duo
+  Security Review's, count when your account can read them.
 
 The first look at a PR/MR records its newest comment as a baseline, so older comments never
 count as new. Announced comments are stored per session and PR/MR, so a restart replays
@@ -515,17 +538,23 @@ Sessions are watched the same way as for review feedback, without visiting their
 Failed jobs don't wait for the pipeline to finish, which can take much longer than the
 job. Each lookup reads the pipeline's failed jobs:
 
-- On GitLab, failed jobs that aren't retried and aren't allowed to fail, at most 10 by
-  name. More are counted.
+- On GitLab, the first 10 failed jobs that aren't retried, with the MR, and no other
+  query. One that isn't allowed to fail is enough to know the pipeline fails. When all
+  10 are allowed to fail and more failed, an unread one may fail the pipeline, but none
+  counts as failing it while the pipeline runs. Once the pipeline finishes as failed,
+  which jobs allowed to fail never cause, the update reports that a job past those 10
+  failed it.
 - On GitHub, the head commit's failed checks, which count as one pipeline.
 
-A pipeline's first failed job is one update, which names the failed jobs, links them, and
-says whether the pipeline still runs. Further failures in the same pipeline add no update.
-Another pipeline that fails, such as after a push, is a new update. So is a job failing
-after an earlier failure in the same pipeline passed on a retry. Records stored before
-Forgekeeper watched pipelines only record the pipeline, without an update. The update
-clears once the pipeline no longer has failed jobs, another pipeline replaces it, or the
-PR/MR closes. Forgekeeper only reports failed jobs: it doesn't retry or fix them.
+Each job attempt counts once. A lookup that finds new failed jobs makes one update for
+them, which names and links them, lists the jobs that failed earlier in that pipeline,
+and says whether the pipeline still runs. That update replaces the pipeline's earlier one
+in the inbox, and reaches the session again. A retry that fails again is a new attempt,
+so it's a new failure. Another pipeline that fails, such as after a push, is new too. At
+most 10 jobs are named, and more are counted. Records stored before Forgekeeper told job
+attempts apart only record the jobs, without an update. The update clears once the
+pipeline no longer has failed jobs, another pipeline replaces it, or the PR/MR closes.
+Forgekeeper only reports failed jobs: it doesn't retry or fix them.
 
 Each change waits in the target's record until it reaches the inbox, in the same storage
 write as the record. A merge stops polling, so waiting changes are retried every minute
@@ -637,18 +666,19 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 }
 ```
 
-| Option                   | Default          | Description                                                                                                                  |
-| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `reviewStatus`           | `true`           | Show the PR/MR status and monitor review feedback. Set to `false` to keep only session targets and titles.                   |
-| `hosts`                  | `["gitlab.com"]` | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                   |
-| `githubHosts`            | `["github.com"]` | GitHub hosts, including GitHub Enterprise hosts.                                                                             |
-| `pollSeconds`            | `120`            | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                     |
-| `notifyAutomatedReviews` | `true`           | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                        |
-| `notifyHumanReviews`     | `true`           | Surface new human review feedback.                                                                                           |
-| `reviewFeedbackDelivery` | `"inbox"`        | What an update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns). |
-| `notifyLifecycle`        | `true`           | Surface targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).      |
-| `lifecycleDelivery`      | `"inbox"`        | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                         |
-| `lifecycleExecution`     | all `"notify"`   | What Forgekeeper does about each event: `parentMerged` and `conflict`. See [Stacked PRs/MRs](#stacked-prsmrs).               |
+| Option                   | Default                       | Description                                                                                                                    |
+| ------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `reviewStatus`           | `true`                        | Show the PR/MR status and monitor review feedback. Set to `false` to keep only session targets and titles.                     |
+| `hosts`                  | `["gitlab.com"]`              | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                     |
+| `githubHosts`            | `["github.com"]`              | GitHub hosts, including GitHub Enterprise hosts.                                                                               |
+| `pollSeconds`            | `120`                         | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                       |
+| `notifyAutomatedReviews` | `true`                        | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                          |
+| `notifyHumanReviews`     | `true`                        | Surface new human review feedback.                                                                                             |
+| `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications). |
+| `reviewFeedbackDelivery` | `"inbox"`                     | What an update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).   |
+| `notifyLifecycle`        | `true`                        | Surface targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).        |
+| `lifecycleDelivery`      | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                           |
+| `lifecycleExecution`     | all `"notify"`                | What Forgekeeper does about each event: `parentMerged` and `conflict`. See [Stacked PRs/MRs](#stacked-prsmrs).                 |
 
 The server entry point reads every option, so changing one takes effect when the server
 plugin reloads. The CLI has no options of its own. Each checkout's server reads the

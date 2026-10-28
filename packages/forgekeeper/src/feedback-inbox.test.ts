@@ -147,6 +147,33 @@ describe('feedback inbox', () => {
     expect(delivered).toEqual(['a']);
   });
 
+  test('replaces the updates a new one supersedes, but not when it already exists', async () => {
+    let state: InboxState | undefined;
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+    });
+    const item = (id: string, pipeline: string): FeedbackItem => ({
+      id,
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      kind: 'ci-failed',
+      pipeline,
+      title: id,
+      links: [],
+      at: 0,
+    });
+    const same = (next: FeedbackItem) => (entry: FeedbackItem) => entry.pipeline === next.pipeline;
+    await inbox.add(item('a', 'p1'));
+    await inbox.add(item('other', 'p2'));
+    await inbox.add(item('b', 'p1'), same(item('b', 'p1')));
+    expect((await inbox.list()).items.map((entry) => entry.id)).toEqual(['b', 'other']);
+    // A retry of an update that exists changes nothing.
+    await inbox.add(item('other', 'p2'), () => true);
+    expect((await inbox.list()).items.map((entry) => entry.id)).toEqual(['other', 'b']);
+  });
+
   test('opens only HTTPS links on the target origin without embedded credentials', () => {
     const url = 'https://gitlab.com/g/p/-/merge_requests/1';
     expect(

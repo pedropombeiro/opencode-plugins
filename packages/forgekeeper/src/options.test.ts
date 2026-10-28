@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { statusOptions } from './options';
+import { DEFAULT_REVIEW_BOTS, matchesReviewBot, statusOptions } from './options';
 
 const notify = { mode: 'notify' as const, actions: [] };
 
@@ -10,6 +10,12 @@ describe('statusOptions', () => {
       pollSeconds: 120,
       notifyAutomatedReviews: true,
       notifyHumanReviews: true,
+      reviewBots: {
+        'gitlab.com': [
+          'duo-security-review-gitlab-org',
+          'ai-appsec-security-mr-reviewer-gitlab-org',
+        ],
+      },
       feedbackDelivery: 'inbox',
       notifyLifecycle: true,
       lifecycleDelivery: 'inbox',
@@ -54,6 +60,39 @@ describe('statusOptions', () => {
       statusOptions({ notifyDuoReview: false, notifyAutomatedReviews: true })
         .notifyAutomatedReviews,
     ).toBe(true);
+  });
+
+  test('reads the review bots by host, which replace the defaults, and keeps them for invalid values', () => {
+    expect(
+      statusOptions({
+        reviewBots: { 'GitLab.example.com': ['SAST-bot', 'sast-bot'], 'github.com': [] },
+      }).reviewBots,
+    ).toEqual({ 'gitlab.example.com': ['sast-bot'], 'github.com': [] });
+    expect(statusOptions({ reviewBots: {} }).reviewBots).toEqual({});
+    for (const [value, reason] of [
+      [['duo-security-review-gitlab-org'], 'must map hosts'],
+      ['sast-bot', 'must map hosts'],
+      [{ 'gitlab.com': ['duo-security-review-*'] }, 'without wildcards'],
+      [{ 'gitlab.com': ['two words'] }, 'without wildcards'],
+      [{ 'gitlab.com': 'sast-bot' }, 'must list usernames'],
+      [{ 'https://gitlab.com': ['sast-bot'] }, "isn't a host name"],
+    ] as const) {
+      const options = statusOptions({ reviewBots: value });
+      expect(options.reviewBots).toEqual(DEFAULT_REVIEW_BOTS);
+      expect(options.problems).toEqual([expect.stringContaining(reason)]);
+    }
+  });
+
+  test('matches review bots by exact username on their own host, ignoring case', () => {
+    const bots = statusOptions({
+      reviewBots: { 'gitlab.com': ['duo-security-review-gitlab-org'] },
+    }).reviewBots;
+    expect(matchesReviewBot(bots, 'gitlab.com', 'Duo-Security-Review-GitLab-Org')).toBe(true);
+    // A name that only starts the same, or the same name on another host.
+    expect(matchesReviewBot(bots, 'gitlab.com', 'duo-security-review-gitlab-org-evil')).toBe(false);
+    expect(matchesReviewBot(bots, 'gitlab.example.com', 'duo-security-review-gitlab-org')).toBe(
+      false,
+    );
   });
 
   test('grants execution only as each event policy states', () => {

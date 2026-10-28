@@ -7,6 +7,7 @@ import {
   prefixReferences,
   yesNo,
   type AutomatedReviewState,
+  type FailedJob,
   type Forge,
   type ForgeTraits,
   type GitLabMergeRequest,
@@ -46,8 +47,9 @@ interface MergeRequestNode {
     path: string | null;
     detailedStatus: { label: string | null } | null;
     jobs?: {
-      count: number;
+      pageInfo?: { hasNextPage: boolean } | null;
       nodes: Array<{
+        id?: string | null;
         name: string | null;
         allowFailure: boolean;
         webPath: string | null;
@@ -77,8 +79,13 @@ const DISCUSSIONS = 'pageInfo { hasNextPage endCursor } nodes { resolvable resol
 const PAGE_SIZE = 100;
 export const MAX_DISCUSSION_PAGES = 50;
 
-// The failed jobs read per pipeline. More are only counted.
-const MAX_FAILED_JOBS = 10;
+// The failed jobs read with each MR. One that isn't allowed to fail is enough
+// to tell the pipeline fails; past these, only the pipeline's status can tell.
+const FIRST_FAILED_JOBS = 10;
+const FAILED_JOBS =
+  'pageInfo { hasNextPage } nodes { id name allowFailure webPath stage { name } }';
+
+type FailedJobPage = NonNullable<NonNullable<MergeRequestNode['headPipeline']>['jobs']>;
 
 // Merge statuses during which GitLab hasn't settled whether the MR conflicts.
 const RECHECKING = new Set(['CHECKING', 'UNCHECKED', 'PREPARING']);
@@ -90,9 +97,7 @@ const MERGE_REQUEST_FIELDS = `
   targetProject { fullPath }
   headPipeline {
     id status path detailedStatus { label }
-    jobs(statuses: [FAILED], retried: false, first: ${MAX_FAILED_JOBS}) {
-      count nodes { name allowFailure webPath stage { name } }
-    }
+    jobs(statuses: [FAILED], retried: false, first: ${FIRST_FAILED_JOBS}) { ${FAILED_JOBS} }
   }
   reviewers(first: 100) { nodes { type username bot mergeRequestInteraction { reviewState approved } } }
   discussions(first: ${PAGE_SIZE}) { ${DISCUSSIONS} }
@@ -312,22 +317,33 @@ const RETARGET_MUTATION = query<{
 // states stay silent until they are added here.
 const DUO_FEEDBACK = new Set(['REVIEWED', 'REQUESTED_CHANGES']);
 
-// The pipeline's ID and the failed jobs that fail it. Jobs allowed to fail
-// don't, and the query leaves out retried ones. The count covers jobs past
-// the ones read, which may include some allowed to fail.
+// The pipeline's ID, and the read failed jobs that fail it. When it has more
+// failed jobs than were read, the list is incomplete, and none of the unread
+// ones counts as failing it.
 function failedJobs(host: string, pipeline: NonNullable<MergeRequestNode['headPipeline']>) {
   if (!pipeline.id || !pipeline.jobs) return {};
-  const nodes = pipeline.jobs.nodes;
-  const failing = nodes.filter((job) => !job.allowFailure && job.name);
   return {
     id: pipeline.id,
-    failedJobs: failing.map((job) => ({
-      name: job.name!,
-      ...(job.webPath ? { url: `https://${host}${job.webPath}` } : {}),
-      ...(job.stage?.name ? { stage: job.stage.name } : {}),
-    })),
-    failedCount: failing.length + Math.max(0, pipeline.jobs.count - nodes.length),
+    failedJobs: requiredFailures(host, pipeline.jobs.nodes),
+    failedJobsComplete: !pipeline.jobs.pageInfo?.hasNextPage,
   };
+}
+
+// The failed jobs that fail the pipeline. Jobs allowed to fail don't, and the
+// query leaves out retried ones.
+function requiredFailures(host: string, nodes: FailedJobPage['nodes']): FailedJob[] {
+  return nodes.flatMap((job) =>
+    !job.allowFailure && job.name
+      ? [
+          {
+            ...(job.id ? { id: job.id } : {}),
+            name: job.name,
+            ...(job.webPath ? { url: `https://${host}${job.webPath}` } : {}),
+            ...(job.stage?.name ? { stage: job.stage.name } : {}),
+          },
+        ]
+      : [],
+  );
 }
 
 function duoState(state: string): AutomatedReviewState {
