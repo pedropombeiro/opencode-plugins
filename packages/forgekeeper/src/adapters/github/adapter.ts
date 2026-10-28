@@ -1,4 +1,4 @@
-import type { Exec } from './exec';
+import type { Exec } from '../../exec';
 import {
   type CopilotReview,
   type AutomatedReviewStatus,
@@ -12,11 +12,11 @@ import {
   type GitHubPullRequest,
   type Pipeline,
   type ReviewRef,
-} from './forge';
-import type { RemoteProject, Repository } from './git';
-import { fetchComments } from './github-feedback';
-import { gitlabTraits } from './gitlab';
-import { query, typed, type Transport, type Typed } from './graphql';
+} from '../../forge';
+import type { RemoteProject, Repository } from '../../git';
+import { fetchComments } from './feedback';
+import { gitlabTraits } from '../gitlab/adapter';
+import { query, typed, type Transport, type Typed } from '../../graphql';
 
 interface Connection<T> {
   nodes: T[];

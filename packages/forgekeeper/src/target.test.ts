@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { githubTraits } from './github';
-import { gitlabTraits } from './gitlab';
+import { githubTraits } from './adapters/github/adapter';
+import { gitlabTraits } from './adapters/gitlab/adapter';
 import {
   applyTargetChange,
   classifyTargets,

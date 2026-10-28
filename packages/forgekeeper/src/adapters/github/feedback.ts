@@ -1,6 +1,6 @@
-import type { FeedbackSnapshot, ReviewComment } from './forge';
-import type { GraphQL } from './github';
-import { query, typed, type Query, type Typed } from './graphql';
+import type { FeedbackSnapshot, ReviewComment } from '../../forge';
+import type { GraphQL } from './adapter';
+import { query, typed, type Query, type Typed } from '../../graphql';
 
 type Variables = Record<string, string | number>;
 

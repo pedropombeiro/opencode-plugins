@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { duoFindings, duoReady } from './gitlab-review-feedback';
-import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
+import { duoFindings, duoReady } from './review-feedback';
+import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from '../../forge';
 import {
   applyFeedback,
   createFeedbackWatcher,
   SETTLE_TIME,
   type FeedbackRecord,
-} from './human-review-watch';
-import { deferred } from './testing';
+} from '../../human-review-watch';
+import { deferred } from '../../testing';
 
 const request = {
   forge: 'gitlab',

@@ -6,8 +6,8 @@ import {
   type RemoteProject,
   type RepositoryLookup,
 } from './git';
-import { githubTraits } from './github';
-import { gitlabTraits } from './gitlab';
+import { githubTraits } from './adapters/github/adapter';
+import { gitlabTraits } from './adapters/gitlab/adapter';
 
 const registry = { gitlab: gitlabTraits, github: githubTraits };
 

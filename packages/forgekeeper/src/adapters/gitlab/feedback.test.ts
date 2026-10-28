@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import type { GraphQL } from './gitlab';
-import { fetchComments, MAX_COMMENT_PAGES, toComment } from './gitlab-feedback';
+import type { GraphQL } from './adapter';
+import { fetchComments, MAX_COMMENT_PAGES, toComment } from './feedback';
 
 const node = (id: string, overrides: Record<string, unknown> = {}) => ({
   id: `gid://gitlab/DiscussionNote/${id}`,

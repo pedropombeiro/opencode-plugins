@@ -489,10 +489,11 @@ been removed; saved values have no effect. Set `reviewStatus` to `false` to keep
   `src/tui.tsx` connects it to the RPC and renders the footer, dialog, commands, and notices.
 - `src/forge.ts` defines the forge-neutral types, the `Forge` adapter interface, and
   `ForgeTraits` with its optional `automatedReview` and `feedback` capabilities.
-- `src/gitlab-feedback.ts` and `src/github-feedback.ts` read each forge's comments for its
-  `feedback` capability.
-- `src/gitlab.ts` and `src/github.ts` provide each forge's adapter and traits. Adapters own
-  API calls, pagination, error classification, and status normalization. Traits cover
+- `src/adapters/gitlab/feedback.ts` and `src/adapters/github/feedback.ts` read each forge's
+  comments for its `feedback` capability.
+- `src/adapters/gitlab/adapter.ts` and `src/adapters/github/adapter.ts` provide each forge's
+  adapter and traits. Adapters own API calls, pagination, error classification, and status
+  normalization. Traits cover
   everything else: hosts, URL parsing, reference syntax, vocabulary, and forge-specific
   footer and dialog content.
 - `src/forges.ts` registers each forge's traits, classifies hosts, opens adapters, and

@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import type { Exec } from './exec';
-import type { GitLabMergeRequest } from './forge';
-import { subscribeToNotes, type CableSocket } from './gitlab-subscription';
+import type { Exec } from '../../exec';
+import type { GitLabMergeRequest } from '../../forge';
+import { subscribeToNotes, type CableSocket } from './subscription';
 import { cableSocket } from './cable-socket';
-import { SubscriptionRateLimit } from './subscription-retry';
-import { flush } from './testing';
+import { SubscriptionRateLimit } from '../../subscription-retry';
+import { flush } from '../../testing';
 
 const mr = { url: 'https://gitlab.example.com/g/p/-/merge_requests/7' } as GitLabMergeRequest;
 

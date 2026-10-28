@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
-import { checks, ghGraphQL, GitHubForge, type GraphQL } from './github';
-import { classifyTargets } from './target';
-import { detailsMessage, responsiveFooterSegments } from './format';
+import { checks, ghGraphQL, GitHubForge, type GraphQL } from './adapter';
+import { classifyTargets } from '../../target';
+import { detailsMessage, responsiveFooterSegments } from '../../format';
 
 const pull = (number = 1) => ({
   number,

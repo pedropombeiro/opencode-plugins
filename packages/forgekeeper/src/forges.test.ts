@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { Exec } from './exec';
 import { Forges, hostsFrom, parseReference } from './forges';
-import { GitHubForge } from './github';
-import { GitLabForge } from './gitlab';
+import { GitHubForge } from './adapters/github/adapter';
+import { GitLabForge } from './adapters/gitlab/adapter';
 
 const remotes: Exec = async (_file, args) => ({
   code: 0,

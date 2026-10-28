@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import type { Exec } from './exec';
-import type { Repository } from './git';
-import { footerSegments } from './format';
-import { ForgeError } from './forge';
+import type { Exec } from '../../exec';
+import type { Repository } from '../../git';
+import { footerSegments } from '../../format';
+import { ForgeError } from '../../forge';
 import {
   classifyError,
   DISCUSSIONS_QUERY,
@@ -10,7 +10,7 @@ import {
   glabGraphQL,
   SOURCE_BRANCH_QUERY,
   type GraphQL,
-} from './gitlab';
+} from './adapter';
 
 const repository: Repository = {
   head: 'abc',
