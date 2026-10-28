@@ -22,6 +22,8 @@ import {
 import {
   addLinked,
   findingsText,
+  LIFECYCLE_SYSTEM,
+  lifecycleText,
   LINKED_NOTE_TOOL,
   linkedContext,
   MAX_FINDINGS,
@@ -44,6 +46,13 @@ import {
   type LinkedState,
 } from './review-summary';
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
+import {
+  createLifecycleWatcher,
+  type LifecycleEvent,
+  type LifecycleKind,
+  type LifecycleRecord,
+} from './lifecycle-watch';
+import { retargetChildren, stricter, type RetargetEntry } from './lifecycle-execution';
 import type {
   CommentDetail,
   FeedbackSnapshot,
@@ -82,6 +91,8 @@ export interface StatusDependencies {
   details?: (request: ReviewRequest, ids: string[]) => Promise<CommentDetail[]>;
   // Reads a note that comments link to. Defaults to its forge's reader.
   linkedNote?: (request: ReviewRequest, url: string) => Promise<LinkedNote | undefined>;
+  // Changes a PR/MR's target branch. Defaults to its forge's retarget action.
+  retarget?: (request: ReviewRequest, branch: string) => Promise<void>;
   now?: () => number;
 }
 
@@ -136,6 +147,19 @@ const SUMMARY_STORE = 'status/summaries/';
 // Summary records outlive their turn only until a user prompt follows, or
 // until this age.
 const SUMMARY_RETENTION = 7 * 24 * 60 * 60_000;
+// Each session target's lifecycle baseline and waiting events, and the
+// retargets Forgekeeper started for merged PRs/MRs.
+const LIFECYCLE_STORE = 'status/lifecycle/';
+const RETARGET_STORE = 'status/retargets/';
+const lifecyclePrefix = (sessionID: string) =>
+  `${LIFECYCLE_STORE}${encodeURIComponent(sessionID)}/`;
+const lifecycleKey = (sessionID: string, url: string) =>
+  `${lifecyclePrefix(sessionID)}${encodeURIComponent(url)}`;
+const retargetKey = (sessionID: string, parent: string, child: string) =>
+  `${RETARGET_STORE}${encodeURIComponent(sessionID)}/${encodeURIComponent(parent)}/${encodeURIComponent(child)}`;
+// Records unchanged for this long, without waiting events, are removed once
+// their session no longer targets the PR/MR.
+const LIFECYCLE_RETENTION = 30 * 24 * 60 * 60_000;
 
 interface SummaryRecord {
   sessionID: string;
@@ -146,6 +170,8 @@ interface SummaryRecord {
   // comments link to any.
   request?: string;
   linked?: LinkedState;
+  // A lifecycle event, which has its own instructions.
+  system?: 'lifecycle';
 }
 
 // The parts of a model request that a summary turn replaces.
@@ -222,7 +248,7 @@ export async function setupStatus(
     now: deps.now,
     // An update reaches its session in the mode it was recorded in, so changing
     // the mode affects only later updates. Turning delivery off stops retries.
-    ...(settings.feedbackDelivery === 'inbox'
+    ...(settings.feedbackDelivery === 'inbox' && settings.lifecycleDelivery === 'inbox'
       ? {}
       : { notify: async (item) => void (await deliver(item)) }),
   });
@@ -289,6 +315,19 @@ export async function setupStatus(
     return record && (deps.now ?? Date.now)() - record.at < SUMMARY_RETENTION ? record : undefined;
   };
 
+  // Whether the session's latest lookup says a conflict announced for the PR/MR
+  // is over: it no longer conflicts, or it merged or closed. Without a lookup
+  // of it, the conflict counts as current.
+  function resolvedConflict(item: Pick<FeedbackItem, 'sessionID' | 'url'>): boolean {
+    const lookup = service.get(item.sessionID).lookup;
+    const request =
+      lookup?.kind === 'found'
+        ? lookup.requests.find((entry) => entry.url === item.url)
+        : undefined;
+    if (!request) return false;
+    return request.state !== 'opened' || (request.conflictsKnown && !request.conflicts);
+  }
+
   // Whether an error says the session doesn't exist, which ends its delivery.
   const missingSession = (error: unknown) =>
     (error as { _tag?: unknown } | null)?._tag === 'SessionNotFoundError' ||
@@ -308,6 +347,7 @@ export async function setupStatus(
     }
     if (!session || session.time?.archived !== undefined) return false;
     if (session.location.directory !== directory) return false;
+    if (item.kind === 'conflict' && resolvedConflict(item)) return false;
     const targets = (await host.state(item.sessionID)).targets;
     if (closing) throw new Error('The plugin stopped');
     return includesRequest(targets, item.url);
@@ -355,8 +395,10 @@ export async function setupStatus(
   }
 
   // Clears a session's updates for PRs/MRs that merged or closed, or that it no
-  // longer targets. Only a finished lookup in this instance says so: before
-  // one, such as right after a reload, the targets aren't known yet.
+  // longer targets, and conflicts that are over. A merge event stays until it's
+  // acknowledged, since the merge is its news. Only a finished lookup in this
+  // instance says so: before one, such as right after a reload, the targets
+  // aren't known yet.
   function clearStale(sessionID: string, snapshot: Snapshot) {
     if (closing || sessionID === HOME || foreign.has(sessionID)) return;
     if (snapshot.loading || snapshot.fetchedAt === undefined || !snapshot.lookup) return;
@@ -372,7 +414,9 @@ export async function setupStatus(
       .prune(
         (item) =>
           item.sessionID === sessionID &&
-          (closed.has(item.url) || !host.isTarget(sessionID, item.url)),
+          (!host.isTarget(sessionID, item.url) ||
+            (item.kind !== 'merged' && closed.has(item.url)) ||
+            (item.kind === 'conflict' && resolvedConflict(item))),
       )
       .catch((error) => reportOnce('inbox', 'Could not clear stale review updates', error));
   }
@@ -398,19 +442,26 @@ export async function setupStatus(
       (reader &&
         ((target: ReviewRequest, ids: string[]) => reader(deps.exec, directory, target, ids)));
     const commentIDs = commentIDsOf(item);
-    const summary = mode === 'summary' && request && details && commentIDs.length;
+    // A lifecycle event is summarized from Forgekeeper's own facts, review
+    // feedback from its comments.
+    const event = item.kind;
+    const review = mode === 'summary' && !event && request && details && commentIDs.length;
+    const summary = (mode === 'summary' && !!event) || !!review;
     if (requested && !summary)
       throw new Error('This update has no comments that can be summarized');
     const messageID = `${summary ? SUMMARY_PREFIX : MESSAGE_PREFIX}${hash}`;
     // The time lets the model say how recent the feedback is.
     const described = `${item.title} (${feedbackTime(item)})`;
-    const read = summary ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2)) : [];
-    const findings = summary
-      ? findingsText(described, item.url, read)
-      : noticeText(described, links);
+    const read = review ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2)) : [];
+    const findings =
+      summary && event
+        ? lifecycleText({ ...item, kind: event }, feedbackTime(item))
+        : review
+          ? findingsText(described, item.url, read)
+          : noticeText(described, links);
     // Only the PR/MR's own comments can name notes to read, as only they
     // reach the summary.
-    const allowed = summary
+    const allowed = review
       ? (
           traitsOf(request).feedback?.linkedNotes?.(
             request,
@@ -438,6 +489,7 @@ export async function setupStatus(
       ...(allowed.length
         ? { request: item.url, linked: { links: allowed, calls: 0, notes: [] } }
         : {}),
+      ...(event ? { system: 'lifecycle' as const } : {}),
     };
     await ctx.storage.set(summaryKey(item.sessionID, messageID), record as never);
     track(item.sessionID, messageID);
@@ -449,11 +501,17 @@ export async function setupStatus(
         item.title,
         feedbackTime(item),
         ...links,
+        // Forgekeeper's own facts, from forge data, such as what it retargeted.
+        ...(event && item.details?.length ? [item.details.join('\n')] : []),
         summary
-          ? allowed.length
-            ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
-            : 'Forgekeeper summarizes this review feedback without tools.'
-          : 'Review update only. No action requested.',
+          ? event
+            ? 'Forgekeeper summarizes this merge request change without tools.'
+            : allowed.length
+              ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
+              : 'Forgekeeper summarizes this review feedback without tools.'
+          : event
+            ? 'Merge request update only. No action requested.'
+            : 'Review update only. No action requested.',
         messageTag(messageID),
       ].join('\n\n'),
       description: item.title,
@@ -811,6 +869,149 @@ export async function setupStatus(
   const human = settings.notifyHumanReviews ? feedbackWatcher(false) : undefined;
   const publishedFeedback = settings.notifyAutomatedReviews ? feedbackWatcher(true) : undefined;
 
+  const readLifecycle = async (prefix: string) =>
+    (await scanAll(prefix)).map(({ value }) => value as LifecycleRecord);
+
+  // A PR/MR read from its forge, past every cache, for execution steps.
+  async function fresh(url: string): Promise<ReviewRequest | undefined> {
+    const ref = parseUrl(url);
+    const forge = ref && deps.forges.forHost(ref.host, directory);
+    if (!ref || !forge) return undefined;
+    return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
+  }
+
+  // The current policy for an event.
+  const policyOf = (kind: LifecycleKind) =>
+    kind === 'merged'
+      ? settings.lifecycleExecution.parentMerged
+      : settings.lifecycleExecution.conflict;
+
+  // Takes a lifecycle event to the inbox, after any follow-up its policy
+  // allows. Resolves `false` to drop the event, and rejects to keep it for a
+  // retry, such as while monitoring is paused.
+  async function recordLifecycle(
+    record: LifecycleRecord,
+    event: LifecycleEvent,
+    records: readonly LifecycleRecord[],
+  ): Promise<boolean> {
+    if (closing) throw new Error('The plugin stopped');
+    let session;
+    try {
+      session = await ctx.session.get({ sessionID: record.sessionID });
+    } catch (error) {
+      if (missingSession(error)) return false;
+      throw error;
+    }
+    if (!session || session.time?.archived !== undefined) return false;
+    // That checkout's instance delivers it.
+    if (session.location.directory !== directory)
+      throw new Error('The session moved to another checkout');
+    if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
+    if (!includesRequest((await host.state(record.sessionID)).targets, record.url)) return false;
+    // A conflict that's already over isn't news.
+    if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
+      return false;
+    const children = records.filter(
+      (entry) => entry.parent === record.url && entry.url !== record.url,
+    );
+    const target = requestOf(record);
+    const retargets = !!deps.retarget || !!(target && traitsOf(target).lifecycle?.retarget);
+    const details =
+      event.kind === 'merged' && children.length
+        ? await retargetChildren({
+            parent: record,
+            children,
+            policy: stricter(event.policy, policyOf('merged')),
+            fetch: fresh,
+            ...(retargets
+              ? {
+                  retarget: async (request: ReviewRequest, branch: string) => {
+                    if (closing) throw new Error('The plugin stopped');
+                    if (deps.retarget) return deps.retarget(request, branch);
+                    await traitsOf(request).lifecycle!.retarget!(
+                      deps.exec,
+                      directory,
+                      request,
+                      branch,
+                    );
+                  },
+                }
+              : {}),
+            journal: {
+              get: async (child) =>
+                (await ctx.storage.get(retargetKey(record.sessionID, record.url, child))) as
+                  | RetargetEntry
+                  | undefined,
+              set: async (child, entry) => {
+                if (closing) throw new Error('The plugin stopped');
+                await ctx.storage.set(
+                  retargetKey(record.sessionID, record.url, child),
+                  entry as never,
+                );
+              },
+            },
+          })
+        : [];
+    const title =
+      event.kind === 'conflict'
+        ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
+        : `${record.reference} merged into ${record.targetBranch}`;
+    const item: FeedbackItem = {
+      id: event.id,
+      kind: event.kind,
+      sessionID: record.sessionID,
+      url: record.url,
+      title,
+      links: [record.url],
+      ...(details.length ? { details } : {}),
+      ...(settings.lifecycleDelivery !== 'inbox' ? { delivery: settings.lifecycleDelivery } : {}),
+      at: event.detectedAt,
+    };
+    // A delivery that fails leaves the update in the inbox, which retries it,
+    // so only a failure to store it keeps the event.
+    await inbox.add(item).catch(async (error) => {
+      if (!(await inbox.list()).items.some((entry) => entry.id === item.id)) throw error;
+    });
+    notice({
+      sessionID: record.sessionID,
+      title,
+      message: 'New merge request update in /forge-feedback.',
+      variant: 'info',
+    });
+    return true;
+  }
+
+  const lifecycle = settings.notifyLifecycle
+    ? createLifecycleWatcher({
+        records: (sessionID) => readLifecycle(lifecyclePrefix(sessionID)),
+        write: async (record) => {
+          if (closing) throw new Error('The plugin stopped');
+          await ctx.storage.set(lifecycleKey(record.sessionID, record.url), record as never);
+        },
+        // Only this checkout's sessions: another checkout's instance owns
+        // the rest.
+        waiting: async () => {
+          const waiting = (await readLifecycle(LIFECYCLE_STORE)).filter(
+            (record) => record.pending.length,
+          );
+          const here = await Promise.all(
+            [...new Set(waiting.map((record) => record.sessionID))].map(async (sessionID) => {
+              const session = await ctx.session.get({ sessionID }).catch(() => undefined);
+              return session?.location.directory === directory ? sessionID : undefined;
+            }),
+          );
+          return waiting.filter((record) => here.includes(record.sessionID));
+        },
+        deliver: recordLifecycle,
+        reference,
+        policy: policyOf,
+        onError: (error) =>
+          reportOnce('lifecycle', 'Could not record merge request changes', error),
+        now: deps.now,
+      })
+    : undefined;
+  const retryLifecycle = () => (lifecycle ? tracked(lifecycle.retry()) : Promise.resolve());
+
   const service = createStatusService({
     async load(key, previous) {
       if (key === HOME) return locate(deps.forges, { directory });
@@ -855,6 +1056,7 @@ export async function setupStatus(
           }
         : undefined,
     feedbackTargets: (sessionID, requests) => subscriptions.update(sessionID, requests),
+    ...(lifecycle ? { lifecycle } : {}),
     onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
@@ -897,13 +1099,26 @@ export async function setupStatus(
       if (closing) return;
       service.pauseFeedback(state.paused);
       await notifyPending();
+      // Events found before a reload or a failure, such as a merge, which
+      // ends polling, still go.
+      if (!state.paused) await retryLifecycle();
       return discovery.refresh();
     })
     .catch((error) => reportOnce('discovery', 'Could not restore feedback monitoring', error));
   const discoveryTimer = setInterval(() => void discovery.refresh(), DISCOVERY_INTERVAL);
   const notificationTimer = setInterval(() => {
-    if (!closing) void notifyPending();
+    if (closing) return;
+    void notifyPending();
+    void retryLifecycle();
   }, FETCH_INTERVAL);
+  // Options that were ignored, such as an execution policy that isn't
+  // supported, fall back to notifying only.
+  if (settings.problems.length)
+    reportOnce(
+      'options',
+      'Some Forgekeeper options were ignored',
+      new Error(settings.problems.join('; ')),
+    );
 
   // Housekeeping, on the write queue so it doesn't hold up setup: removes
   // feedback records not seen for a long time.
@@ -917,6 +1132,15 @@ export async function setupStatus(
       if (at - record.at < SUMMARY_RETENTION) continue;
       await ctx.storage.remove(key);
       summaries.get(record.sessionID)?.delete(record.messageID);
+    }
+    // A record changes only when its PR/MR does, so its age alone doesn't make
+    // it stale: one the session still targets keeps its baseline and its
+    // stack link.
+    for (const { key, value } of await scanAll(LIFECYCLE_STORE)) {
+      const record = value as LifecycleRecord;
+      if (record.pending.length || at - record.at < LIFECYCLE_RETENTION) continue;
+      const targets = await host.storedTargets(record.sessionID).catch(() => undefined);
+      if (targets && !includesRequest(targets, record.url)) await ctx.storage.remove(key);
     }
   });
 
@@ -953,7 +1177,10 @@ export async function setupStatus(
       if (tool) event.tools[LINKED_NOTE_TOOL] = tool;
       event.system.splice(0, event.system.length, {
         type: 'text',
-        text: summarySystem(!!tool, !!linked),
+        text:
+          record !== 'failed' && record.system === 'lifecycle'
+            ? LIFECYCLE_SYSTEM
+            : summarySystem(!!tool, !!linked),
       });
       event.options.maxTokens = SUMMARY_MAX_TOKENS;
       const text =

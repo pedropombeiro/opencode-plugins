@@ -508,10 +508,19 @@ export default {
       const directory = feedbackDirectory();
       const state = await loadFeedback(directory);
       const selected = await context.ui.dialog.select({
-        title: `Review feedback${state.paused ? ' (monitoring paused)' : ''}`,
+        title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
         options: state.items.map((item) => ({
           title: item.title,
-          description: `${context.data.session.get(item.sessionID)?.title ?? item.sessionID} · ${feedbackTime(item)}`,
+          // A lifecycle event's first fact, such as a retarget, shows too.
+          description: [
+            context.data.session.get(item.sessionID)?.title ?? item.sessionID,
+            feedbackTime(item),
+            ...(item.details?.length
+              ? [
+                  `${item.details[0]}${item.details.length > 1 ? ` (+${item.details.length - 1})` : ''}`,
+                ]
+              : []),
+          ].join(' · '),
           value: item.id,
         })),
         actions: [
@@ -532,7 +541,7 @@ export default {
               try {
                 await rpc.summarizeFeedback({ id }, { location: { directory } });
                 context.ui.toast.show({
-                  message: 'Summarizing the review feedback in its session, without tools.',
+                  message: 'Summarizing the update in its session, without tools.',
                   variant: 'info',
                 });
               } catch (error) {

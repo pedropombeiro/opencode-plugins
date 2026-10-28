@@ -30,6 +30,10 @@ interface Common {
   reviewersComplete: boolean;
   targetProject: string;
   targetBranch: string;
+  // Where the PR/MR's commits come from. Absent when the forge doesn't say,
+  // such as for a deleted fork.
+  sourceProject?: string;
+  sourceBranch?: string;
   headSha?: string;
   updatedAt?: string;
   pipeline?: Pipeline;
@@ -120,6 +124,15 @@ export interface ForgeTraits<
   // Optional capabilities. Shared code checks for these, never for a forge.
   readonly automatedReview?: AutomatedReview<Request>;
   readonly feedback?: ReviewFeedback<Request>;
+  readonly lifecycle?: LifecycleActions<Request>;
+}
+
+// Changes Forgekeeper makes on its own for lifecycle events, when the user's
+// policy allows them. Each does one fixed thing.
+export interface LifecycleActions<Request extends ReviewRequest = ReviewRequest> {
+  // Makes the PR/MR target `branch` in its target project. Rejects with the
+  // forge's reason when it refuses.
+  retarget?(run: Exec, directory: string, request: Request, branch: string): Promise<void>;
 }
 
 // `running` reviews poll faster, and a review that goes from `running` to

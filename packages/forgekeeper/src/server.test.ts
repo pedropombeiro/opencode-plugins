@@ -56,6 +56,7 @@ interface Options {
   feedback?: (request: ReviewRequest) => Promise<FeedbackSnapshot | undefined>;
   details?: (request: ReviewRequest, ids: string[]) => Promise<CommentDetail[]>;
   linkedNote?: (request: ReviewRequest, url: string) => Promise<LinkedNote | undefined>;
+  retarget?: (request: ReviewRequest, branch: string) => Promise<void>;
   // Shared with another instance, such as the one after a reload.
   transcripts?: Map<string, Transcript>;
   now?: () => number;
@@ -92,6 +93,12 @@ class StatusForge implements Forge {
       iid,
       url: `https://gitlab.com/${project}/-/merge_requests/${iid}`,
       state: 'opened',
+      conflicts: false,
+      conflictsKnown: true,
+      targetProject: project,
+      targetBranch: 'main',
+      sourceProject: project,
+      sourceBranch: `branch-${iid}`,
       ...overrides,
     } as GitLabMergeRequest);
   }
@@ -410,6 +417,7 @@ async function harness(options: Options = {}) {
               body: `Comment ${id}`,
             }))),
         ...(options.linkedNote ? { linkedNote: options.linkedNote } : {}),
+        ...(options.retarget ? { retarget: options.retarget } : {}),
         ...(options.now ? { now: options.now } : {}),
       }
     : undefined;
@@ -1818,8 +1826,211 @@ describe('PR/MR status lifecycle', () => {
     forge.set('group/a', '1', { state: 'merged' });
     await merging.refresh();
     await settle();
-    expect((await merging.feedback()).items).toEqual([]);
+    // The review update goes; the merge itself is news, so its event stays.
+    expect((await merging.feedback()).items).toMatchObject([
+      { kind: 'merged', title: '!1 merged into main' },
+    ]);
     await merging.cleanup();
+  });
+
+  // A session watching its targets, without review feedback.
+  async function watchedTargets(urls: string[], extra: Partial<Options> = {}) {
+    const forge = extra.status ?? new StatusForge();
+    const app = await harness({ ...extra, status: forge });
+    await app.set({ targets: urls });
+    await app.watch(['one'], 'one');
+    await settle();
+    return { app, forge };
+  }
+  const child = 'https://gitlab.com/group/a/-/merge_requests/2';
+
+  test('announces a target that starts to conflict, once, and clears it once the conflict ends', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const { app } = await watchedTargets([projectA], { status: forge });
+    expect((await app.feedback()).items).toEqual([]);
+    forge.set('group/a', '1', { conflicts: true });
+    await app.refresh();
+    await settle();
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toMatchObject([
+      { kind: 'conflict', url: projectA, title: '!1 can no longer merge: it conflicts with main' },
+    ]);
+    // The inbox mode, the default, posts nothing to the session.
+    expect(app.passive).toEqual([]);
+    forge.set('group/a', '1', { conflicts: false });
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('summarizes a lifecycle event from forge facts in a tool-free turn', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const { app } = await watchedTargets([projectA], {
+      status: forge,
+      pluginOptions: { lifecycleDelivery: 'summary' },
+    });
+    forge.set('group/a', '1', { conflicts: true });
+    await app.refresh();
+    await settle();
+    expect(app.synthetic).toHaveLength(1);
+    expect(app.passive[0].text).toContain('!1 can no longer merge');
+    const summary = await app.request();
+    expect(summary.tools).toEqual({});
+    expect(summary.system[0].text).toContain('change to one of their merge requests');
+    expect(summary.messages).toHaveLength(1);
+    expect(textOf(summary)).toContain(`<mr-event kind="conflict" link="${projectA}">`);
+    expect(await app.toolCall()).toContain('Tools are disabled');
+    await app.cleanup();
+  });
+
+  test('summarizes a lifecycle event recorded in inbox mode when asked to', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const { app } = await watchedTargets([projectA], { status: forge });
+    forge.set('group/a', '1', { state: 'merged' });
+    await app.refresh();
+    await settle();
+    expect(app.passive).toEqual([]);
+    const [item] = (await app.feedback()).items;
+    await app.summarizeFeedback(item.id);
+    expect(app.synthetic).toHaveLength(1);
+    const summary = await app.request();
+    expect(summary.tools).toEqual({});
+    expect(textOf(summary)).toContain(`<mr-event kind="merged" link="${projectA}">`);
+    await app.cleanup();
+  });
+
+  test('records no lifecycle events while monitoring is paused', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const { app } = await watchedTargets([projectA], { status: forge });
+    await app.pauseFeedback(true);
+    forge.set('group/a', '1', { conflicts: true });
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('retargets a dependent target once its parent merges, when the policy allows it', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    forge.set('group/a', '2', { targetBranch: 'branch-1' });
+    const calls: string[] = [];
+    const { app } = await watchedTargets([projectA, child], {
+      status: forge,
+      pluginOptions: {
+        lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
+      },
+      retarget: async (request, branch) => {
+        calls.push(`${request.iid} ${branch}`);
+        forge.set('group/a', request.iid, { targetBranch: branch });
+      },
+    });
+    forge.set('group/a', '1', { state: 'merged' });
+    await app.refresh();
+    await settle();
+    expect(calls).toEqual(['2 main']);
+    expect((await app.feedback()).items).toMatchObject([
+      {
+        kind: 'merged',
+        title: '!1 merged into main',
+        details: ['Retargeted !2 from branch-1 to main.'],
+      },
+    ]);
+    // A later lookup changes nothing more.
+    await app.refresh();
+    await settle();
+    expect(calls).toHaveLength(1);
+    await app.cleanup();
+  });
+
+  test('only proposes the retarget by default, and changes nothing', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    forge.set('group/a', '2', { targetBranch: 'branch-1' });
+    const calls: string[] = [];
+    const { app } = await watchedTargets([projectA, child], {
+      status: forge,
+      retarget: async (request) => void calls.push(request.iid),
+    });
+    forge.set('group/a', '1', { state: 'merged' });
+    await app.refresh();
+    await settle();
+    expect(calls).toEqual([]);
+    expect((await app.feedback()).items).toMatchObject([
+      { kind: 'merged', details: ['!2 builds on !1: it targets branch-1.'] },
+    ]);
+    await app.cleanup();
+  });
+
+  test('delivers a waiting merge after a reload, under the policy it happened with', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1', { state: 'merged' });
+    forge.set('group/a', '2', { targetBranch: 'branch-1' });
+    const record = (iid: string, overrides: Record<string, unknown>) => ({
+      sessionID: 'one',
+      url: `https://gitlab.com/group/a/-/merge_requests/${iid}`,
+      reference: `!${iid}`,
+      state: 'opened',
+      cycles: 0,
+      targetProject: 'group/a',
+      targetBranch: 'main',
+      sourceProject: 'group/a',
+      sourceBranch: `branch-${iid}`,
+      pending: [],
+      at: 0,
+      ...overrides,
+    });
+    const key = (url: string) => `status/lifecycle/one/${encodeURIComponent(url)}`;
+    const id = JSON.stringify(['one', projectA, 'merged']);
+    const storage = new Map<string, unknown>([
+      ['sessions/one', { targets: [{ url: projectA }, { url: child }] }],
+      [
+        key(projectA),
+        record('1', {
+          state: 'merged',
+          pending: [{ kind: 'merged', id, detectedAt: 5, policy: { mode: 'notify', actions: [] } }],
+        }),
+      ],
+      [key(child), record('2', { targetBranch: 'branch-1', parent: projectA })],
+    ]);
+    const calls: string[] = [];
+    // Execution was enabled after the merge, which nothing polls anymore.
+    const app = await harness({
+      storage,
+      status: forge,
+      pluginOptions: {
+        lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
+      },
+      retarget: async (request) => void calls.push(request.iid),
+    });
+    await settle();
+    expect(calls).toEqual([]);
+    expect((await app.feedback()).items).toMatchObject([
+      { id, kind: 'merged', at: 5, details: ['!2 builds on !1: it targets branch-1.'] },
+    ]);
+    expect((storage.get(key(projectA)) as { pending: unknown[] }).pending).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('warns about ignored execution options and falls back to notifying', async () => {
+    const app = await harness({
+      status: new StatusForge(),
+      pluginOptions: { lifecycleExecution: { conflict: { mode: 'apply', actions: ['push'] } } },
+    });
+    await settle();
+    expect(app.notices()).toContainEqual(
+      expect.objectContaining({
+        variant: 'error',
+        message: expect.stringContaining('lifecycleExecution.conflict: unsupported actions'),
+      }),
+    );
+    await app.cleanup();
   });
 
   test('keeps updates across a reload until a finished lookup shows them stale', async () => {

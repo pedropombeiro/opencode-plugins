@@ -30,6 +30,8 @@ export interface StatusServiceOptions {
     watches?: (request: ReviewRequest) => boolean;
   };
   feedbackTargets?: (sessionID: string, requests: ReviewRequest[]) => void;
+  // Receives each lookup's targets, in every state, for lifecycle events.
+  lifecycle?: { observe: (sessionID: string, requests: ReviewRequest[]) => Promise<unknown> };
   onWatchError?: (error: unknown) => void;
   interval?: number;
   activeInterval?: number;
@@ -156,6 +158,9 @@ export function createStatusService(options: StatusServiceOptions) {
           .finally(() => sync(key)),
       );
     }
+    const current = targets(key, next);
+    if (!feedbackPaused && options.lifecycle && current.length)
+      track(options.lifecycle.observe(key, current).catch(report));
     for (const request of feedbackPaused ? [] : watchedForFeedback(key, next)) {
       track(
         Promise.resolve()

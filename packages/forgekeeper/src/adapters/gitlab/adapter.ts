@@ -37,6 +37,7 @@ interface MergeRequestNode {
   diffHeadSha: string | null;
   updatedAt: string | null;
   targetBranch: string;
+  sourceBranch: string;
   sourceProject: { fullPath: string } | null;
   targetProject: { fullPath: string };
   headPipeline: {
@@ -66,8 +67,11 @@ const DISCUSSIONS = 'pageInfo { hasNextPage endCursor } nodes { resolvable resol
 const PAGE_SIZE = 100;
 export const MAX_DISCUSSION_PAGES = 50;
 
+// Merge statuses during which GitLab hasn't settled whether the MR conflicts.
+const RECHECKING = new Set(['CHECKING', 'UNCHECKED', 'PREPARING']);
+
 const MERGE_REQUEST_FIELDS = `
-  iid title webUrl state draft conflicts approved detailedMergeStatus diffHeadSha updatedAt targetBranch
+  iid title webUrl state draft conflicts approved detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
   approvedBy(first: 100) { nodes { id bot } }
   sourceProject { fullPath }
   targetProject { fullPath }
@@ -255,7 +259,35 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
       return ref ? fetchLinkedNote(glabGraphQL(run, directory), ref.host, url) : undefined;
     },
   },
+  lifecycle: {
+    async retarget(run, directory, request, branch) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      if (!ref) throw new Error(`Not a merge request URL: ${request.url}`);
+      const data = await typed(glabGraphQL(run, directory))(ref.host, RETARGET_MUTATION, {
+        project: ref.project,
+        iid: ref.iid,
+        branch,
+      });
+      const result = data.mergeRequestUpdate;
+      const errors = result?.errors ?? [];
+      if (errors.length) throw new Error(errors.join('; '));
+      if (result?.mergeRequest?.targetBranch !== branch)
+        throw new Error(
+          `GitLab kept the target ${result?.mergeRequest?.targetBranch ?? 'unknown'}`,
+        );
+    },
+  },
 };
+
+// Changes only the target branch. GitLab offers no condition on the current
+// target, so the caller reads the MR right before and after.
+const RETARGET_MUTATION = query<{
+  mergeRequestUpdate?: { errors: string[]; mergeRequest?: { targetBranch: string } | null } | null;
+}>(`mutation($project: ID!, $iid: String!, $branch: String!) {
+  mergeRequestUpdate(input: { projectPath: $project, iid: $iid, targetBranch: $branch }) {
+    errors mergeRequest { targetBranch }
+  }
+}`);
 
 // Final Duo states that can leave feedback to act on. An approval, or a review
 // that was reset to unreviewed, needs nothing from the agent. New GitLab
@@ -387,7 +419,9 @@ export class GitLabForge implements Forge {
       state: node.state.toLowerCase(),
       draft: node.draft,
       conflicts: node.conflicts,
-      conflictsKnown: true,
+      // While GitLab recalculates mergeability, `conflicts` may describe an
+      // older commit.
+      conflictsKnown: !RECHECKING.has(node.detailedMergeStatus ?? ''),
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
@@ -396,6 +430,8 @@ export class GitLabForge implements Forge {
       mergeStatus: node.detailedMergeStatus ?? undefined,
       targetProject: node.targetProject.fullPath,
       targetBranch: node.targetBranch,
+      ...(node.sourceProject ? { sourceProject: node.sourceProject.fullPath } : {}),
+      sourceBranch: node.sourceBranch,
       headSha: node.diffHeadSha ?? undefined,
       updatedAt: node.updatedAt ?? undefined,
       pipeline: pipeline

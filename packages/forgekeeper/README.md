@@ -494,6 +494,78 @@ The baseline also records comment IDs at its timestamp, so a new comment posted 
 second can still be announced. Baselines stored by older plugin versions retain their
 timestamp-only behavior until a new baseline is created.
 
+## Merge request updates
+
+Forgekeeper also watches each session's explicit PR/MR targets for two changes:
+
+- **Conflicts:** a target that could merge starts to conflict with its target branch.
+- **Merges:** a target merges.
+
+Both come from the forge's own state, compared between two lookups, never from comments
+such as GitLab's "can no longer be merged" note. The first lookup of a target only records
+it, so nothing that happened earlier is announced, including after a restart. A
+mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
+push, keeps the last known state. A conflict that ends and starts again is a new update.
+Sessions are watched the same way as for review feedback, without visiting their tabs.
+
+Each change waits in the target's record until it reaches the inbox, in the same storage
+write as the record. A merge stops polling, so waiting changes are retried every minute
+and after a reload, without another lookup. Updates go to `/forge-feedback`, and
+`lifecycleDelivery` sets what else they do: `"inbox"`, the default, `"passive"`, or
+`"summary"`, as for [review feedback](#review-notifications). A summary turn has no
+tools, and gets only Forgekeeper's facts about the change, never comments.
+
+A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
+until you acknowledge it, because the merge is the news. Updates for targets the session
+drops clear right away. Turning `notifyLifecycle` off stops both kinds.
+
+### Stacked PRs/MRs
+
+A target **builds on** another of the session's targets when it targets that one's source
+branch in the same project, on the same host. Forgekeeper links them only when exactly one
+target matches, and keeps the link once the parent merges, because forges may retarget the
+dependent PR/MR or delete the merged branch at that point. Sharing a session doesn't make
+two PRs/MRs a stack.
+
+When a parent merges, its update lists each dependent, and `lifecycleExecution.parentMerged`
+sets what Forgekeeper does about them:
+
+| Mode        | What happens                                                                         |
+| ----------- | ------------------------------------------------------------------------------------ |
+| `"notify"`  | The default. The update names the dependents and the branch they target.             |
+| `"prepare"` | Forgekeeper reads each dependent again and says how it would retarget it, if at all. |
+| `"apply"`   | It also retargets them, but only with `"actions": ["retarget"]`.                     |
+
+```json
+{
+  "lifecycleExecution": { "parentMerged": { "mode": "apply", "actions": ["retarget"] } }
+}
+```
+
+Forgekeeper retargets a dependent to the branch the parent merged into, and only when it
+still targets the parent's source branch in the same project. It reads the dependent from
+the forge right before and after, so one the forge already retargeted counts as done, and
+one that targets something else, closed, or merged keeps its target. A parent from a fork
+isn't retargeted to, since its branch lives in another project. Each retarget's progress
+is stored: a reload doesn't repeat a finished one, and a retarget whose response was lost
+counts as done once the dependent targets the new branch. The update's details report each
+outcome.
+
+This is Forgekeeper's own action, through one fixed forge operation: no model or agent
+tool takes part, and nothing touches your checkout, so it doesn't wait for the session to
+be idle. It changes no reviewers, assignments, or discussions, and never merges anything.
+Each event keeps the policy it happened under, and the stricter of that and the current
+policy applies, so enabling `apply` never acts on earlier merges. GitLab supports
+retargeting; GitHub dependents get a proposal instead. GitLab has no conditional update,
+so a change made in the moment between Forgekeeper's read and its retarget is
+overwritten; the read afterwards reports what the MR targets then.
+
+`lifecycleExecution.conflict` supports only `"notify"` for now. Preparing or resolving
+conflicts needs your checkout, so it needs a lock across OpenCode instances and a way to
+tie tool calls to their step, which OpenCode's plugin API doesn't provide yet. An invalid or
+unsupported policy, such as `"apply"` without actions, falls back to `"notify"`, and
+Forgekeeper shows an error toast saying which options it ignored.
+
 ## Options
 
 ### Monitoring security boundary
@@ -514,6 +586,11 @@ the comments link to, as described in [Linked notes](#linked-notes). It reads wi
 those links name. No mode executes commands from
 review content, edits repository files, commits, pushes, posts replies, or resolves
 discussions.
+
+The one change Forgekeeper makes on a forge is retargeting a stacked MR after its parent
+merges, and only with `lifecycleExecution.parentMerged` set to `"apply"` with the
+`retarget` action. It uses GitLab's `mergeRequestUpdate` mutation with only the target
+branch, through your `glab` credentials. See [Stacked PRs/MRs](#stacked-prsmrs).
 Comment links are opened only after user selection and must use HTTPS on the target's
 origin without embedded credentials. Review bodies remain external data, not trusted
 instructions. Analysis and remediation are outside this feature's scope.
@@ -541,6 +618,9 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `notifyAutomatedReviews` | `true`           | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                        |
 | `notifyHumanReviews`     | `true`           | Surface new human review feedback.                                                                                           |
 | `reviewFeedbackDelivery` | `"inbox"`        | What an update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns). |
+| `notifyLifecycle`        | `true`           | Surface targets that start to conflict and targets that merge. See [Merge request updates](#merge-request-updates).          |
+| `lifecycleDelivery`      | `"inbox"`        | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                         |
+| `lifecycleExecution`     | all `"notify"`   | What Forgekeeper does about each event: `parentMerged` and `conflict`. See [Stacked PRs/MRs](#stacked-prsmrs).               |
 
 The server entry point reads every option, so changing one takes effect when the server
 plugin reloads. The CLI has no options of its own. Each checkout's server reads the
@@ -636,7 +716,8 @@ been removed; saved values have no effect. Set `reviewStatus` to `false` to keep
 - `src/status-client.ts` holds the CLI's leases, snapshots, and per-directory settings.
   `src/tui.tsx` connects it to the RPC and renders the footer, dialog, commands, and notices.
 - `src/forge.ts` defines the forge-neutral types, the `Forge` adapter interface, and
-  `ForgeTraits` with its optional `automatedReview` and `feedback` capabilities.
+  `ForgeTraits` with its optional `automatedReview`, `feedback`, and `lifecycle`
+  capabilities.
 - `src/adapters/gitlab/feedback.ts` and `src/adapters/github/feedback.ts` read each forge's
   comments for its `feedback` capability.
 - `src/adapters/gitlab/adapter.ts` and `src/adapters/github/adapter.ts` provide each forge's
@@ -652,6 +733,10 @@ been removed; saved values have no effect. Set `reviewStatus` to `false` to keep
   renders the footer and dialog.
 - `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
   agent.
+- `src/lifecycle-watch.ts` finds conflicts, merges, and stack links between lookups, and
+  keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` works out and
+  carries out retargets of stacked PRs/MRs.
+- `src/adapters/gitlab/linked-notes.ts` finds and reads the notes review comments link to.
 
 Shared code never compares a forge against a specific name. It asks the forge's traits, or
 checks for a capability, instead. To add a forge, add its kind to `ForgeKind` and
