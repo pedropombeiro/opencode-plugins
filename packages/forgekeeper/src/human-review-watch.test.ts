@@ -47,6 +47,85 @@ const seen = (baseline = 0, ...announced: string[]): SeenComments => ({
 });
 
 describe('eligibleFeedback', () => {
+  test('subscription-backed checks refetch before delivery, reconcile, and resume polling after disconnect', async () => {
+    let clock = 0;
+    let connected = true;
+    let reads = 0;
+    let sent = 0;
+    let current = snapshot();
+    const watcher = createFeedbackWatcher({
+      record: async () => undefined,
+      persist: () => {},
+      current: () => true,
+      fetch: async () => {
+        reads++;
+        return current;
+      },
+      send: async () => {
+        sent++;
+      },
+      now: () => clock,
+      interval: () => (connected ? 15 * MINUTE : FETCH_INTERVAL),
+    });
+    await watcher.check('one', mr);
+    current = snapshot(comment('1', { editedAt: MINUTE }));
+    clock = MINUTE;
+    await watcher.check('one', mr);
+    expect(reads).toBe(1);
+    watcher.invalidate('one', mr);
+    await watcher.check('one', mr);
+    expect(reads).toBe(2);
+    clock += SETTLE_TIME;
+    current = snapshot(comment('1', { resolved: true }));
+    await watcher.check('one', mr);
+    expect(reads).toBe(3);
+    expect(sent).toBe(0);
+    clock += 15 * MINUTE;
+    await watcher.check('one', mr);
+    expect(reads).toBe(4);
+    connected = false;
+    clock += FETCH_INTERVAL;
+    await watcher.check('one', mr);
+    expect(reads).toBe(5);
+    current = snapshot(comment('2', { editedAt: clock }));
+    connected = true;
+    watcher.invalidate('one', mr);
+    await watcher.check('one', mr);
+    clock += SETTLE_TIME;
+    await watcher.check('one', mr);
+    expect(sent).toBe(1);
+  });
+
+  test('an event during a fetch discards stale feedback and preserves a follow-up fetch', async () => {
+    let release!: (value: FeedbackSnapshot) => void;
+    let calls = 0;
+    let sent = 0;
+    const watcher = createFeedbackWatcher({
+      record: async () => ({ baseline: 0, announced: [], seenAt: 0 }),
+      persist: () => {},
+      current: () => true,
+      fetch: async () => {
+        calls++;
+        return calls === 1
+          ? new Promise<FeedbackSnapshot>((resolve) => {
+              release = resolve;
+            })
+          : snapshot();
+      },
+      send: async () => {
+        sent++;
+      },
+      now: () => SETTLE_TIME,
+    });
+    const first = watcher.check('one', mr);
+    watcher.invalidate('one', mr);
+    release(snapshot(comment('1')));
+    await first;
+    await watcher.check('one', mr);
+    expect(calls).toBe(2);
+    expect(sent).toBe(0);
+  });
+
   test('recognizes unseen IDs at the baseline timestamp', () => {
     const comments = snapshot(comment('1', { order: 100 }), comment('2', { order: 100 }));
     expect(

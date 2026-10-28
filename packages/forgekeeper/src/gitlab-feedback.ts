@@ -1,7 +1,7 @@
 // Reads a GitLab MR's comments for GitLab's `feedback` capability.
 import type { FeedbackSnapshot, ReviewComment } from './forge';
 import type { GraphQL } from './gitlab';
-import { query, typed } from './graphql';
+import { query, typed, type Query } from './graphql';
 
 interface NoteNode {
   id: string;
@@ -10,6 +10,8 @@ interface NoteNode {
   updatedAt: string | null;
   lastEditedAt: string | null;
   system: boolean;
+  position?: { newPath: string | null } | null;
+  duoCreatedSession?: { id: string; status: string; workflowDefinition: string | null } | null;
   discussion: { resolved: boolean } | null;
   author: { id: string; username: string; bot: boolean } | null;
 }
@@ -39,6 +41,7 @@ export const COMMENTS_QUERY = query<{
         pageInfo { hasPreviousPage startCursor }
         nodes {
           id url createdAt updatedAt lastEditedAt system
+          position { newPath }
           discussion { resolved }
           author { id username bot }
         }
@@ -46,6 +49,14 @@ export const COMMENTS_QUERY = query<{
     }
   }
 }`);
+
+type CommentData = typeof COMMENTS_QUERY extends Query<infer Data> ? Data : never;
+export const DUO_COMMENTS_QUERY = query<CommentData>(
+  String(COMMENTS_QUERY).replace(
+    'position { newPath }',
+    'position { newPath } duoCreatedSession { id status workflowDefinition }',
+  ),
+);
 
 // GitLab's global ID prefix changes with the note's type, for example when a
 // reply turns a comment into a discussion, so only the number identifies it.
@@ -71,6 +82,20 @@ export function toComment(node: NoteNode): ReviewComment | undefined {
     bot: node.author.bot,
     authorID: node.author.id,
     username: node.author.username,
+    ...(node.author.bot && node.author.username.toLowerCase() === 'gitlabduo'
+      ? {
+          automated: {
+            reviewer: 'GitLab Duo',
+            finding: !!node.position,
+            ...(node.duoCreatedSession?.workflowDefinition === 'code_review/v1'
+              ? {
+                  runID: node.duoCreatedSession.id,
+                  status: node.duoCreatedSession.status,
+                }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -86,6 +111,7 @@ export async function fetchComments(
   const pages: ReviewComment[][] = [];
   let viewerID: string | undefined;
   let before: string | undefined;
+  let workflowFields = true;
   const snapshot = (complete: boolean): FeedbackSnapshot => ({
     // Without the viewer's ID, their own comments can't be told apart.
     complete: complete && viewerID !== undefined,
@@ -95,7 +121,20 @@ export async function fetchComments(
   for (let page = 0; page < MAX_COMMENT_PAGES; page++) {
     const variables: Record<string, string> = { project, iid };
     if (before) variables.before = before;
-    const data = await graphql(host, COMMENTS_QUERY, variables);
+    let data;
+    try {
+      data = await graphql(host, workflowFields ? DUO_COMMENTS_QUERY : COMMENTS_QUERY, variables);
+    } catch (error) {
+      if (
+        !workflowFields ||
+        !/duoCreatedSession.*(?:doesn't exist|not defined|unknown)|(?:undefinedField|unknown field).*duoCreatedSession/i.test(
+          error instanceof Error ? error.message : String(error),
+        )
+      )
+        throw error;
+      workflowFields = false;
+      data = await graphql(host, COMMENTS_QUERY, variables);
+    }
     viewerID ??= data.currentUser?.id ?? undefined;
     const connection = data.project?.mergeRequest?.notes;
     if (!connection) return page === 0 ? undefined : snapshot(false);

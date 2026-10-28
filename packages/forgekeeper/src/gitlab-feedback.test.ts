@@ -29,6 +29,28 @@ const page = (
 });
 
 describe('toComment', () => {
+  test('classifies Duo diff findings and workflow identity without treating summaries as findings', () => {
+    const author = { id: 'duo', username: 'GitLabDuo', bot: true };
+    const duoCreatedSession = {
+      id: 'workflow-1',
+      status: 'FINISHED',
+      workflowDefinition: 'code_review/v1',
+    };
+    expect(
+      toComment(node('5', { author, position: { newPath: 'src/a.ts' }, duoCreatedSession }))
+        ?.automated,
+    ).toEqual({ reviewer: 'GitLab Duo', finding: true, runID: 'workflow-1', status: 'FINISHED' });
+    expect(
+      toComment(node('6', { author, position: null, duoCreatedSession: null }))?.automated,
+    ).toEqual({ reviewer: 'GitLab Duo', finding: false });
+    expect(
+      toComment(node('7', { author, position: { newPath: 'a' }, duoCreatedSession: null }))
+        ?.automated,
+    ).toEqual({ reviewer: 'GitLab Duo', finding: true });
+    expect(
+      toComment(node('8', { position: { newPath: 'a' }, duoCreatedSession }))?.automated,
+    ).toBeUndefined();
+  });
   test('uses the numeric ID as the order and the last edit time', () => {
     expect(toComment(node('5'))).toEqual({
       id: '5',
@@ -64,6 +86,28 @@ describe('toComment', () => {
 });
 
 describe('fetchComments', () => {
+  test('falls back for older GitLab schemas without hiding other errors', async () => {
+    const queries: string[] = [];
+    const transport: GraphQL = async (_host, query) => {
+      queries.push(query);
+      if (query.includes('duoCreatedSession'))
+        throw new Error("Field 'duoCreatedSession' doesn't exist on type 'Note'");
+      return page([node('1')]);
+    };
+    expect((await fetchComments(transport, 'gitlab.com', 'g/p', '1'))?.complete).toBe(true);
+    expect(queries).toHaveLength(2);
+    expect(queries[1]).not.toContain('duoCreatedSession');
+    await expect(
+      fetchComments(
+        async () => {
+          throw new Error('rate limit');
+        },
+        'gitlab.com',
+        'g/p',
+        '1',
+      ),
+    ).rejects.toThrow('rate limit');
+  });
   test('pages backwards from the newest comment and returns them oldest first', async () => {
     const calls: Record<string, string>[] = [];
     const graphql: GraphQL = async (_host, _query, variables) => {

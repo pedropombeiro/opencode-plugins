@@ -2,13 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { statusOptions } from './options';
 
 describe('statusOptions', () => {
-  test('turns everything on by default', () => {
+  test('monitors feedback without resuming sessions by default', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
       pollSeconds: 120,
       notifyAutomatedReviews: true,
       notifyHumanReviews: true,
-      resumeSession: true,
     });
   });
 
@@ -19,14 +18,12 @@ describe('statusOptions', () => {
         pollSeconds: 45,
         notifyAutomatedReviews: false,
         notifyHumanReviews: false,
-        resumeSession: false,
       }),
     ).toEqual({
       enabled: false,
       pollSeconds: 45,
       notifyAutomatedReviews: false,
       notifyHumanReviews: false,
-      resumeSession: false,
     });
   });
 

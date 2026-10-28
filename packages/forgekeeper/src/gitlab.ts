@@ -14,6 +14,8 @@ import {
 } from './forge';
 import type { RemoteProject, Repository } from './git';
 import { fetchComments } from './gitlab-feedback';
+import { duoFindings, duoReady } from './gitlab-review-feedback';
+import { subscribeToNotes } from './gitlab-subscription';
 import { query, typed, type Query, type Transport, type Typed } from './graphql';
 
 interface DiscussionPage {
@@ -222,6 +224,7 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     return lines;
   },
   automatedReview: {
+    publishedFeedback: { storageKey: 'duo', select: duoFindings, ready: duoReady },
     name: 'GitLab Duo',
     status(request) {
       const state = request.duoReviewState;
@@ -230,6 +233,7 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     },
   },
   feedback: {
+    subscribe: subscribeToNotes,
     async fetch(run, directory, request) {
       const ref = gitlabTraits.parseUrl(request.url);
       return ref

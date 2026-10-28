@@ -136,7 +136,17 @@ export async function setupServer(
         return {};
       },
       refresh: async ({ key }) =>
-        watcher ? { enabled: true, snapshot: json(await watcher.service.refresh(key)) } : DISABLED,
+        watcher ? { enabled: true, snapshot: json(await watcher.refresh(key)) } : DISABLED,
+      feedback: async () => (watcher ? watcher.inbox.list() : { items: [], paused: false }),
+      acknowledgeFeedback: async ({ id }) =>
+        watcher ? watcher.inbox.acknowledge(id) : { items: [], paused: false },
+      pauseFeedback: async ({ paused }) => {
+        if (!watcher) return { items: [], paused: false };
+        const state = await watcher.inbox.pause(paused);
+        watcher.service.pauseFeedback(paused);
+        await watcher.discovery.refresh();
+        return state;
+      },
     }),
   );
 
@@ -150,6 +160,10 @@ export async function setupServer(
           .emit('status', { directory: ctx.location.directory, key, snapshot: json(snapshot) })
           .catch(() => {}),
       notice: (notice) => void rpc.events.emit('notice', json(notice)).catch(() => {}),
+      feedbackChanged: () =>
+        void rpc.events
+          .emit('feedbackChanged', { directory: ctx.location.directory })
+          .catch(() => {}),
     });
   }
 

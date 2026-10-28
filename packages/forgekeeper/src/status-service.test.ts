@@ -32,6 +32,7 @@ function harness({
   const checked: string[] = [];
   const observed: string[] = [];
   const removed = new Set<string>();
+  const subscribed = new Map<string, ReviewRequest[]>();
   const service = createStatusService({
     load: async (key) => {
       loads.push(key);
@@ -40,6 +41,9 @@ function harness({
     isTarget: (_sessionID, url) => !removed.has(url),
     owns,
     publish: () => {},
+    feedbackTargets: (key, requests) => {
+      subscribed.set(key, requests);
+    },
     automated: {
       observe: async (sessionID) => void observed.push(sessionID),
       hasPending: (sessionID) => pending() && sessionID !== HOME,
@@ -70,6 +74,7 @@ function harness({
     checked,
     observed,
     removed,
+    subscribed,
     async advance(ms: number) {
       const end = clock + ms;
       for (;;) {
@@ -89,6 +94,47 @@ function harness({
 }
 
 describe('createStatusService', () => {
+  test('routes feedback events to active sessions and drops subscriptions on pause or expiry', async () => {
+    const app = harness({ human: true });
+    app.lookups.set('one', targets(mr()));
+    app.lookups.set('two', targets(mr()));
+    app.service.discover(['one', 'two']);
+    await app.advance(0);
+    expect(app.subscribed.get('one')).toEqual([mr()]);
+    app.checked.length = 0;
+    const invalidated: string[] = [];
+    app.service.checkFeedback(mr().url, (key) => {
+      invalidated.push(key);
+    });
+    await app.advance(0);
+    expect(invalidated).toEqual(['one', 'two']);
+    expect(app.checked).toEqual(['one 1', 'two 1']);
+    app.service.pauseFeedback(true);
+    expect(app.subscribed.get('one')).toEqual([]);
+    expect(app.subscribed.get('two')).toEqual([]);
+    app.service.checkFeedback(mr().url, () => {
+      throw new Error('Paused');
+    });
+    app.service.pauseFeedback(false);
+    expect(app.subscribed.get('one')).toEqual([mr()]);
+    app.service.discover([]);
+    expect(app.subscribed.get('one')).toEqual([]);
+    await app.service.dispose();
+  });
+  test('polls discovered open targets without a CLI and stops closed or expired sessions', async () => {
+    const app = harness({ human: true });
+    app.lookups.set('one', targets(mr()));
+    app.lookups.set('closed', targets(mr({ state: 'merged' })));
+    app.service.discover(['one', 'closed']);
+    await app.advance(0);
+    expect(app.service.polling('one')).toBe(true);
+    expect(app.service.polling('closed')).toBe(false);
+    expect(app.checked).toEqual(['one 1']);
+    app.service.discover([]);
+    expect(app.service.polling('one')).toBe(false);
+    await app.service.dispose();
+  });
+
   test('polls a visible key, and stops once it is hidden without reviews to watch', async () => {
     const app = harness();
     app.lookups.set('ses_1', targets(mr()));
@@ -103,6 +149,29 @@ describe('createStatusService', () => {
     expect(app.service.polling('ses_1')).toBe(false);
     await app.advance(500);
     expect(app.loads).toHaveLength(2);
+  });
+
+  test('restarts a discovered session when a closed target changes to an open target without a CLI', async () => {
+    const app = harness({ human: true });
+    const closed = mr({ state: 'merged' });
+    const opened = mr({ iid: '2', url: 'https://gitlab.com/g/p/-/merge_requests/2' });
+    app.lookups.set('one', targets(closed));
+    app.service.discover(['one']);
+    await app.advance(0);
+    expect(app.service.polling('one')).toBe(false);
+    app.removed.add(closed.url);
+    app.lookups.set('one', targets(opened));
+    app.service.invalidate('one');
+    await app.advance(0);
+    expect(app.loads).toEqual(['one', 'one']);
+    expect(app.service.polling('one')).toBe(true);
+    expect(app.checked).toEqual(['one 2']);
+    expect(app.subscribed.get('one')).toEqual([opened]);
+    await app.advance(100);
+    expect(app.loads).toEqual(['one', 'one', 'one']);
+    app.service.discover([]);
+    expect(app.service.polling('one')).toBe(false);
+    await app.service.dispose();
   });
 
   test('keeps a hidden session polling while its review runs, even after its title or targets change', async () => {

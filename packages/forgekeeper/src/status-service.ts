@@ -25,7 +25,11 @@ export interface StatusServiceOptions {
   owns?: (sessionID: string) => boolean;
   publish: (key: string, snapshot: Snapshot) => void;
   automated?: Pick<AutomatedReviewWatcher, 'observe' | 'hasPending'>;
-  human?: { check: (sessionID: string, request: ReviewRequest) => unknown };
+  human?: {
+    check: (sessionID: string, request: ReviewRequest) => unknown;
+    watches?: (request: ReviewRequest) => boolean;
+  };
+  feedbackTargets?: (sessionID: string, requests: ReviewRequest[]) => void;
   onWatchError?: (error: unknown) => void;
   interval?: number;
   activeInterval?: number;
@@ -52,6 +56,8 @@ export function createStatusService(options: StatusServiceOptions) {
   const leaseTime = options.leaseTime ?? LEASE_TIME;
   const leases = new Map<string, Map<string, Lease>>();
   const holds = new Map<string, () => void>();
+  let discovered = new Set<string>();
+  let feedbackPaused = false;
   // Watcher work in progress, which `dispose` waits for.
   const tasks = new Set<Promise<unknown>>();
   const track = (task: Promise<unknown>) => {
@@ -92,12 +98,16 @@ export function createStatusService(options: StatusServiceOptions) {
   const watchedForFeedback = (key: string, lookup: Lookup | undefined) =>
     options.human
       ? targets(key, lookup).filter(
-          (request) => traitsOf(request).feedback && request.state === 'opened',
+          (request) =>
+            traitsOf(request).feedback &&
+            request.state === 'opened' &&
+            (options.human?.watches?.(request) ?? true),
         )
       : [];
 
   // Whether a session needs polling even when no CLI shows it.
   function needsWatch(key: string): boolean {
+    if (feedbackPaused) return false;
     const lookup = store.get(key).lookup;
     if (options.automated) {
       if (targets(key, lookup).some((request) => automatedReview(request)?.state === 'running'))
@@ -119,17 +129,25 @@ export function createStatusService(options: StatusServiceOptions) {
     if (disposed) return;
     const live = liveLeases(key);
     const wanted =
-      live.length > 0 && (live.some((lease) => lease.visible) || unknown(key) || needsWatch(key));
+      (discovered.has(key) &&
+        owns(key) &&
+        (unknown(key) ||
+          targets(key, store.get(key).lookup).some((request) => request.state === 'opened'))) ||
+      (live.length > 0 && (live.some((lease) => lease.visible) || unknown(key) || needsWatch(key)));
     const release = holds.get(key);
     if (wanted && !release) holds.set(key, store.acquire(key));
     else if (!wanted && release) {
       release();
       holds.delete(key);
     }
+    options.feedbackTargets?.(
+      key,
+      wanted && !feedbackPaused ? watchedForFeedback(key, store.get(key).lookup) : [],
+    );
   }
 
   function onLoad(key: string, previous: Lookup | undefined, next: Lookup) {
-    if (owns(key) && options.automated) {
+    if (!feedbackPaused && owns(key) && options.automated) {
       track(
         options.automated
           .observe(key, previous, next)
@@ -137,7 +155,7 @@ export function createStatusService(options: StatusServiceOptions) {
           .finally(() => sync(key)),
       );
     }
-    for (const request of watchedForFeedback(key, next)) {
+    for (const request of feedbackPaused ? [] : watchedForFeedback(key, next)) {
       track(
         Promise.resolve()
           .then(() => options.human?.check(key, request))
@@ -178,6 +196,15 @@ export function createStatusService(options: StatusServiceOptions) {
   }
 
   return {
+    pauseFeedback(paused: boolean) {
+      feedbackPaused = paused;
+      for (const key of holds.keys()) sync(key);
+    },
+    discover(keys: string[]) {
+      const changed = new Set([...discovered, ...keys]);
+      discovered = new Set(keys);
+      for (const key of changed) sync(key);
+    },
     // Renews a CLI's leases: `keys` are the keys it has shown, and `visible`
     // is the one on screen. Keys the CLI no longer lists lose its lease.
     watch(clientID: string, keys: readonly string[], visible?: string): Record<string, Snapshot> {
@@ -198,12 +225,30 @@ export function createStatusService(options: StatusServiceOptions) {
     },
     get: (key: string) => store.get(key),
     refresh: (key: string) => store.refresh(key),
+    checkFeedback(url: string, invalidate: (sessionID: string, request: ReviewRequest) => void) {
+      if (disposed || feedbackPaused) return;
+      for (const key of holds.keys()) {
+        for (const request of watchedForFeedback(key, store.get(key).lookup)) {
+          if (request.url !== url) continue;
+          invalidate(key, request);
+          track(
+            Promise.resolve()
+              .then(() => options.human?.check(key, request))
+              .catch(report),
+          );
+        }
+      }
+    },
     // After a change that the next lookup must see, such as new targets. A
     // leased session that doesn't poll is looked up once, because its new
     // targets may have reviews to watch.
     invalidate(key: string) {
+      options.feedbackTargets?.(key, []);
       store.invalidate(key);
-      if (!disposed && !holds.has(key) && liveLeases(key).length > 0) void store.refresh(key);
+      if (disposed || holds.has(key)) return;
+      if (liveLeases(key).length > 0 || (discovered.has(key) && owns(key))) {
+        void store.refresh(key);
+      }
     },
     setTargeted: (key: string, targeted: boolean) => store.setTargeted(key, targeted),
     // After an event that may have changed the PRs/MRs, such as a turn ending.
