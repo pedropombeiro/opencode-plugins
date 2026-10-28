@@ -14,6 +14,7 @@ import {
 } from '../../forge';
 import type { RemoteProject, Repository } from '../../git';
 import { fetchComments, fetchDetails } from './feedback';
+import { fetchLinkedNote, linkedNotes } from './linked-notes';
 import { duoFindings, duoReady } from './review-feedback';
 import { subscribeToNotes } from './subscription';
 import { query, typed, type Query, type Transport, type Typed } from '../../graphql';
@@ -245,6 +246,14 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
       return ref ? fetchDetails(glabGraphQL(run, directory), ref.host, ref.project, ids) : [];
     },
     commentID: (url) => url.match(/#note_(\d+)$/)?.[1],
+    linkedNotes(request, details) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      return ref ? linkedNotes(ref.host, details) : [];
+    },
+    async linkedNote(run, directory, request, url) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      return ref ? fetchLinkedNote(glabGraphQL(run, directory), ref.host, url) : undefined;
+    },
   },
 };
 

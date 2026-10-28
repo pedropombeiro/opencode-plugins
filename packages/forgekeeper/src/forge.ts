@@ -196,6 +196,25 @@ export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
   // The comment ID a comment link names, for updates stored before they kept
   // their comment IDs. Undefined when the link doesn't name one.
   commentID?(url: string): string | undefined;
+  // Links to other comments that these comments' own text names directly,
+  // which a summary may read. Each is canonical, on the request's forge host,
+  // and not one of the comments. Links in replies or code don't count.
+  linkedNotes?(request: Request, details: readonly CommentDetail[]): string[];
+  // Reads the comment a link from `linkedNotes` names. Undefined when it
+  // can't be read, or when what the forge returns isn't that comment.
+  linkedNote?(
+    run: Exec,
+    directory: string,
+    request: Request,
+    url: string,
+  ): Promise<LinkedNote | undefined>;
+}
+
+// A comment that review feedback links to. Its text is untrusted.
+export interface LinkedNote {
+  url: string;
+  username: string;
+  body: string;
 }
 
 export interface CommentDetail {

@@ -2,6 +2,7 @@ import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
 import { statusOptions } from './options';
+import { LINKED_NOTE_TOOL } from './review-summary';
 import { ForgeSessionRpc, implement } from './rpc';
 import { setupStatus, type Status, type StatusDependencies } from './status-server';
 import type { Snapshot } from './store';
@@ -309,6 +310,28 @@ export async function setupServer(
         return { content: toolResult(result.targets, result.missing) };
       },
     });
+    // Offered only in review summaries whose comments link to other notes;
+    // the context hook removes it from every other request.
+    if (watcher) {
+      const summaries = watcher;
+      editor.add({
+        name: LINKED_NOTE_TOOL,
+        options: { codemode: false },
+        description:
+          'Read a note that the review comments being summarized link to. Works only during a Forgekeeper review summary, and only for the links its request lists as readable.',
+        input: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'One of the readable links, exactly as listed.' },
+          },
+          required: ['url'],
+          additionalProperties: false,
+        },
+        execute: async (input, { sessionID }) => ({
+          content: await summaries.fetchLinked(sessionID, (input as { url?: unknown })?.url),
+        }),
+      });
+    }
   });
 
   async function writeInstructions(sessionID: string): Promise<string[]> {
@@ -339,6 +362,7 @@ export async function setupServer(
   // A failure in the guidance must not block the request, so it's skipped.
   await ctx.session.hook('context', async (event) => {
     if (await watcher?.prepareSummary(event)) return;
+    if (event.tools) delete event.tools[LINKED_NOTE_TOOL];
     try {
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (session.parentID || session.location.directory !== ctx.location.directory) return;
@@ -351,10 +375,12 @@ export async function setupServer(
   });
 
   // Backstops for a summary turn whose request still reached tools, such as
-  // after a hook ordering change. Each refuses the action outright.
+  // after a hook ordering change. Each refuses the action outright. The
+  // linked-note tool checks its own calls, and asks for no permissions.
   if (watcher) {
     const summaries = watcher;
     await ctx.tool.hook('execute.before', async (event) => {
+      if (event.tool === LINKED_NOTE_TOOL) return;
       if (await summaries.summarizing(event.sessionID))
         throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
     });
