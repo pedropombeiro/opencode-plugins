@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { GitLabMergeRequest, ReviewRequest } from './forge';
 import {
+  MAX_RETARGET_ATTEMPTS,
   retargetChildren,
   stricter,
   type RetargetEntry,
@@ -55,17 +56,25 @@ function harness(
       reads.push(target);
       return current;
     },
+    allowed: async () => true,
     retarget: async (request, branch) => {
       calls.push(`${request.iid} ${branch}`);
       current = { ...current, targetBranch: branch };
     },
     journal: {
       get: async (key) => journal.get(key),
-      set: async (key, entry) => void journal.set(key, entry),
+      set: async (key, entry) => void journal.set(key, structuredClone(entry)),
     },
     ...overrides,
   };
-  return { options, journal, calls, reads, run: () => retargetChildren(options) };
+  return {
+    options,
+    journal,
+    calls,
+    reads,
+    run: () => retargetChildren(options),
+    lines: async () => (await retargetChildren(options)).lines,
+  };
 }
 
 describe('stricter', () => {
@@ -86,7 +95,10 @@ describe('stricter', () => {
 describe('retargetChildren', () => {
   test('retargets a dependent MR to the branch its parent merged into, and confirms it', async () => {
     const app = harness();
-    expect(await app.run()).toEqual(['Retargeted !2 from branch-1 to main.']);
+    expect(await app.run()).toEqual({
+      lines: ['Retargeted !2 from branch-1 to main.'],
+      retry: false,
+    });
     expect(app.calls).toEqual(['2 main']);
     // Read before and after the change.
     expect(app.reads).toEqual([url('2'), url('2')]);
@@ -94,24 +106,26 @@ describe('retargetChildren', () => {
       state: 'done',
       from: 'branch-1',
       to: 'main',
+      attempts: 1,
+      sent: true,
     });
   });
 
   test('only describes or proposes without "apply" and its action', async () => {
     const notify = harness({}, { policy: { mode: 'notify', actions: [] } });
-    expect(await notify.run()).toEqual(['!2 builds on !1: it targets branch-1.']);
+    expect(await notify.lines()).toEqual(['!2 builds on !1: it targets branch-1.']);
     expect(notify.reads).toEqual([]);
     for (const policy of [
       { mode: 'prepare', actions: ['retarget'] },
       { mode: 'apply', actions: [] },
     ] as EventPolicy[]) {
       const app = harness({}, { policy });
-      expect(await app.run()).toEqual(['Proposed: retarget !2 from branch-1 to main.']);
+      expect(await app.lines()).toEqual(['Proposed: retarget !2 from branch-1 to main.']);
       expect(app.calls).toEqual([]);
       expect(app.journal.size).toBe(0);
     }
     const unsupported = harness({}, { retarget: undefined });
-    expect(await unsupported.run()).toEqual([
+    expect(await unsupported.lines()).toEqual([
       "Proposed: retarget !2 from branch-1 to main. Forgekeeper can't retarget on this forge.",
     ]);
   });
@@ -124,51 +138,58 @@ describe('retargetChildren', () => {
       [{ targetProject: 'g/other' }, '!2 targets another project now, so it keeps its target.'],
     ] as const) {
       const app = harness(remote);
-      expect(await app.run()).toEqual([line]);
+      expect(await app.lines()).toEqual([line]);
       expect(app.calls).toEqual([]);
     }
     const gone = harness({}, { fetch: async () => undefined });
-    expect(await gone.run()).toEqual(['!2 is no longer open, so it keeps its target.']);
+    expect(await gone.lines()).toEqual(['!2 is no longer open, so it keeps its target.']);
+  });
+
+  test('leaves a dependent alone that the session dropped while it was read', async () => {
+    const app = harness({}, { allowed: async () => false });
+    expect(await app.lines()).toEqual([
+      '!2 is no longer a target of this session, so Forgekeeper left it alone.',
+    ]);
+    expect(app.calls).toEqual([]);
+    expect(app.journal.get(url('2'))?.state).toBe('done');
   });
 
   test("doesn't guess a new target for a parent from a fork", async () => {
     const app = harness({}, { parent: { ...parent, sourceProject: 'fork/p' } });
-    expect(await app.run()).toEqual([
+    expect(await app.lines()).toEqual([
       '!2 builds on !1, which came from another project, so its new target is unclear.',
     ]);
     expect(app.reads).toEqual([]);
   });
 
-  test('reports a failed retarget, and a retry after a lost response finds it done', async () => {
+  test('retries a failed retarget, and counts one whose response was lost as done', async () => {
+    let failing = true;
     const app = harness(
       {},
       {
         retarget: async () => {
-          throw new Error('403 Forbidden');
+          if (failing) throw new Error('timeout');
         },
       },
     );
-    expect(await app.run()).toEqual([
-      'Could not retarget !2 from branch-1 to main: 403 Forbidden.',
-    ]);
-    expect(app.journal.get(url('2'))?.state).toBe('running');
+    expect(await app.run()).toEqual({
+      lines: ['Could not retarget !2 from branch-1 to main: timeout.'],
+      retry: true,
+    });
+    expect(app.journal.get(url('2'))).toMatchObject({ state: 'running', attempts: 1, sent: true });
     // The change went through although its response was lost.
+    failing = false;
     const retry = harness({ targetBranch: 'main' });
     retry.journal.set(url('2'), app.journal.get(url('2'))!);
-    expect(await retry.run()).toEqual(['!2 already targets main.']);
+    expect(await retry.run()).toEqual({
+      lines: ['Retargeted !2 from branch-1 to main.'],
+      retry: false,
+    });
     expect(retry.calls).toEqual([]);
+    expect(retry.journal.get(url('2'))).toMatchObject({ state: 'done', attempts: 2 });
   });
 
-  test('repeats a finished outcome without reading or changing anything again', async () => {
-    const app = harness();
-    await app.run();
-    app.reads.length = 0;
-    expect(await app.run()).toEqual(['Retargeted !2 from branch-1 to main.']);
-    expect(app.reads).toEqual([]);
-    expect(app.calls).toEqual(['2 main']);
-  });
-
-  test('reports a read failure without changing anything', async () => {
+  test('gives up after the attempt limit, failed reads included', async () => {
     const app = harness(
       {},
       {
@@ -177,7 +198,54 @@ describe('retargetChildren', () => {
         },
       },
     );
-    expect(await app.run()).toEqual(['Could not read !2: timeout.']);
+    for (let attempt = 1; attempt < MAX_RETARGET_ATTEMPTS; attempt++)
+      expect(await app.run()).toEqual({ lines: ['Could not read !2: timeout.'], retry: true });
+    expect(await app.run()).toEqual({
+      lines: [
+        `Could not read !2: timeout. Forgekeeper gave up after ${MAX_RETARGET_ATTEMPTS} attempts.`,
+      ],
+      retry: false,
+    });
+    expect(app.journal.get(url('2'))?.state).toBe('done');
     expect(app.calls).toEqual([]);
+  });
+
+  test('retries when it cannot tell whether the session still targets the dependent', async () => {
+    const app = harness(
+      {},
+      {
+        allowed: async () => {
+          throw new Error('session unavailable');
+        },
+      },
+    );
+    expect(await app.run()).toEqual({
+      lines: ['Could not check !2: session unavailable.'],
+      retry: true,
+    });
+    expect(app.calls).toEqual([]);
+  });
+
+  test('repeats a finished outcome without reading or changing anything again', async () => {
+    const app = harness();
+    await app.run();
+    app.reads.length = 0;
+    expect(await app.lines()).toEqual(['Retargeted !2 from branch-1 to main.']);
+    expect(app.reads).toEqual([]);
+    expect(app.calls).toEqual(['2 main']);
+  });
+
+  test('reports a read failure while preparing without retrying', async () => {
+    const app = harness(
+      {},
+      {
+        policy: { mode: 'prepare', actions: ['retarget'] },
+        fetch: async () => {
+          throw new Error('timeout');
+        },
+      },
+    );
+    expect(await app.run()).toEqual({ lines: ['Could not read !2: timeout.'], retry: false });
+    expect(app.journal.size).toBe(0);
   });
 });

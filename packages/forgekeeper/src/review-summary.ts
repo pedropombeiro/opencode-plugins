@@ -335,6 +335,44 @@ export function taggedInput(messages: readonly unknown[] | undefined): string | 
   return [...text.matchAll(TAG)].at(-1)?.[1];
 }
 
+// What a step sends when its review text can't be read.
+export const UNAVAILABLE_TEXT = 'The review text is unavailable. Reply that it could not be read.';
+
+// The parts of a model request that a Forgekeeper step replaces.
+export interface SummaryRequest {
+  readonly sessionID: string;
+  system: Array<{ type: 'text'; text: string }>;
+  messages: unknown[];
+  tools: Record<string, unknown>;
+  options: { maxTokens?: number } & Record<string, unknown>;
+}
+
+// Replaces the request with the instructions and one message holding `text`,
+// and keeps only `tool`, when given. Nothing of the session's history or
+// tools stays.
+export function restrictRequest(
+  event: SummaryRequest,
+  system: string,
+  text: string,
+  tool?: { name: string; value: unknown },
+) {
+  for (const name of Object.keys(event.tools)) delete event.tools[name];
+  if (tool) event.tools[tool.name] = tool.value;
+  event.system.splice(0, event.system.length, { type: 'text', text: system });
+  event.options.maxTokens = SUMMARY_MAX_TOKENS;
+  // The hook's messages are instances of OpenCode's message class, which
+  // validates its fields. The plugin can't import it, so it reuses the
+  // constructor of a message in the request. Without one, the request fails
+  // rather than keeping any of the session's messages.
+  const Message = (event.messages.at(-1) as { constructor?: unknown } | undefined)?.constructor as
+    | (new (input: unknown) => unknown)
+    | undefined;
+  if (!Message || Message === Object)
+    throw new Error('Forgekeeper could not build a tool-free review request');
+  const message = new Message({ role: 'user', content: [{ type: 'text', text }] });
+  event.messages.splice(0, event.messages.length, message);
+}
+
 // What a notice step sends, so a woken notice costs one short reply.
 export const noticeText = (title: string, links: string[]) =>
   [`Acknowledge this review notice in one sentence and list its links: ${title}`, ...links].join(

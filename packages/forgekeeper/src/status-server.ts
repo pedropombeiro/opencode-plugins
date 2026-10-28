@@ -37,13 +37,15 @@ import {
   noticeText,
   taggedInput,
   superseded,
+  restrictRequest,
   SUMMARY_KIND,
-  SUMMARY_MAX_TOKENS,
   SUMMARY_PREFIX,
   summarySystem,
   turnInput,
+  UNAVAILABLE_TEXT,
   type LinkedResult,
   type LinkedState,
+  type SummaryRequest,
 } from './review-summary';
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
 import {
@@ -144,6 +146,8 @@ const pendingKey = (sessionID: string, url: string) =>
 const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
 // The review text of summary turns, which must not enter session history.
 const SUMMARY_STORE = 'status/summaries/';
+export const summaryPrefix = (sessionID: string) =>
+  `${SUMMARY_STORE}${encodeURIComponent(sessionID)}/`;
 // Summary records outlive their turn only until a user prompt follows, or
 // until this age.
 const SUMMARY_RETENTION = 7 * 24 * 60 * 60_000;
@@ -174,14 +178,6 @@ interface SummaryRecord {
   system?: 'lifecycle';
 }
 
-// The parts of a model request that a summary turn replaces.
-export interface SummaryRequest {
-  readonly sessionID: string;
-  system: Array<{ type: 'text'; text: string }>;
-  messages: unknown[];
-  tools: Record<string, unknown>;
-  options: { maxTokens?: number } & Record<string, unknown>;
-}
 const reviewHistoryKey = (sessionID: string, url: string) =>
   `status/reviews/${encodeURIComponent(sessionID)}/${encodeURIComponent(url)}`;
 
@@ -247,10 +243,15 @@ export async function setupStatus(
     changed: () => host.feedbackChanged?.(),
     now: deps.now,
     // An update reaches its session in the mode it was recorded in, so changing
-    // the mode affects only later updates. Turning delivery off stops retries.
+    // the mode affects only later updates. Turning a kind's delivery off stops
+    // its retries, and leaves the other kind's alone.
     ...(settings.feedbackDelivery === 'inbox' && settings.lifecycleDelivery === 'inbox'
       ? {}
-      : { notify: async (item) => void (await deliver(item)) }),
+      : {
+          notify: async (item) => void (await deliver(item)),
+          enabled: (item) =>
+            (item.kind ? settings.lifecycleDelivery : settings.feedbackDelivery) !== 'inbox',
+        }),
   });
 
   // Delivery work in progress, which cleanup waits for like watcher work, so
@@ -287,7 +288,7 @@ export async function setupStatus(
     return next;
   };
   const summaryKey = (sessionID: string, messageID: string) =>
-    `${SUMMARY_STORE}${encodeURIComponent(sessionID)}/${messageID}`;
+    `${summaryPrefix(sessionID)}${messageID}`;
   const track = (sessionID: string, messageID: string) =>
     summaries.set(sessionID, (summaries.get(sessionID) ?? new Set()).add(messageID));
   let restoring: Promise<void> | undefined;
@@ -887,13 +888,14 @@ export async function setupStatus(
       : settings.lifecycleExecution.conflict;
 
   // Takes a lifecycle event to the inbox, after any follow-up its policy
-  // allows. Resolves `false` to drop the event, and rejects to keep it for a
-  // retry, such as while monitoring is paused.
+  // allows. Resolves `false` to drop the event, `retry` to keep it while a
+  // follow-up gets another attempt, and rejects to keep it for a retry, such
+  // as while monitoring is paused.
   async function recordLifecycle(
     record: LifecycleRecord,
     event: LifecycleEvent,
     records: readonly LifecycleRecord[],
-  ): Promise<boolean> {
+  ): Promise<boolean | 'retry'> {
     if (closing) throw new Error('The plugin stopped');
     let session;
     try {
@@ -907,22 +909,42 @@ export async function setupStatus(
     if (session.location.directory !== directory)
       throw new Error('The session moved to another checkout');
     if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
-    if (!includesRequest((await host.state(record.sessionID)).targets, record.url)) return false;
+    const targets = (await host.state(record.sessionID)).targets;
+    if (!includesRequest(targets, record.url)) return false;
     // A conflict that's already over isn't news.
     if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
       return false;
+    // Only dependents the session still targets. A dropped one's record stays
+    // until housekeeping, and must not authorize a change.
     const children = records.filter(
-      (entry) => entry.parent === record.url && entry.url !== record.url,
+      (entry) =>
+        entry.parent === record.url &&
+        entry.url !== record.url &&
+        includesRequest(targets, entry.url),
     );
     const target = requestOf(record);
     const retargets = !!deps.retarget || !!(target && traitsOf(target).lifecycle?.retarget);
-    const details =
+    const execution =
       event.kind === 'merged' && children.length
         ? await retargetChildren({
             parent: record,
             children,
             policy: stricter(event.policy, policyOf('merged')),
             fetch: fresh,
+            allowed: async (child) => {
+              if (closing) throw new Error('The plugin stopped');
+              let current;
+              try {
+                current = await ctx.session.get({ sessionID: record.sessionID });
+              } catch (error) {
+                if (missingSession(error)) return false;
+                throw error;
+              }
+              if (!current || current.time?.archived !== undefined) return false;
+              if (current.location.directory !== directory) return false;
+              if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
+              return includesRequest((await host.state(record.sessionID)).targets, child);
+            },
             ...(retargets
               ? {
                   retarget: async (request: ReviewRequest, branch: string) => {
@@ -951,7 +973,11 @@ export async function setupStatus(
               },
             },
           })
-        : [];
+        : undefined;
+    // A retarget that may still succeed holds the update back until it does,
+    // or until its attempts run out, so the update reports the outcome.
+    if (execution?.retry) return 'retry';
+    const details = execution?.lines ?? [];
     const title =
       event.kind === 'conflict'
         ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
@@ -964,7 +990,9 @@ export async function setupStatus(
       title,
       links: [record.url],
       ...(details.length ? { details } : {}),
-      ...(settings.lifecycleDelivery !== 'inbox' ? { delivery: settings.lifecycleDelivery } : {}),
+      // The mode when the event happened, so a change since then affects only
+      // later events.
+      ...(event.delivery ? { delivery: event.delivery } : {}),
       at: event.detectedAt,
     };
     // A delivery that fails leaves the update in the inbox, which retries it,
@@ -1005,6 +1033,7 @@ export async function setupStatus(
         deliver: recordLifecycle,
         reference,
         policy: policyOf,
+        delivery: () => settings.lifecycleDelivery,
         onError: (error) =>
           reportOnce('lifecycle', 'Could not record merge request changes', error),
         now: deps.now,
@@ -1173,30 +1202,16 @@ export async function setupStatus(
           : linkedContext(record.linked, MAX_TOTAL - record.findings.length - 2);
       // The linked-note tool stays only while it has links left to read.
       const tool = linked?.tool ? event.tools[LINKED_NOTE_TOOL] : undefined;
-      for (const name of Object.keys(event.tools)) delete event.tools[name];
-      if (tool) event.tools[LINKED_NOTE_TOOL] = tool;
-      event.system.splice(0, event.system.length, {
-        type: 'text',
-        text:
-          record !== 'failed' && record.system === 'lifecycle'
-            ? LIFECYCLE_SYSTEM
-            : summarySystem(!!tool, !!linked),
-      });
-      event.options.maxTokens = SUMMARY_MAX_TOKENS;
-      const text =
+      restrictRequest(
+        event,
+        record !== 'failed' && record.system === 'lifecycle'
+          ? LIFECYCLE_SYSTEM
+          : summarySystem(!!tool, !!linked),
         record === 'failed'
-          ? 'The review text is unavailable. Reply that it could not be read.'
-          : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n');
-      // The hook's messages are instances of OpenCode's message class, which
-      // validates its fields. The plugin can't import it, so it reuses the
-      // constructor of a message in the request. Without one, the request
-      // fails rather than keeping any of the session's messages.
-      const Message = (event.messages.at(-1) as { constructor?: unknown } | undefined)
-        ?.constructor as (new (input: unknown) => unknown) | undefined;
-      if (!Message || Message === Object)
-        throw new Error('Forgekeeper could not build a tool-free review request');
-      const message = new Message({ role: 'user', content: [{ type: 'text', text }] });
-      event.messages.splice(0, event.messages.length, message);
+          ? UNAVAILABLE_TEXT
+          : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n'),
+        tool ? { name: LINKED_NOTE_TOOL, value: tool } : undefined,
+      );
       return true;
     },
     // Starts a summary turn for an update on request, in any delivery mode.

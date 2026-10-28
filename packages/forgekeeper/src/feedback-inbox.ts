@@ -86,6 +86,9 @@ export function createFeedbackInbox(options: {
   write: (state: InboxState) => Promise<void>;
   changed: () => void;
   notify?: (item: FeedbackItem) => Promise<void>;
+  // Whether automatic delivery is on for the item's kind of update now. One
+  // that isn't waits, undelivered, until it's on again.
+  enabled?: (item: FeedbackItem) => boolean;
   now?: () => number;
 }) {
   let queue = Promise.resolve();
@@ -115,6 +118,7 @@ export function createFeedbackInbox(options: {
     let failure: { error: unknown } | undefined;
     for (const item of items) {
       if (item.notifiedAt !== undefined || !item.delivery) continue;
+      if (options.enabled && !options.enabled(item)) continue;
       try {
         await options.notify(item);
       } catch (error) {

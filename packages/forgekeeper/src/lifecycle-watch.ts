@@ -8,7 +8,7 @@
 // event nor repeats it, and a merged PR/MR that nothing polls anymore still
 // gets its event delivered.
 import type { ReviewRequest } from './forge';
-import type { EventPolicy } from './options';
+import type { EventPolicy, FeedbackDelivery } from './options';
 
 export type LifecycleKind = 'conflict' | 'merged';
 
@@ -20,6 +20,9 @@ export interface LifecycleEvent {
   // The policy when the event happened. Execution uses the stricter of this
   // and the current one, so enabling execution never acts on old events.
   policy?: EventPolicy;
+  // How the event reaches its session, as the mode was when it happened.
+  // Absent in inbox mode, so enabling summaries never starts turns for it.
+  delivery?: 'passive' | 'summary';
 }
 
 export interface LifecycleRecord {
@@ -76,6 +79,7 @@ export function observe(
   reference: (request: ReviewRequest) => string,
   now: number,
   policy: (kind: LifecycleKind) => EventPolicy | undefined = () => undefined,
+  delivery: () => FeedbackDelivery = () => 'inbox',
 ): LifecycleRecord[] {
   return requests.map((request) => {
     const previous = records.get(request.url);
@@ -97,7 +101,14 @@ export function observe(
     const add = (kind: LifecycleKind, id: string) => {
       if (pending.some((event) => event.id === id)) return;
       const rule = policy(kind);
-      pending.push({ kind, id, detectedAt: now, ...(rule ? { policy: rule } : {}) });
+      const mode = delivery();
+      pending.push({
+        kind,
+        id,
+        detectedAt: now,
+        ...(rule ? { policy: rule } : {}),
+        ...(mode !== 'inbox' ? { delivery: mode } : {}),
+      });
     };
     if (previous) {
       if (
@@ -142,14 +153,17 @@ export interface LifecycleWatcherOptions {
   // Every record that has events waiting, for retries.
   waiting: () => Promise<LifecycleRecord[]>;
   // Takes an event to the inbox. Resolves `false` to drop it, such as when
-  // the session no longer targets the PR/MR. Rejects to retry it later.
+  // the session no longer targets the PR/MR, and `retry` to keep it for
+  // another attempt without an error, such as while a retarget is retried.
+  // Rejects to retry it later.
   deliver: (
     record: LifecycleRecord,
     event: LifecycleEvent,
     records: readonly LifecycleRecord[],
-  ) => Promise<boolean>;
+  ) => Promise<boolean | 'retry'>;
   reference: (request: ReviewRequest) => string;
   policy?: (kind: LifecycleKind) => EventPolicy | undefined;
+  delivery?: () => FeedbackDelivery;
   onError?: (error: unknown) => void;
   now?: () => number;
 }
@@ -178,7 +192,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
       let current = record;
       for (const event of record.pending) {
         try {
-          await options.deliver(current, event, records);
+          if ((await options.deliver(current, event, records)) === 'retry') continue;
         } catch (error) {
           failure ??= { error };
           continue;
@@ -205,6 +219,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
           options.reference,
           now(),
           options.policy,
+          options.delivery,
         )) {
           if (!unchanged(stored.get(record.url), record)) await options.write(record);
         }

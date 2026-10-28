@@ -565,6 +565,10 @@ class ProviderMessage {
   }
 }
 
+// The text of a replaced request's one message.
+const textOf = (request: { messages: unknown[] }) =>
+  (request.messages[0] as ProviderMessage).content[0].text;
+
 const mr = 'https://gitlab.com/group/project/-/merge_requests/456';
 const nextMr = 'https://gitlab.com/group/project/-/merge_requests/789';
 const issue = 'https://gitlab.com/group/project/-/issues/42';
@@ -830,6 +834,57 @@ describe('session targets', () => {
     expect(await app.watch(['one'], 'one')).toEqual({ enabled: false, statuses: {} });
     expect((await app.refresh()).enabled).toBe(false);
     expect(forge.lookups).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('still runs Forgekeeper steps queued earlier without tools or history when reviewStatus is off', async () => {
+    const tagged = new ProviderMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'Update\n\n[forgekeeper:msg_forgekeeper_summary_abc]' }],
+    });
+    const earlier = new ProviderMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'work' }],
+    });
+    // A summary queued before monitoring was turned off, and its record.
+    const storage = new Map<string, unknown>([
+      ['status/summaries/one/msg_forgekeeper_summary_abc', { findings: 'secret review text' }],
+    ]);
+    const transcripts = new Map<string, Transcript>([
+      ['one', [{ type: 'synthetic', id: 'msg_forgekeeper_summary_abc' }]],
+    ]);
+    const app = await harness({
+      storage,
+      transcripts,
+      status: new StatusForge(),
+      pluginOptions: { reviewStatus: false },
+    });
+    for (const messages of [
+      [earlier, tagged],
+      // Without the tag, such as after a compaction, the stored record and
+      // the context still show the step.
+      [earlier],
+    ]) {
+      const request = await app.request('one', false, messages);
+      expect(request.tools).toEqual({});
+      expect(request.options.maxTokens).toBe(1_200);
+      expect(request.messages).toHaveLength(1);
+      expect(textOf(request)).toContain('The review text is unavailable');
+      expect(textOf(request)).not.toContain('secret review text');
+      expect(await app.toolCall()).toContain('Tools are disabled');
+      expect(await app.permission()).toBe('deny');
+    }
+    // A user prompt ends the step, and later requests run as usual.
+    app.prompt();
+    const ordinary = await app.request('one', false, [earlier]);
+    expect(Object.keys(ordinary.tools)).toEqual(['read', 'bash']);
+    expect(await app.toolCall()).toBeUndefined();
+    expect(await app.permission()).toBe('allow');
+    // Sessions without Forgekeeper steps aren't restricted.
+    expect(Object.keys((await app.request('two', false, [earlier])).tools)).toEqual([
+      'read',
+      'bash',
+    ]);
     await app.cleanup();
   });
 
@@ -1444,8 +1499,6 @@ describe('PR/MR status lifecycle', () => {
       reads.push(url);
       return { url, username: 'bob', body };
     };
-  const textOf = (request: { messages: unknown[] }) =>
-    (request.messages[0] as ProviderMessage).content[0].text;
 
   test('lets a summary read the notes its comments link to, and keeps their text out of the session', async () => {
     const reads: string[] = [];
@@ -2016,6 +2069,221 @@ describe('PR/MR status lifecycle', () => {
     ]);
     expect((storage.get(key(projectA)) as { pending: unknown[] }).pending).toEqual([]);
     await app.cleanup();
+  });
+
+  // Storage after the parent of a stack merged, with the merge waiting for
+  // delivery, as a reload finds it. `targets` are the session's targets now.
+  // The records are recent, so housekeeping keeps them.
+  const applyPolicy = { mode: 'apply', actions: ['retarget'] };
+  const mergedStack = (
+    targets: string[],
+    event: Record<string, unknown> = { policy: applyPolicy },
+    storage = new Map<string, unknown>(),
+  ) => {
+    const record = (iid: string, overrides: Record<string, unknown>) => ({
+      sessionID: 'one',
+      url: `https://gitlab.com/group/a/-/merge_requests/${iid}`,
+      reference: `!${iid}`,
+      state: 'opened',
+      cycles: 0,
+      targetProject: 'group/a',
+      targetBranch: 'main',
+      sourceProject: 'group/a',
+      sourceBranch: `branch-${iid}`,
+      pending: [],
+      at: Date.now(),
+      ...overrides,
+    });
+    const id = JSON.stringify(['one', projectA, 'merged']);
+    storage.set('sessions/one', { targets: targets.map((url) => ({ url })) });
+    storage.set(
+      lifecycleRecord(projectA),
+      record('1', { state: 'merged', pending: [{ kind: 'merged', id, detectedAt: 5, ...event }] }),
+    );
+    storage.set(
+      lifecycleRecord(child),
+      record('2', { targetBranch: 'branch-1', parent: projectA }),
+    );
+    const forge = new StatusForge();
+    forge.set('group/a', '1', { state: 'merged' });
+    forge.set('group/a', '2', { targetBranch: 'branch-1' });
+    return { storage, forge, id };
+  };
+  const lifecycleRecord = (url: string) => `status/lifecycle/one/${encodeURIComponent(url)}`;
+  const pendingOf = (storage: Map<string, unknown>) =>
+    (storage.get(lifecycleRecord(projectA)) as { pending: unknown[] }).pending;
+  const applying = {
+    lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
+  };
+
+  test("doesn't retarget a dependent the session no longer targets", async () => {
+    // The child's record outlives its removal from the targets.
+    const { storage, forge } = mergedStack([projectA]);
+    const calls: string[] = [];
+    const app = await harness({
+      storage,
+      status: forge,
+      pluginOptions: applying,
+      retarget: async (request) => void calls.push(request.iid),
+    });
+    await settle();
+    expect(storage.has(lifecycleRecord(child))).toBe(true);
+    expect(calls).toEqual([]);
+    const [item] = (await app.feedback()).items;
+    expect(item).toMatchObject({ kind: 'merged' });
+    expect(item.details).toBeUndefined();
+    await app.cleanup();
+  });
+
+  test("doesn't retarget a dependent the session drops while it's read", async () => {
+    const { storage, forge } = mergedStack([projectA, child]);
+    forge.gated = true;
+    const calls: string[] = [];
+    const app = await harness({
+      storage,
+      status: forge,
+      pluginOptions: applying,
+      retarget: async (request) => void calls.push(request.iid),
+    });
+    await settle();
+    // The dependent is dropped while Forgekeeper reads it.
+    storage.set('sessions/one', { targets: [{ url: projectA }] });
+    forge.open();
+    await settle();
+    expect(calls).toEqual([]);
+    expect((await app.feedback()).items).toMatchObject([
+      {
+        kind: 'merged',
+        details: ['!2 is no longer a target of this session, so Forgekeeper left it alone.'],
+      },
+    ]);
+    await app.cleanup();
+  });
+
+  test('keeps a merge waiting while its retarget fails, and retries it after a reload', async () => {
+    const { storage, forge, id } = mergedStack([projectA, child]);
+    const failing = await harness({
+      storage,
+      status: forge,
+      pluginOptions: applying,
+      retarget: async () => {
+        throw new Error('timeout');
+      },
+    });
+    await settle();
+    // The update waits for the retarget's outcome, without an error toast.
+    expect((await failing.feedback()).items).toEqual([]);
+    expect(pendingOf(storage)).toHaveLength(1);
+    expect(failing.notices()).toEqual([]);
+    await failing.cleanup();
+
+    const calls: string[] = [];
+    const app = await harness({
+      storage,
+      status: forge,
+      pluginOptions: applying,
+      retarget: async (request, branch) => {
+        calls.push(`${request.iid} ${branch}`);
+        forge.set('group/a', request.iid, { targetBranch: branch });
+      },
+    });
+    await settle();
+    expect(calls).toEqual(['2 main']);
+    expect((await app.feedback()).items).toMatchObject([
+      { id, details: ['Retargeted !2 from branch-1 to main.'] },
+    ]);
+    expect(pendingOf(storage)).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('reports a retarget that keeps failing once its attempts run out', async () => {
+    const { storage, forge } = mergedStack([projectA, child]);
+    const calls: string[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const app = await harness({
+        storage,
+        status: forge,
+        pluginOptions: applying,
+        retarget: async (request) => {
+          calls.push(request.iid);
+          throw new Error('403 Forbidden');
+        },
+      });
+      await settle();
+      await app.cleanup();
+    }
+    expect(calls).toHaveLength(3);
+    expect(pendingOf(storage)).toEqual([]);
+    const app = await harness({ storage, status: forge, pluginOptions: applying });
+    expect((await app.feedback()).items).toMatchObject([
+      {
+        details: [
+          'Could not retarget !2 from branch-1 to main: 403 Forbidden. Forgekeeper gave up after 3 attempts.',
+        ],
+      },
+    ]);
+    await app.cleanup();
+  });
+
+  test('delivers a lifecycle event in the mode it was detected in', async () => {
+    // Detected in inbox mode, then summaries were turned on.
+    const { storage, forge } = mergedStack([projectA], {});
+    const app = await harness({
+      storage,
+      status: forge,
+      pluginOptions: { lifecycleDelivery: 'summary' },
+    });
+    await settle();
+    const [item] = (await app.feedback()).items;
+    expect(item).toMatchObject({ kind: 'merged' });
+    expect(item.delivery).toBeUndefined();
+    expect(app.passive).toEqual([]);
+    await app.cleanup();
+  });
+
+  test("stops one kind of update's automatic delivery without the other's", async () => {
+    const storage = new Map<string, unknown>([
+      ['sessions/one', { targets: [{ url: projectA }] }],
+      [
+        'feedback-inbox/%2Frepo',
+        {
+          paused: false,
+          items: [
+            {
+              id: 'review',
+              sessionID: 'one',
+              url: projectA,
+              title: 'New review feedback on !1',
+              links: [`${projectA}#note_7`],
+              commentIDs: ['7'],
+              delivery: 'summary',
+              at: 0,
+            },
+          ],
+        },
+      ],
+    ]);
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const off = await harness({
+      storage,
+      status: forge,
+      pluginOptions: { reviewFeedbackDelivery: 'inbox', lifecycleDelivery: 'summary' },
+    });
+    await settle();
+    expect(off.passive).toEqual([]);
+    // It waits, undelivered, rather than counting as delivered.
+    expect((await off.feedback()).items[0].notifiedAt).toBeUndefined();
+    await off.cleanup();
+
+    const on = await harness({
+      storage,
+      status: forge,
+      pluginOptions: { reviewFeedbackDelivery: 'summary' },
+    });
+    await settle();
+    expect(on.synthetic).toHaveLength(1);
+    await on.cleanup();
   });
 
   test('warns about ignored execution options and falls back to notifying', async () => {

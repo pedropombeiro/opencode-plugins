@@ -110,6 +110,34 @@ describe('feedback inbox', () => {
     expect(sent).toEqual(['broken', 'ok', 'broken']);
     expect(state?.items.find((item) => item.id === 'ok')?.notifiedAt).toBeDefined();
   });
+  test('leaves updates whose delivery is off undelivered, so they go once it is on again', async () => {
+    let state: InboxState | undefined;
+    let enabled = false;
+    const delivered: string[] = [];
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+      notify: async (item) => void delivered.push(item.id),
+      enabled: () => enabled,
+    });
+    const item: FeedbackItem = {
+      id: 'a',
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: 'Update',
+      links: [],
+      delivery: 'summary',
+      at: 0,
+    };
+    await inbox.add(item);
+    expect(delivered).toEqual([]);
+    expect((await inbox.list()).items[0].notifiedAt).toBeUndefined();
+    enabled = true;
+    await inbox.notifyPending();
+    expect(delivered).toEqual(['a']);
+  });
+
   test('opens only HTTPS links on the target origin without embedded credentials', () => {
     const url = 'https://gitlab.com/g/p/-/merge_requests/1';
     expect(

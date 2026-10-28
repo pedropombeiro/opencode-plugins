@@ -278,7 +278,9 @@ automatic retries, including after reloads. Updates that haven't reached their s
 retried every minute and after a reload, each on its own, so one that keeps failing doesn't
 hold the others back. An update whose session was deleted, archived, or moved, or that no
 longer targets the PR/MR, is dropped, including when that changed while its comments were
-read. Switching to `inbox` stops retries. A summary requested from `/forge-feedback` is a
+read. Switching `reviewFeedbackDelivery` to `inbox` stops retries of review updates, and
+leaves them undelivered, so they go again once it's switched back. Merge request updates
+follow `lifecycleDelivery` the same way. A summary requested from `/forge-feedback` is a
 new request each time.
 
 ### Summary turns
@@ -512,8 +514,10 @@ Each change waits in the target's record until it reaches the inbox, in the same
 write as the record. A merge stops polling, so waiting changes are retried every minute
 and after a reload, without another lookup. Updates go to `/forge-feedback`, and
 `lifecycleDelivery` sets what else they do: `"inbox"`, the default, `"passive"`, or
-`"summary"`, as for [review feedback](#review-notifications). A summary turn has no
-tools, and gets only Forgekeeper's facts about the change, never comments.
+`"summary"`, as for [review feedback](#review-notifications). Each change keeps the mode
+from when it was detected, so turning on summaries never starts turns for changes found
+earlier. A summary turn has no tools, and gets only Forgekeeper's facts about the change,
+never comments.
 
 A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
@@ -546,10 +550,17 @@ Forgekeeper retargets a dependent to the branch the parent merged into, and only
 still targets the parent's source branch in the same project. It reads the dependent from
 the forge right before and after, so one the forge already retargeted counts as done, and
 one that targets something else, closed, or merged keeps its target. A parent from a fork
-isn't retargeted to, since its branch lives in another project. Each retarget's progress
-is stored: a reload doesn't repeat a finished one, and a retarget whose response was lost
-counts as done once the dependent targets the new branch. The update's details report each
-outcome.
+isn't retargeted to, since its branch lives in another project.
+
+Only dependents the session still targets count. Right before the change, Forgekeeper
+checks again that the session exists, isn't archived, belongs to this checkout, and still
+targets the dependent, so one dropped while it was read keeps its target.
+
+Each retarget's progress is stored: a reload doesn't repeat a finished one, and a retarget
+whose response was lost counts as done once the dependent targets the new branch. A failed
+read or retarget is tried again every minute and after a reload, at most 3 times, failed
+reads included. Until then, the merge's update waits, so it reports the outcome. After the
+last attempt, the update reports the failure. The update's details report each outcome.
 
 This is Forgekeeper's own action, through one fixed forge operation: no model or agent
 tool takes part, and nothing touches your checkout, so it doesn't wait for the session to
@@ -639,6 +650,10 @@ To keep the behavior of `opencode-forge-session-title` alone, turn off review st
 The server still registers `set_session_target`, adds the agent guidance, and maintains the
 title prefix. It doesn't poll or send review notifications, and the CLI shows no footer.
 `/forge-status` and `/forge-open` explain that the status is off.
+
+A summary or notice that Forgekeeper queued before you turned review status off can still
+start a step. That step still runs without tools, history, or permissions. It doesn't read
+the review text: it only says the text is unavailable.
 
 ## RPC
 
