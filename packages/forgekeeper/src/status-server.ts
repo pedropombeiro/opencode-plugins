@@ -20,8 +20,15 @@ import {
   type InboxState,
 } from './feedback-inbox';
 import {
+  addLinked,
   findingsText,
+  LINKED_NOTE_TOOL,
+  linkedContext,
   MAX_FINDINGS,
+  MAX_LINK_LENGTH,
+  MAX_LINKED_CALLS,
+  MAX_LINKED_NOTES,
+  MAX_TOTAL,
   MESSAGE_PREFIX,
   messageTag,
   NOTICE_KIND,
@@ -31,11 +38,19 @@ import {
   SUMMARY_KIND,
   SUMMARY_MAX_TOKENS,
   SUMMARY_PREFIX,
-  SUMMARY_SYSTEM,
+  summarySystem,
   turnInput,
+  type LinkedResult,
+  type LinkedState,
 } from './review-summary';
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
-import type { CommentDetail, FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
+import type {
+  CommentDetail,
+  FeedbackSnapshot,
+  LinkedNote,
+  ReviewComment,
+  ReviewRequest,
+} from './forge';
 import { parseUrl, reference, traits, traitsOf, type ForgeCatalog } from './forges';
 import {
   applyFeedback,
@@ -65,6 +80,8 @@ export interface StatusDependencies {
   feedback?: (request: ReviewRequest, directory: string) => Promise<FeedbackSnapshot | undefined>;
   // Reads comment text for summaries. Defaults to its forge's detail reader.
   details?: (request: ReviewRequest, ids: string[]) => Promise<CommentDetail[]>;
+  // Reads a note that comments link to. Defaults to its forge's reader.
+  linkedNote?: (request: ReviewRequest, url: string) => Promise<LinkedNote | undefined>;
   now?: () => number;
 }
 
@@ -72,6 +89,15 @@ export interface StatusDependencies {
 // can't send or write anything after cleanup starts, so this only bounds how
 // long a stopped plugin keeps work around.
 const DRAIN_TIME = 5_000;
+
+// What the linked-note tool returns, which stays in the session's history.
+// It names the link only; the note's text reaches only the summary request.
+const receipt = (note: LinkedResult) =>
+  note.status === 'fetched'
+    ? `Read ${note.url}. Its text is in the request, in a <linked-note> block.`
+    : note.status === 'omitted'
+      ? `${note.url} was left out because of size limits.`
+      : `Could not read ${note.url}.`;
 
 // Waits for the tasks, or for `limit` milliseconds, whichever comes first.
 async function drain(tasks: ReadonlySet<Promise<unknown>>, limit: number) {
@@ -116,6 +142,10 @@ interface SummaryRecord {
   messageID: string;
   findings: string;
   at: number;
+  // The PR/MR, and the notes its comments link to, for summaries whose
+  // comments link to any.
+  request?: string;
+  linked?: LinkedState;
 }
 
 // The parts of a model request that a summary turn replaces.
@@ -215,8 +245,21 @@ export async function setupStatus(
   // or an expired record, never lets one run as an ordinary request.
   const summaries = new Map<string, Set<string>>();
   // Sessions whose latest model request was a Forgekeeper request, for the
-  // tool and permission backstops.
-  const requesting = new Set<string>();
+  // tool and permission backstops, with the message whose record it read.
+  // The linked-note tool reads only that record's links.
+  const requesting = new Map<string, string | undefined>();
+  // Changes to a record, one at a time, so concurrent tool calls can't both
+  // spend the same call.
+  const updating = new Map<string, Promise<unknown>>();
+  const serialized = <T>(key: string, task: () => Promise<T>): Promise<T> => {
+    const next = (updating.get(key) ?? Promise.resolve()).then(task, task);
+    const settled = next.catch(() => {});
+    updating.set(key, settled);
+    void settled.then(() => {
+      if (updating.get(key) === settled) updating.delete(key);
+    });
+    return next;
+  };
   const summaryKey = (sessionID: string, messageID: string) =>
     `${SUMMARY_STORE}${encodeURIComponent(sessionID)}/${messageID}`;
   const track = (sessionID: string, messageID: string) =>
@@ -237,10 +280,14 @@ export async function setupStatus(
       },
     ));
   void restore();
-  const readRecord = async (sessionID: string, messageID: string) =>
-    (await ctx.storage.get(summaryKey(sessionID, messageID)).catch(() => undefined)) as
-      | SummaryRecord
-      | undefined;
+  // An expired record reads as missing, so its step runs as an unreadable
+  // summary even before housekeeping removes it.
+  const readRecord = async (sessionID: string, messageID: string) => {
+    const record = (await ctx.storage
+      .get(summaryKey(sessionID, messageID))
+      .catch(() => undefined)) as SummaryRecord | undefined;
+    return record && (deps.now ?? Date.now)() - record.at < SUMMARY_RETENTION ? record : undefined;
+  };
 
   // Whether an error says the session doesn't exist, which ends its delivery.
   const missingSession = (error: unknown) =>
@@ -357,13 +404,22 @@ export async function setupStatus(
     const messageID = `${summary ? SUMMARY_PREFIX : MESSAGE_PREFIX}${hash}`;
     // The time lets the model say how recent the feedback is.
     const described = `${item.title} (${feedbackTime(item)})`;
+    const read = summary ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2)) : [];
     const findings = summary
-      ? findingsText(
-          described,
-          item.url,
-          await details(request, commentIDs.slice(0, MAX_FINDINGS * 2)),
-        )
+      ? findingsText(described, item.url, read)
       : noticeText(described, links);
+    // Only the PR/MR's own comments can name notes to read, as only they
+    // reach the summary.
+    const allowed = summary
+      ? (
+          traitsOf(request).feedback?.linkedNotes?.(
+            request,
+            read.filter((detail) => detail.url.startsWith(`${item.url}#`)),
+          ) ?? []
+        )
+          .filter((url) => url.length <= MAX_LINK_LENGTH)
+          .slice(0, MAX_LINKED_NOTES)
+      : [];
     // Reading the comments can take a while. The session, its targets, or the
     // update itself may have changed meanwhile.
     if (!(await deliverable(item))) return false;
@@ -379,6 +435,9 @@ export async function setupStatus(
       messageID,
       findings,
       at: (deps.now ?? Date.now)(),
+      ...(allowed.length
+        ? { request: item.url, linked: { links: allowed, calls: 0, notes: [] } }
+        : {}),
     };
     await ctx.storage.set(summaryKey(item.sessionID, messageID), record as never);
     track(item.sessionID, messageID);
@@ -391,7 +450,9 @@ export async function setupStatus(
         feedbackTime(item),
         ...links,
         summary
-          ? 'Forgekeeper summarizes this review feedback without tools.'
+          ? allowed.length
+            ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
+            : 'Forgekeeper summarizes this review feedback without tools.'
           : 'Review update only. No action requested.',
         messageTag(messageID),
       ].join('\n\n'),
@@ -430,6 +491,55 @@ export async function setupStatus(
     if (!input) return pending.size ? 'failed' : undefined;
     if (input.type === 'user') return undefined;
     return (await readRecord(sessionID, input.id)) ?? 'failed';
+  }
+
+  // See `fetchLinked` in the returned object.
+  async function fetchLinked(sessionID: string, input: unknown): Promise<string> {
+    const refuse = () =>
+      new Error(`${LINKED_NOTE_TOOL} works only while Forgekeeper summarizes review feedback.`);
+    const messageID = requesting.get(sessionID);
+    if (!messageID) throw refuse();
+    const url = typeof input === 'string' ? input.trim() : '';
+    const key = summaryKey(sessionID, messageID);
+    // Writes the record unless cleanup started, which makes this instance's
+    // copy stale.
+    const store = async (record: SummaryRecord) => {
+      if (closing) throw new Error('The plugin stopped');
+      await ctx.storage.set(key, record as never);
+    };
+    return serialized(key, async () => {
+      if (closing) throw new Error('The plugin stopped');
+      // The step must still be this summary's: a user prompt since its
+      // request, or an expired record, ends the tool's access.
+      const current = await summaryTurn(sessionID);
+      if (current === undefined || current === 'failed' || current.messageID !== messageID)
+        throw refuse();
+      const record = current;
+      const linked = record.linked;
+      if (!record.request || !linked) throw new Error('This summary has no linked notes to read.');
+      if (linked.calls >= MAX_LINKED_CALLS)
+        throw new Error('The linked-note call limit is reached. Summarize with what you have.');
+      // The call is spent before anything else, so neither a failure nor a
+      // reload gives it back.
+      const spent: SummaryRecord = { ...record, linked: { ...linked, calls: linked.calls + 1 } };
+      await store(spent);
+      if (!linked.links.includes(url))
+        throw new Error('Only the links the request lists as readable can be read.');
+      const known = linked.notes.find((note) => note.url === url);
+      if (known) return receipt(known);
+      const request = requestOf({ url: record.request });
+      const reader =
+        deps.linkedNote ??
+        ((target: ReviewRequest, link: string) =>
+          traitsOf(target).feedback?.linkedNote?.(deps.exec, directory, target, link) ??
+          Promise.resolve(undefined));
+      const note = request ? await reader(request, url).catch(() => undefined) : undefined;
+      // The summary may have ended while the note was read.
+      if (!(await readRecord(sessionID, messageID))) throw new Error('The summary ended.');
+      const next: SummaryRecord = { ...spent, linked: addLinked(spent.linked!, url, note) };
+      await store(next);
+      return receipt(next.linked!.notes.find((entry) => entry.url === url)!);
+    });
   }
 
   // Storage writes run one at a time, so a record's read and write can't
@@ -828,14 +938,28 @@ export async function setupStatus(
         requesting.delete(event.sessionID);
         return false;
       }
-      requesting.add(event.sessionID);
+      requesting.set(event.sessionID, record === 'failed' ? undefined : record.messageID);
+      // Each step sends only the findings and what the tool read, never the
+      // step's earlier tool calls, so the request holds nothing from the
+      // session's history. The comments come first; linked notes get what
+      // they leave of the budget.
+      const linked =
+        record === 'failed' || !record.linked
+          ? undefined
+          : linkedContext(record.linked, MAX_TOTAL - record.findings.length - 2);
+      // The linked-note tool stays only while it has links left to read.
+      const tool = linked?.tool ? event.tools[LINKED_NOTE_TOOL] : undefined;
       for (const name of Object.keys(event.tools)) delete event.tools[name];
-      event.system.splice(0, event.system.length, { type: 'text', text: SUMMARY_SYSTEM });
+      if (tool) event.tools[LINKED_NOTE_TOOL] = tool;
+      event.system.splice(0, event.system.length, {
+        type: 'text',
+        text: summarySystem(!!tool, !!linked),
+      });
       event.options.maxTokens = SUMMARY_MAX_TOKENS;
       const text =
         record === 'failed'
           ? 'The review text is unavailable. Reply that it could not be read.'
-          : record.findings;
+          : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n');
       // The hook's messages are instances of OpenCode's message class, which
       // validates its fields. The plugin can't import it, so it reuses the
       // constructor of a message in the request. Without one, the request
@@ -867,6 +991,16 @@ export async function setupStatus(
     async summarizing(sessionID: string): Promise<boolean> {
       return requesting.has(sessionID) || (await summaryTurn(sessionID)) !== undefined;
     },
+    // Reads a linked note for the summary of the session's latest model
+    // request, and returns a receipt. The note's text goes to that summary's
+    // record, and from there only into its next request, so it never enters
+    // the session's history. Rejects any link the summary doesn't list, and
+    // without a summary whose request it can identify, such as after a
+    // reload, rejects everything. Cleanup waits for it, and it writes nothing
+    // once cleanup starts, so a stopped instance can't overwrite the record
+    // its replacement uses.
+    fetchLinked: (sessionID: string, input: unknown): Promise<string> =>
+      tracked(fetchLinked(sessionID, input)),
     async monitoringStatus(sessionID: string): Promise<MonitoringStatus> {
       const targets = await host.storedTargets(sessionID);
       const enrollment = service.inspect(sessionID);

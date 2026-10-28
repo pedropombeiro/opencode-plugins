@@ -285,7 +285,7 @@ new request each time.
 
 A summary turn runs after any active turn finishes, including its tool calls. Forgekeeper
 reads the announced comments, at most 20 of them and 4,000 characters each, with context
-the summary can't fetch itself, because it runs without tools:
+the summary can't fetch itself:
 
 - Earlier replies in each comment's thread, at most 5 of 1,000 characters each. GitHub
   provides only the comment a reply answers.
@@ -299,6 +299,48 @@ comments. Forgekeeper keeps all of this in plugin storage until the next user pr
 at most 7 days. It never enters the session's history, where later turns with tools could
 read it.
 
+#### Linked notes
+
+On GitLab, review comments often link to supporting notes, such as an issue in another
+project with further details. A summary can read those with one tool,
+`fetch_linked_review_note(url)`, which accepts only links that the announced comments'
+own text contains:
+
+- HTTPS links without credentials or a port, on the MR's GitLab host, to an issue, work
+  item, or MR note (`…/-/issues/1#note_2`). Notes in other projects count. Links in thread
+  replies, in code, or in a linked note don't, so nothing a linked note says can widen
+  what the summary reads.
+- At most 5 links per summary, each at most 300 characters, without duplicates or links
+  to the announced comments.
+
+Forgekeeper stores these links with the summary's record before posting its message. The
+tool reads a note with one fixed GraphQL query through `glab`, and keeps it only if the
+note GitLab returns, of any note type, has the link's note ID and names the same project,
+issue or MR, and note. GitLab returns nothing for notes you can't read. The model supplies
+only the link: never a host, query, method, or header.
+
+Each summary gets 5 calls. Every call counts, including repeats, refused links, and failed
+reads, and is spent before the read, so neither concurrent calls nor a reload restore it.
+A linked note keeps at most 4,000 characters, and all of them together at most 12,000.
+The comments come first in the request's 40,000-character budget. Linked notes, with
+their links and status lines, get only what the comments leave; notes that don't fit are
+reported as left out, and without room for the readable links, the request offers no tool.
+
+The tool returns only a receipt that names the link, which is what stays in the session's
+history. The note's text goes to the summary's record, and from there only into the
+summary's next requests, as a `<linked-note>` block. Every request that can hold linked
+notes, including the last one, which has no tool, keeps the instructions that treat them
+as untrusted like the comments.
+
+The tool works only for the summary of the session's latest model request, and checks
+the session's context again on each call, so a user prompt ends its access even before
+the next request. A record older than 7 days counts as missing in every check, not just
+at the next startup. After a reload, the tool refuses until the next request. A stopped
+instance writes nothing, and cleanup waits for its calls, so a late call can't overwrite
+the budget its replacement uses. Ordinary requests never include the tool, and summaries
+without links, notices, and steps whose summary can't be read get no tools at all.
+GitHub summaries don't read linked notes.
+
 Forgekeeper recognizes a step whose input is one of its messages in two independent ways:
 
 - Every message it posts ends with a tag naming its ID, such as
@@ -311,18 +353,21 @@ Forgekeeper recognizes a step whose input is one of its messages in two independ
 
 Before each model request that either way identifies, its context hook:
 
-- removes every tool from the request;
+- removes every tool from the request, except the linked-note tool while the summary has
+  links left to read;
 - replaces the system prompt with summary instructions that treat comments as untrusted;
-- replaces the conversation with one message holding the comments, or the notice, so the
-  request doesn't resend the session's history;
+- replaces the conversation with one message holding the comments and the linked notes
+  read so far, or the notice, so the request resends neither the session's history nor
+  the step's own tool calls;
 - caps the output at 1,200 tokens.
 
 If the review text is missing, such as after its record expired, the request asks for a
 short reply saying so, still without tools or history. If the hook can't build the
 replacement message, the request fails rather than keeping any of the session's messages.
 
-As backstops, Forgekeeper refuses every tool execution and permission request while the
-session's latest model request was one of these, and treats a step it can't classify as
+As backstops, Forgekeeper refuses every tool execution other than the linked-note tool,
+which checks its own calls and asks for no permissions, and every permission request,
+while the session's latest model request was one of these, and treats a step it can't classify as
 one, such as when the session's context can't be read, or when a compaction left no
 input in it. The turn ends at the next user prompt. A later turn that another plugin starts
 without a user prompt also runs without tools. The summary is the only part that stays in
@@ -463,7 +508,10 @@ and environment are those of the OpenCode service; monitoring does not provide O
 isolation or reduce those credentials' scopes.
 
 The `inbox` and `passive` modes never invoke a model. The `summary` mode sends review
-text to the session's model in a request without tools. No mode executes commands from
+text to the session's model in a request whose only possible tool reads GitLab notes that
+the comments link to, as described in [Linked notes](#linked-notes). It reads with your
+`glab` credentials, so it can read private notes in other projects on the same host that
+those links name. No mode executes commands from
 review content, edits repository files, commits, pushes, posts replies, or resolves
 discussions.
 Comment links are opened only after user selection and must use HTTPS on the target's
