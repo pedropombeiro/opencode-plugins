@@ -75,7 +75,7 @@ export default {
       return client.snapshot(place);
     };
 
-    // `reviewStatus: false` on a directory's server turns its footer and
+    // `status: false` on a directory's server turns its footer and
     // commands off. Each directory has its own options.
     const enabledFor = (directory: string) => {
       version();
@@ -190,7 +190,7 @@ export default {
     const statusOff = (place: Place) => {
       if (enabledFor(place.directory)) return false;
       context.ui.toast.show({
-        message: "PR/MR status is off in the plugin's options (reviewStatus: false)",
+        message: "PR/MR status is off in the plugin's options (status: false)",
         variant: 'info',
       });
       return true;

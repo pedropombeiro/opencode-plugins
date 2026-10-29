@@ -38,7 +38,7 @@ const key = { type: 'string' } as const;
 // type, so the schema doesn't repeat the lookup's shape.
 const snapshot = { type: 'object', title: 'Snapshot' } as const;
 const inboxState = { type: 'object', title: 'InboxState' } as const;
-// `enabled` is false when the plugin's `reviewStatus` option is off.
+// `enabled` is false when the plugin's `status` option is off.
 const status = {
   type: 'object',
   properties: { enabled: { type: 'boolean' }, snapshot },

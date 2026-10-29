@@ -112,18 +112,22 @@ describe('retargetChildren', () => {
   });
 
   test('only describes or proposes without "apply" and its action', async () => {
-    const notify = harness({}, { policy: { mode: 'notify', actions: [] } });
-    expect(await notify.lines()).toEqual(['!2 builds on !1: it targets branch-1.']);
-    expect(notify.reads).toEqual([]);
+    // Without the retarget action, neither mode works anything out, such as
+    // when `stricter` keeps only the actions both policies allow.
     for (const policy of [
-      { mode: 'prepare', actions: ['retarget'] },
+      { mode: 'notify', actions: [] },
+      { mode: 'prepare', actions: [] },
       { mode: 'apply', actions: [] },
     ] as EventPolicy[]) {
       const app = harness({}, { policy });
-      expect(await app.lines()).toEqual(['Proposed: retarget !2 from branch-1 to main.']);
-      expect(app.calls).toEqual([]);
+      expect(await app.lines()).toEqual(['!2 builds on !1: it targets branch-1.']);
+      expect(app.reads).toEqual([]);
       expect(app.journal.size).toBe(0);
     }
+    const prepare = harness({}, { policy: { mode: 'prepare', actions: ['retarget'] } });
+    expect(await prepare.lines()).toEqual(['Proposed: retarget !2 from branch-1 to main.']);
+    expect(prepare.calls).toEqual([]);
+    expect(prepare.journal.size).toBe(0);
     const unsupported = harness({}, { retarget: undefined });
     expect(await unsupported.lines()).toEqual([
       "Proposed: retarget !2 from branch-1 to main. Forgekeeper can't retarget on this forge.",

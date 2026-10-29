@@ -305,12 +305,12 @@ export async function setupStatus(
     // An update reaches its session in the mode it was recorded in, so changing
     // the mode affects only later updates. Turning a kind's delivery off stops
     // its retries, and leaves the other kind's alone.
-    ...(settings.feedbackDelivery === 'inbox' && settings.lifecycleDelivery === 'inbox'
+    ...(settings.delivery.reviews === 'inbox' && settings.delivery.lifecycle === 'inbox'
       ? {}
       : {
           notify: async (item) => void (await deliver(item)),
           enabled: (item) =>
-            (item.kind ? settings.lifecycleDelivery : settings.feedbackDelivery) !== 'inbox',
+            (item.kind ? settings.delivery.lifecycle : settings.delivery.reviews) !== 'inbox',
         }),
   });
 
@@ -757,7 +757,7 @@ export async function setupStatus(
         ...(comments.postedAt !== undefined ? { postedAt: comments.postedAt } : {}),
         // Recorded with the update, so changing the mode affects later updates
         // only, and an update stored in inbox mode never starts a turn.
-        ...(settings.feedbackDelivery !== 'inbox' ? { delivery: settings.feedbackDelivery } : {}),
+        ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
         at: (deps.now ?? Date.now)(),
       });
     }
@@ -791,7 +791,7 @@ export async function setupStatus(
     },
   });
 
-  const automated = settings.notifyAutomatedReviews
+  const automated = settings.watch.automatedReviews
     ? createAutomatedReviewWatcher({
         isTarget: (sessionID, url) => {
           const ref = parseUrl(url);
@@ -934,10 +934,10 @@ export async function setupStatus(
       },
     });
 
-  // People's comments, and review bots' such as security reviewers', which
-  // count as automated reviews, so each follows its own setting.
-  // A review bot counts only on its own host, which its comment's URL names.
-  const reviewBots = settings.notifyAutomatedReviews ? settings.reviewBots : {};
+  // People's comments, and review bots' such as security reviewers', each
+  // watched on its own. A review bot counts only on its own host, which its
+  // comment's URL names.
+  const reviewBots = settings.watch.reviewBots ? settings.reviewBots : {};
   const commentHost = (url: string) => {
     try {
       return new URL(url).host;
@@ -946,16 +946,16 @@ export async function setupStatus(
     }
   };
   const human =
-    settings.notifyHumanReviews || Object.values(reviewBots).some((names) => names.length)
+    settings.watch.humanReviews || Object.values(reviewBots).some((names) => names.length)
       ? feedbackWatcher(false, {
-          humans: settings.notifyHumanReviews,
+          humans: settings.watch.humanReviews,
           reviewBot: (comment) => {
             const host = commentHost(comment.url);
             return !!host && matchesReviewBot(reviewBots, host, comment.username);
           },
         })
       : undefined;
-  const publishedFeedback = settings.notifyAutomatedReviews ? feedbackWatcher(true) : undefined;
+  const publishedFeedback = settings.watch.automatedReviews ? feedbackWatcher(true) : undefined;
 
   const readLifecycle = async (prefix: string) =>
     (await scanAll(prefix)).map(({ value }) => value as LifecycleRecord);
@@ -968,13 +968,10 @@ export async function setupStatus(
     return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
   }
 
-  // The current policy for an event. Failed pipelines only notify.
+  // The current policy for an event. Conflicts and failed pipelines only
+  // notify.
   const policyOf = (kind: LifecycleKind) =>
-    kind === 'merged'
-      ? settings.lifecycleExecution.parentMerged
-      : kind === 'conflict'
-        ? settings.lifecycleExecution.conflict
-        : undefined;
+    kind === 'merged' ? settings.lifecycleExecution.parentMerged : undefined;
 
   // Takes a lifecycle event to the inbox, after any follow-up its policy
   // allows. Resolves `false` to drop the event, `retry` to keep it while a
@@ -1129,7 +1126,7 @@ export async function setupStatus(
     return true;
   }
 
-  const lifecycle = settings.notifyLifecycle
+  const lifecycle = settings.watch.lifecycle
     ? createLifecycleWatcher({
         records: (sessionID) => readLifecycle(lifecyclePrefix(sessionID)),
         write: async (record) => {
@@ -1153,7 +1150,7 @@ export async function setupStatus(
         deliver: recordLifecycle,
         reference,
         policy: policyOf,
-        delivery: () => settings.lifecycleDelivery,
+        delivery: () => settings.delivery.lifecycle,
         onError: (error) =>
           reportOnce('lifecycle', 'Could not record merge request changes', error),
         now: deps.now,
@@ -1260,15 +1257,6 @@ export async function setupStatus(
     void notifyPending();
     void retryLifecycle();
   }, FETCH_INTERVAL);
-  // Options that were ignored, such as an execution policy that isn't
-  // supported, fall back to notifying only.
-  if (settings.problems.length)
-    reportOnce(
-      'options',
-      'Some Forgekeeper options were ignored',
-      new Error(settings.problems.join('; ')),
-    );
-
   // Housekeeping, on the write queue so it doesn't hold up setup: removes
   // feedback records not seen for a long time.
   write(async () => {
@@ -1376,8 +1364,8 @@ export async function setupStatus(
         leased: enrollment.leased,
         polling: enrollment.polling,
         paused: enrollment.paused,
-        humanFeedback: settings.notifyHumanReviews,
-        automatedFeedback: settings.notifyAutomatedReviews,
+        humanFeedback: settings.watch.humanReviews,
+        automatedFeedback: settings.watch.automatedReviews,
         status: {
           loading: snapshot.loading,
           ...(snapshot.fetchedAt !== undefined ? { fetchedAt: snapshot.fetchedAt } : {}),

@@ -253,7 +253,7 @@ sent again.
 For each explicit target that is an open PR/MR, the server records new review feedback.
 A target that merges or closes gets no more notifications, and a notification waiting for a
 retry is dropped.
-Feedback goes to a persistent inbox. The `reviewFeedbackDelivery` option sets what else
+Feedback goes to a persistent inbox. The `delivery.reviews` option sets what else
 an update does:
 
 - `inbox`, the default, posts nothing to the session.
@@ -271,7 +271,7 @@ reviews, show when Forgekeeper detected them instead. Times are absolute and loc
 their time zone, such as `Oct 28, 2026 at 3:25 PM GMT+1`, so they stay accurate in the
 session's history. `/forge-feedback` shows the same time, and a summary starts by saying it.
 
-Each update keeps the mode it was recorded in, so changing `reviewFeedbackDelivery`
+Each update keeps the mode it was recorded in, so changing `delivery.reviews`
 affects later updates only: switching to `summary` never starts turns for updates already
 in the inbox. Summarize those with Ctrl+R instead. Stable message IDs deduplicate
 automatic retries, including after reloads. Updates that haven't reached their session are
@@ -280,9 +280,9 @@ hold the others back. Delivery doesn't hold up the inbox: `/forge-feedback`, pau
 acknowledging work while a summary reads its comments, and an update in flight isn't sent
 again by a retry. An update whose session was deleted, archived, or moved, or that no
 longer targets the PR/MR, is dropped, including when that changed while its comments were
-read. Switching `reviewFeedbackDelivery` to `inbox` stops retries of review updates, and
+read. Switching `delivery.reviews` to `inbox` stops retries of review updates, and
 leaves them undelivered, so they go again once it's switched back. Merge request updates
-follow `lifecycleDelivery` the same way. A summary requested from `/forge-feedback` is a
+follow `delivery.lifecycle` the same way. A summary requested from `/forge-feedback` is a
 new request each time.
 
 ### Summary turns
@@ -451,11 +451,11 @@ removed target never triggers a notification.
 
   Duo Security Review has one account per top-level group, so add yours, such as
   `duo-security-review-acme`, and a self-managed instance's accounts under its host. Your
-  list replaces the defaults, and `{}` turns this off. Names have no wildcards, since a
-  group owner can create a bot account with any free name, such as one that starts like
-  a security reviewer's. Only accounts that the forge flags as bots count, and only on the
-  host they're listed for. They count as automated reviews, so `notifyAutomatedReviews`
-  controls them, whether or not `notifyHumanReviews` is on. GitLab Duo's code review
+  list replaces the defaults, and `watch.reviewBots: false` turns this off. Names have no
+  wildcards, since a group owner can create a bot account with any free name, such as one
+  that starts like a security reviewer's. Only accounts that the forge flags as bots count,
+  and only on the host they're listed for. `watch.reviewBots` controls them on its own,
+  apart from `watch.humanReviews` and `watch.automatedReviews`. GitLab Duo's code review
   findings always go through their own watcher instead. Internal notes, such as Duo
   Security Review's, count when your account can read them.
 
@@ -563,7 +563,7 @@ Forgekeeper only reports failed jobs: it doesn't retry or fix them.
 Each change waits in the target's record until it reaches the inbox, in the same storage
 write as the record. A merge stops polling, so waiting changes are retried every minute
 and after a reload, without another lookup. Updates go to `/forge-feedback`, and
-`lifecycleDelivery` sets what else they do: `"inbox"`, the default, `"passive"`, or
+`delivery.lifecycle` sets what else they do: `"inbox"`, the default, `"passive"`, or
 `"summary"`, as for [review feedback](#review-notifications). Each change keeps the mode
 from when it was detected, so turning on summaries never starts turns for changes found
 earlier. A summary turn has no tools, and gets only Forgekeeper's facts about the change,
@@ -571,7 +571,8 @@ never comments.
 
 A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
-drops clear right away. Turning `notifyLifecycle` off stops all three kinds.
+drops clear right away. Setting `watch.lifecycle` to `false` stops all three kinds, and
+retargeting too, since nothing notices merges then.
 
 ### Stacked PRs/MRs
 
@@ -584,11 +585,14 @@ two PRs/MRs a stack.
 When a parent merges, its update lists each dependent, and `lifecycleExecution.parentMerged`
 sets what Forgekeeper does about them:
 
-| Mode        | What happens                                                                         |
-| ----------- | ------------------------------------------------------------------------------------ |
-| `"notify"`  | The default. The update names the dependents and the branch they target.             |
-| `"prepare"` | Forgekeeper reads each dependent again and says how it would retarget it, if at all. |
-| `"apply"`   | It also retargets them, but only with `"actions": ["retarget"]`.                     |
+| Mode        | What happens                                                                              |
+| ----------- | ----------------------------------------------------------------------------------------- |
+| `"notify"`  | The default. The update names the dependents and the branch they target, and no more.     |
+| `"prepare"` | Forgekeeper works out the listed actions and reports them, such as how it would retarget. |
+| `"apply"`   | It also carries out the listed actions.                                                   |
+
+`actions` lists what `prepare` works out and `apply` carries out, so both need at least
+one. `parentMerged` supports `"retarget"`:
 
 ```json
 {
@@ -611,7 +615,8 @@ whose response was lost counts as done once the dependent targets the new branch
 read or retarget is tried again every minute and after a reload, at most 3 times, failed
 reads included. Until then, the merge's update waits, so it reports the outcome. After the
 last attempt, the update reports the failure. A reload during the last attempt doesn't
-earn another: Forgekeeper only reads the dependent again to report what that attempt did. The update's details report each outcome.
+earn another: Forgekeeper only reads the dependent again to report what that attempt did.
+The update's details report each outcome.
 
 This is Forgekeeper's own action, through one fixed forge operation: no model or agent
 tool takes part, and nothing touches your checkout, so it doesn't wait for the session to
@@ -622,11 +627,11 @@ retargeting; GitHub dependents get a proposal instead. GitLab has no conditional
 so a change made in the moment between Forgekeeper's read and its retarget is
 overwritten; the read afterwards reports what the MR targets then.
 
-`lifecycleExecution.conflict` supports only `"notify"` for now. Preparing or resolving
-conflicts needs your checkout, so it needs a lock across OpenCode instances and a way to
-tie tool calls to their step, which OpenCode's plugin API doesn't provide yet. An invalid or
-unsupported policy, such as `"apply"` without actions, falls back to `"notify"`, and
-Forgekeeper shows an error toast saying which options it ignored.
+Conflicts and failed jobs only notify, so `lifecycleExecution` has no policy for them.
+Preparing or resolving conflicts needs your checkout, so it needs a lock across OpenCode
+instances and a way to tie tool calls to their step, which OpenCode's plugin API doesn't
+provide yet. An invalid or unsupported policy, such as `"apply"` without actions, falls
+back to `"notify"`, and Forgekeeper shows an error toast saying which options it ignored.
 
 ## Options
 
@@ -667,23 +672,36 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 
 ```json
 {
-  "plugins": [{ "package": "opencode-forgekeeper", "options": { "notifyHumanReviews": false } }]
+  "plugins": [
+    { "package": "opencode-forgekeeper", "options": { "watch": { "humanReviews": false } } }
+  ]
 }
 ```
 
-| Option                   | Default                       | Description                                                                                                                    |
-| ------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `reviewStatus`           | `true`                        | Show the PR/MR status and monitor review feedback. Set to `false` to keep only session targets and titles.                     |
-| `hosts`                  | `["gitlab.com"]`              | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                     |
-| `githubHosts`            | `["github.com"]`              | GitHub hosts, including GitHub Enterprise hosts.                                                                               |
-| `pollSeconds`            | `120`                         | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                       |
-| `notifyAutomatedReviews` | `true`                        | Surface automated reviews that finish with feedback. The former name, `notifyDuoReview`, still works.                          |
-| `notifyHumanReviews`     | `true`                        | Surface new human review feedback.                                                                                             |
-| `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications). |
-| `reviewFeedbackDelivery` | `"inbox"`                     | What an update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).   |
-| `notifyLifecycle`        | `true`                        | Surface targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).        |
-| `lifecycleDelivery`      | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                           |
-| `lifecycleExecution`     | all `"notify"`                | What Forgekeeper does about each event: `parentMerged` and `conflict`. See [Stacked PRs/MRs](#stacked-prsmrs).                 |
+| Option                   | Default                       | Description                                                                                                                        |
+| ------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                 | `true`                        | Show the PR/MR status and monitor the session's PRs/MRs. Set to `false` to keep only session targets and titles.                   |
+| `hosts`                  | `["gitlab.com"]`              | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                         |
+| `githubHosts`            | `["github.com"]`              | GitHub hosts, including GitHub Enterprise hosts.                                                                                   |
+| `pollSeconds`            | `120`                         | Normal polling interval. Running automated reviews poll at 30 seconds or this value, whichever is lower.                           |
+| `watch.humanReviews`     | `true`                        | Watch for new review feedback from people.                                                                                         |
+| `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                  |
+| `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                           |
+| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).          |
+| `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).     |
+| `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns). |
+| `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                               |
+| `lifecycleExecution`     | `"notify"`                    | What Forgekeeper does when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                       |
+
+`watch` and `delivery` list only what you change, and sources added in later releases start
+on. For example, this summarizes review feedback and stops watching merge request changes:
+
+```json
+{ "watch": { "lifecycle": false }, "delivery": { "reviews": "summary" } }
+```
+
+An option Forgekeeper doesn't know, or a value it can't use, shows an error toast at startup
+that names the option and what's used instead, even with `status` off.
 
 The server entry point reads every option, so changing one takes effect when the server
 plugin reloads. The CLI has no options of its own. Each checkout's server reads the
@@ -695,7 +713,7 @@ To keep the behavior of `opencode-forge-session-title` alone, turn off review st
 
 ```json
 {
-  "plugins": [{ "package": "opencode-forgekeeper", "options": { "reviewStatus": false } }]
+  "plugins": [{ "package": "opencode-forgekeeper", "options": { "status": false } }]
 }
 ```
 
@@ -762,9 +780,22 @@ OpenCode scopes plugin storage by plugin ID, so nothing stored under the former 
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
 With default options, the footer and review monitoring start right away. All notifications
-stay in the feedback inbox, and no session turn starts unless you set
-`reviewFeedbackDelivery` to `"summary"`. The former `resumeSession` option has
-been removed; saved values have no effect. Set `reviewStatus` to `false` to keep only titles.
+stay in the feedback inbox, and no session turn starts unless you set `delivery.reviews`
+or `delivery.lifecycle` to `"summary"`. Set `status` to `false` to keep only titles.
+
+Forgekeeper 3 renamed and regrouped its options, and the former names show an error toast
+as unknown options:
+
+| Former option                               | Now                                                              |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| `reviewStatus`                              | `status`                                                         |
+| `notifyHumanReviews`                        | `watch.humanReviews`                                             |
+| `notifyAutomatedReviews`, `notifyDuoReview` | `watch.automatedReviews`, and `watch.reviewBots` for review bots |
+| `reviewFeedbackDelivery`                    | `delivery.reviews`                                               |
+| `lifecycleDelivery`                         | `delivery.lifecycle`                                             |
+| `notifyLifecycle`                           | `watch.lifecycle`                                                |
+| `lifecycleExecution.conflict`               | Removed: conflicts only notify                                   |
+| `resumeSession`                             | `delivery.reviews: "summary"`                                    |
 
 ## Code layout
 

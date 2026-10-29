@@ -72,11 +72,12 @@ export async function retargetChildren(options: RetargetOptions): Promise<Retarg
   const { parent, policy } = options;
   const from = parent.sourceBranch;
   const to = parent.targetBranch;
-  const applying =
-    policy.mode === 'apply' && policy.actions.includes('retarget') && !!options.retarget;
+  // The policy's actions say what `prepare` works out and `apply` carries out.
+  const retargeting = policy.mode !== 'notify' && policy.actions.includes('retarget');
+  const applying = retargeting && policy.mode === 'apply' && !!options.retarget;
 
   async function handle(child: LifecycleRecord): Promise<{ line: string; retry?: boolean }> {
-    if (policy.mode === 'notify')
+    if (!retargeting)
       return {
         line: `${child.reference} builds on ${parent.reference}: it targets ${from ?? 'its source branch'}.`,
       };
@@ -142,9 +143,7 @@ export async function retargetChildren(options: RetargetOptions): Promise<Retarg
     if (!applying)
       return {
         line: `Proposed: retarget ${child.reference} from ${from} to ${to}.${
-          policy.mode === 'apply' && policy.actions.includes('retarget')
-            ? " Forgekeeper can't retarget on this forge."
-            : ''
+          policy.mode === 'apply' ? " Forgekeeper can't retarget on this forge." : ''
         }`,
       };
     if (exhausted)
