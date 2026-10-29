@@ -245,7 +245,7 @@ describe('observe', () => {
   });
 
   test('records the policy each event happened under', () => {
-    const policy = { mode: 'apply' as const, actions: ['retarget' as const] };
+    const policy = { mode: 'prepare' as const, actions: ['retarget' as const] };
     const [record] = observe(
       'one',
       [mr('1', { state: 'merged' })],
@@ -294,7 +294,7 @@ describe('observe', () => {
 });
 
 describe('createLifecycleWatcher', () => {
-  function harness(deliver: (event: LifecycleEvent) => Promise<boolean | 'retry'>) {
+  function harness(deliver: (event: LifecycleEvent) => Promise<boolean>) {
     const stored = new Map<string, LifecycleRecord>();
     const writes: LifecycleRecord[] = [];
     const watcher = createLifecycleWatcher({
@@ -350,17 +350,6 @@ describe('createLifecycleWatcher', () => {
     failing = false;
     await app.watcher.retry();
     expect(delivered).toEqual(['conflict', 'merged']);
-    expect(app.stored.get(mr('1').url)?.pending).toEqual([]);
-  });
-
-  test('keeps an event whose delivery asks for another attempt, without an error', async () => {
-    let attempts = 0;
-    const app = harness(async () => (++attempts < 2 ? 'retry' : true));
-    await app.watcher.observe('one', [mr('1')]);
-    await app.watcher.observe('one', [mr('1', { state: 'merged' })]);
-    expect(app.stored.get(mr('1').url)?.pending).toHaveLength(1);
-    await app.watcher.retry();
-    expect(attempts).toBe(2);
     expect(app.stored.get(mr('1').url)?.pending).toEqual([]);
   });
 

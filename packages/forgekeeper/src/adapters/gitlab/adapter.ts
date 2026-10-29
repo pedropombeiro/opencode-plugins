@@ -282,35 +282,7 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
       return ref ? fetchLinkedNote(glabGraphQL(run, directory), ref.host, url) : undefined;
     },
   },
-  lifecycle: {
-    async retarget(run, directory, request, branch) {
-      const ref = gitlabTraits.parseUrl(request.url);
-      if (!ref) throw new Error(`Not a merge request URL: ${request.url}`);
-      const data = await typed(glabGraphQL(run, directory))(ref.host, RETARGET_MUTATION, {
-        project: ref.project,
-        iid: ref.iid,
-        branch,
-      });
-      const result = data.mergeRequestUpdate;
-      const errors = result?.errors ?? [];
-      if (errors.length) throw new Error(errors.join('; '));
-      if (result?.mergeRequest?.targetBranch !== branch)
-        throw new Error(
-          `GitLab kept the target ${result?.mergeRequest?.targetBranch ?? 'unknown'}`,
-        );
-    },
-  },
 };
-
-// Changes only the target branch. GitLab offers no condition on the current
-// target, so the caller reads the MR right before and after.
-const RETARGET_MUTATION = query<{
-  mergeRequestUpdate?: { errors: string[]; mergeRequest?: { targetBranch: string } | null } | null;
-}>(`mutation($project: ID!, $iid: String!, $branch: String!) {
-  mergeRequestUpdate(input: { projectPath: $project, iid: $iid, targetBranch: $branch }) {
-    errors mergeRequest { targetBranch }
-  }
-}`);
 
 // Final Duo states that can leave feedback to act on. An approval, or a review
 // that was reset to unreviewed, needs nothing from the agent. New GitLab

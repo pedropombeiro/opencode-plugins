@@ -7,7 +7,6 @@ import {
   classifyError,
   DISCUSSIONS_QUERY,
   GitLabForge,
-  gitlabTraits,
   glabGraphQL,
   SOURCE_BRANCH_QUERY,
   type GraphQL,
@@ -483,48 +482,6 @@ describe('GitLabForge.findByNumber', () => {
   test('returns undefined when no project has the MR', async () => {
     const graphql: GraphQL = async () => ({ p0: { mergeRequest: null }, p1: null });
     expect(await new GitLabForge(graphql).findByNumber(projects, '42')).toBeUndefined();
-  });
-});
-
-describe('gitlabTraits.lifecycle.retarget', () => {
-  const request = { url: 'https://gitlab.com/group/project/-/merge_requests/2' } as never;
-  const retarget = (stdout: string) => {
-    const calls: string[][] = [];
-    const exec: Exec = async (_file, args) => {
-      calls.push(args);
-      return { stdout, stderr: '', code: 0 };
-    };
-    return {
-      calls,
-      run: () => gitlabTraits.lifecycle!.retarget!(exec, '/repo', request, 'main'),
-    };
-  };
-  const answer = (value: unknown) => JSON.stringify({ data: { mergeRequestUpdate: value } });
-
-  test('changes only the target branch, through one fixed mutation', async () => {
-    const app = retarget(answer({ errors: [], mergeRequest: { targetBranch: 'main' } }));
-    await app.run();
-    const [args] = app.calls;
-    expect(args.slice(0, 4)).toEqual(['api', 'graphql', '--hostname', 'gitlab.com']);
-    expect(args[5]).toStartWith('query=mutation($project: ID!, $iid: String!, $branch: String!)');
-    expect(args[5]).toContain('targetBranch: $branch');
-    expect(args.slice(6)).toEqual([
-      '-f',
-      'project=group/project',
-      '-f',
-      'iid=2',
-      '-f',
-      'branch=main',
-    ]);
-  });
-
-  test("rejects with GitLab's reason, or when the target didn't change", async () => {
-    await expect(
-      retarget(answer({ errors: ['Target branch does not exist'], mergeRequest: null })).run(),
-    ).rejects.toThrow('Target branch does not exist');
-    await expect(
-      retarget(answer({ errors: [], mergeRequest: { targetBranch: 'other' } })).run(),
-    ).rejects.toThrow('GitLab kept the target other');
   });
 });
 
