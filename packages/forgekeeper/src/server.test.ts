@@ -56,7 +56,6 @@ interface Options {
   feedback?: (request: ReviewRequest) => Promise<FeedbackSnapshot | undefined>;
   details?: (request: ReviewRequest, ids: string[]) => Promise<CommentDetail[]>;
   linkedNote?: (request: ReviewRequest, url: string) => Promise<LinkedNote | undefined>;
-  retarget?: (request: ReviewRequest, branch: string) => Promise<void>;
   // Shared with another instance, such as the one after a reload.
   transcripts?: Map<string, Transcript>;
   now?: () => number;
@@ -417,7 +416,6 @@ async function harness(options: Options = {}) {
               body: `Comment ${id}`,
             }))),
         ...(options.linkedNote ? { linkedNote: options.linkedNote } : {}),
-        ...(options.retarget ? { retarget: options.retarget } : {}),
         ...(options.now ? { now: options.now } : {}),
       }
     : undefined;
@@ -2113,52 +2111,37 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
-  test('retargets a dependent target once its parent merges, when the policy allows it', async () => {
+  test('proposes retargeting a dependent target once its parent merges, with "prepare"', async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1');
     forge.set('group/a', '2', { targetBranch: 'branch-1' });
-    const calls: string[] = [];
     const { app } = await watchedTargets([projectA, child], {
       status: forge,
       pluginOptions: {
-        lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
-      },
-      retarget: async (request, branch) => {
-        calls.push(`${request.iid} ${branch}`);
-        forge.set('group/a', request.iid, { targetBranch: branch });
+        lifecycleExecution: { parentMerged: { mode: 'prepare', actions: ['retarget'] } },
       },
     });
     forge.set('group/a', '1', { state: 'merged' });
     await app.refresh();
     await settle();
-    expect(calls).toEqual(['2 main']);
     expect((await app.feedback()).items).toMatchObject([
       {
         kind: 'merged',
         title: '!1 merged into main',
-        details: ['Retargeted !2 from branch-1 to main.'],
+        details: ['Proposed: retarget !2 from branch-1 to main.'],
       },
     ]);
-    // A later lookup changes nothing more.
-    await app.refresh();
-    await settle();
-    expect(calls).toHaveLength(1);
     await app.cleanup();
   });
 
-  test('only proposes the retarget by default, and changes nothing', async () => {
+  test('only describes the dependents by default', async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1');
     forge.set('group/a', '2', { targetBranch: 'branch-1' });
-    const calls: string[] = [];
-    const { app } = await watchedTargets([projectA, child], {
-      status: forge,
-      retarget: async (request) => void calls.push(request.iid),
-    });
+    const { app } = await watchedTargets([projectA, child], { status: forge });
     forge.set('group/a', '1', { state: 'merged' });
     await app.refresh();
     await settle();
-    expect(calls).toEqual([]);
     expect((await app.feedback()).items).toMatchObject([
       { kind: 'merged', details: ['!2 builds on !1: it targets branch-1.'] },
     ]);
@@ -2196,18 +2179,9 @@ describe('PR/MR status lifecycle', () => {
       ],
       [key(child), record('2', { targetBranch: 'branch-1', parent: projectA })],
     ]);
-    const calls: string[] = [];
-    // Execution was enabled after the merge, which nothing polls anymore.
-    const app = await harness({
-      storage,
-      status: forge,
-      pluginOptions: {
-        lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
-      },
-      retarget: async (request) => void calls.push(request.iid),
-    });
+    // Preparing was enabled after the merge, which nothing polls anymore.
+    const app = await harness({ storage, status: forge, pluginOptions: preparing });
     await settle();
-    expect(calls).toEqual([]);
     expect((await app.feedback()).items).toMatchObject([
       { id, kind: 'merged', at: 5, details: ['!2 builds on !1: it targets branch-1.'] },
     ]);
@@ -2218,10 +2192,10 @@ describe('PR/MR status lifecycle', () => {
   // Storage after the parent of a stack merged, with the merge waiting for
   // delivery, as a reload finds it. `targets` are the session's targets now.
   // The records are recent, so housekeeping keeps them.
-  const applyPolicy = { mode: 'apply', actions: ['retarget'] };
+  const preparePolicy = { mode: 'prepare', actions: ['retarget'] };
   const mergedStack = (
     targets: string[],
-    event: Record<string, unknown> = { policy: applyPolicy },
+    event: Record<string, unknown> = { policy: preparePolicy },
     storage = new Map<string, unknown>(),
   ) => {
     const record = (iid: string, overrides: Record<string, unknown>) => ({
@@ -2254,118 +2228,58 @@ describe('PR/MR status lifecycle', () => {
     return { storage, forge, id };
   };
   const lifecycleRecord = (url: string) => `status/lifecycle/one/${encodeURIComponent(url)}`;
-  const pendingOf = (storage: Map<string, unknown>) =>
-    (storage.get(lifecycleRecord(projectA)) as { pending: unknown[] }).pending;
-  const applying = {
-    lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
+  const preparing = {
+    lifecycleExecution: { parentMerged: { mode: 'prepare', actions: ['retarget'] } },
   };
 
-  test("doesn't retarget a dependent the session no longer targets", async () => {
+  test('proposes nothing for a dependent the session no longer targets', async () => {
     // The child's record outlives its removal from the targets.
     const { storage, forge } = mergedStack([projectA]);
-    const calls: string[] = [];
-    const app = await harness({
-      storage,
-      status: forge,
-      pluginOptions: applying,
-      retarget: async (request) => void calls.push(request.iid),
-    });
+    const app = await harness({ storage, status: forge, pluginOptions: preparing });
     await settle();
     expect(storage.has(lifecycleRecord(child))).toBe(true);
-    expect(calls).toEqual([]);
     const [item] = (await app.feedback()).items;
     expect(item).toMatchObject({ kind: 'merged' });
     expect(item.details).toBeUndefined();
     await app.cleanup();
   });
 
-  test("doesn't retarget a dependent the session drops while it's read", async () => {
+  test('reads the dependent again, so one GitLab already retargeted gets no proposal', async () => {
+    // GitLab retargets dependents itself when the merge deletes the branch.
     const { storage, forge } = mergedStack([projectA, child]);
-    forge.gated = true;
-    const calls: string[] = [];
-    const app = await harness({
-      storage,
-      status: forge,
-      pluginOptions: applying,
-      retarget: async (request) => void calls.push(request.iid),
-    });
+    forge.set('group/a', '2', { targetBranch: 'main' });
+    const app = await harness({ storage, status: forge, pluginOptions: preparing });
     await settle();
-    // The dependent is dropped while Forgekeeper reads it.
-    storage.set('sessions/one', { targets: [{ url: projectA }] });
-    forge.open();
-    await settle();
-    expect(calls).toEqual([]);
     expect((await app.feedback()).items).toMatchObject([
-      {
-        kind: 'merged',
-        details: ['!2 is no longer a target of this session, so Forgekeeper left it alone.'],
-      },
+      { kind: 'merged', details: ['!2 already targets main.'] },
     ]);
     await app.cleanup();
   });
 
-  test('keeps a merge waiting while its retarget fails, and retries it after a reload', async () => {
-    const { storage, forge, id } = mergedStack([projectA, child]);
-    const failing = await harness({
-      storage,
-      status: forge,
-      pluginOptions: applying,
-      retarget: async () => {
-        throw new Error('timeout');
-      },
+  test('never changes a dependent on the forge, since applying is no mode', async () => {
+    const { storage, forge } = mergedStack([projectA, child], {
+      policy: { mode: 'apply', actions: ['retarget'] },
     });
-    await settle();
-    // The update waits for the retarget's outcome, without an error toast.
-    expect((await failing.feedback()).items).toEqual([]);
-    expect(pendingOf(storage)).toHaveLength(1);
-    expect(failing.notices()).toEqual([]);
-    await failing.cleanup();
-
-    const calls: string[] = [];
     const app = await harness({
       storage,
       status: forge,
-      pluginOptions: applying,
-      retarget: async (request, branch) => {
-        calls.push(`${request.iid} ${branch}`);
-        forge.set('group/a', request.iid, { targetBranch: branch });
+      pluginOptions: {
+        lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['retarget'] } },
       },
     });
     await settle();
-    expect(calls).toEqual(['2 main']);
+    expect(forge.requests.get('group/a!2')?.targetBranch).toBe('branch-1');
     expect((await app.feedback()).items).toMatchObject([
-      { id, details: ['Retargeted !2 from branch-1 to main.'] },
+      { kind: 'merged', details: ['!2 builds on !1: it targets branch-1.'] },
     ]);
-    expect(pendingOf(storage)).toEqual([]);
-    await app.cleanup();
-  });
-
-  test('reports a retarget that keeps failing once its attempts run out', async () => {
-    const { storage, forge } = mergedStack([projectA, child]);
-    const calls: string[] = [];
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const app = await harness({
-        storage,
-        status: forge,
-        pluginOptions: applying,
-        retarget: async (request) => {
-          calls.push(request.iid);
-          throw new Error('403 Forbidden');
-        },
-      });
-      await settle();
-      await app.cleanup();
-    }
-    expect(calls).toHaveLength(3);
-    expect(pendingOf(storage)).toEqual([]);
-    const app = await harness({ storage, status: forge, pluginOptions: applying });
-    expect((await app.feedback()).items).toMatchObject([
-      {
-        details: [
-          'Could not retarget !2 from branch-1 to main: 403 Forbidden. Forgekeeper gave up after 3 attempts.',
-        ],
-      },
-    ]);
+    expect(app.notices()).toContainEqual(
+      expect.objectContaining({
+        variant: 'error',
+        message: expect.stringContaining(
+          'lifecycleExecution.parentMerged mode must be one of "notify", "prepare"; using "notify"',
+        ),
+      }),
+    );
     await app.cleanup();
   });
 
@@ -2434,7 +2348,7 @@ describe('PR/MR status lifecycle', () => {
     const app = await harness({
       status: new StatusForge(),
       pluginOptions: {
-        lifecycleExecution: { parentMerged: { mode: 'apply', actions: ['push'] } },
+        lifecycleExecution: { parentMerged: { mode: 'prepare', actions: ['push'] } },
       },
     });
     await settle();

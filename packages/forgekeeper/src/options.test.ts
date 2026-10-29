@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { DEFAULT_REVIEW_BOTS, matchesReviewBot, statusOptions } from './options';
 
 const notify = { mode: 'notify' as const, actions: [] };
-const retarget = (mode: 'prepare' | 'apply') => ({ mode, actions: ['retarget' as const] });
+const prepare = { mode: 'prepare' as const, actions: ['retarget' as const] };
 
 describe('statusOptions', () => {
   test('watches everything and delivers only to the inbox by default', () => {
@@ -117,14 +117,12 @@ describe('statusOptions', () => {
     );
   });
 
-  test('grants execution only as each event policy states', () => {
-    for (const mode of ['prepare', 'apply'] as const) {
-      const options = statusOptions({
-        lifecycleExecution: { parentMerged: { mode, actions: ['retarget', 'retarget'] } },
-      });
-      expect(options.lifecycleExecution.parentMerged).toEqual(retarget(mode));
-      expect(options.problems).toEqual([]);
-    }
+  test('works out only what each event policy states', () => {
+    const options = statusOptions({
+      lifecycleExecution: { parentMerged: { mode: 'prepare', actions: ['retarget', 'retarget'] } },
+    });
+    expect(options.lifecycleExecution.parentMerged).toEqual(prepare);
+    expect(options.problems).toEqual([]);
     expect(
       statusOptions({ lifecycleExecution: { parentMerged: { mode: 'notify' } } }),
     ).toMatchObject({ lifecycleExecution: { parentMerged: notify }, problems: [] });
@@ -132,12 +130,16 @@ describe('statusOptions', () => {
 
   test('falls back to notifying for every invalid or unsupported policy, and says why', () => {
     for (const [policy, reason] of [
-      [{ mode: 'apply' }, 'mode "apply" needs at least one action'],
       // The actions say what preparing works out, so without one there's nothing to prepare.
       [{ mode: 'prepare', actions: [] }, 'mode "prepare" needs at least one action'],
-      [{ mode: 'apply', actions: ['push'] }, 'actions has ["push"], but supports only "retarget"'],
-      [{ mode: 'everything' }, 'mode must be one of "notify", "prepare", "apply"'],
-      [{ mode: 'apply', actions: 'retarget' }, 'actions must be a list'],
+      [
+        { mode: 'prepare', actions: ['push'] },
+        'actions has ["push"], but supports only "retarget"',
+      ],
+      [{ mode: 'everything' }, 'mode must be one of "notify", "prepare"'],
+      // Forgekeeper never retargets itself, so applying isn't a mode.
+      [{ mode: 'apply', actions: ['retarget'] }, 'mode must be one of "notify", "prepare"'],
+      [{ mode: 'prepare', actions: 'retarget' }, 'actions must be a list'],
       ['apply', 'must be an object'],
     ] as const) {
       const options = statusOptions({ lifecycleExecution: { parentMerged: policy } });

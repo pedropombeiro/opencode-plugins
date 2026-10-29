@@ -511,7 +511,7 @@ export default {
         title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
         options: state.items.map((item) => ({
           title: item.title,
-          // A lifecycle event's first fact, such as a retarget, shows too.
+          // A lifecycle event's first fact, such as a proposed retarget, shows too.
           description: [
             context.data.session.get(item.sessionID)?.title ?? item.sessionID,
             feedbackTime(item),

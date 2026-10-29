@@ -572,7 +572,7 @@ never comments.
 A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
 drops clear right away. Setting `watch.lifecycle` to `false` stops all three kinds, and
-retargeting too, since nothing notices merges then.
+retarget proposals too, since nothing notices merges then.
 
 ### Stacked PRs/MRs
 
@@ -583,55 +583,39 @@ dependent PR/MR or delete the merged branch at that point. Sharing a session doe
 two PRs/MRs a stack.
 
 When a parent merges, its update lists each dependent, and `lifecycleExecution.parentMerged`
-sets what Forgekeeper does about them:
+sets what Forgekeeper works out about them:
 
-| Mode        | What happens                                                                              |
-| ----------- | ----------------------------------------------------------------------------------------- |
-| `"notify"`  | The default. The update names the dependents and the branch they target, and no more.     |
-| `"prepare"` | Forgekeeper works out the listed actions and reports them, such as how it would retarget. |
-| `"apply"`   | It also carries out the listed actions.                                                   |
+| Mode        | What happens                                                                          |
+| ----------- | ------------------------------------------------------------------------------------- |
+| `"notify"`  | The default. The update names the dependents and the branch they target, and no more. |
+| `"prepare"` | Forgekeeper works out the listed actions and proposes them in the update.             |
 
-`actions` lists what `prepare` works out and `apply` carries out, so both need at least
-one. `parentMerged` supports `"retarget"`:
+`actions` lists what `prepare` works out, so it needs at least one. `parentMerged`
+supports `"retarget"`:
 
 ```json
 {
-  "lifecycleExecution": { "parentMerged": { "mode": "apply", "actions": ["retarget"] } }
+  "lifecycleExecution": { "parentMerged": { "mode": "prepare", "actions": ["retarget"] } }
 }
 ```
 
-Forgekeeper retargets a dependent to the branch the parent merged into, and only when it
-still targets the parent's source branch in the same project. It reads the dependent from
-the forge right before and after, so one the forge already retargeted counts as done, and
-one that targets something else, closed, or merged keeps its target. A parent from a fork
-isn't retargeted to, since its branch lives in another project.
+Forgekeeper proposes retargeting a dependent to the branch the parent merged into, and only
+when it still targets the parent's source branch in the same project. It reads the
+dependent from the forge first, so one the forge already retargeted gets no proposal, and
+neither does one that targets something else, closed, or merged. A parent from a fork
+gets no proposal, since its branch lives in another project. Only dependents the session
+still targets count.
 
-Only dependents the session still targets count. Right before the change, Forgekeeper
-checks again that the session exists, isn't archived, belongs to this checkout, and still
-targets the dependent, so one dropped while it was read keeps its target.
+Forgekeeper never retargets anything itself, and never rebases. GitLab retargets up to
+four dependent MRs when the merge deletes the source branch, so a proposal usually means
+the branch was kept, which may be deliberate. Retarget the MR yourself, and rebase it if
+the parent was squashed, since its commits stay on the dependent branch. Each event keeps
+the policy it happened under, and the stricter of that and the current policy applies, so
+enabling `prepare` never reads dependents again for earlier merges.
 
-Each retarget's progress is stored: a reload doesn't repeat a finished one, and a retarget
-whose response was lost counts as done once the dependent targets the new branch. A failed
-read or retarget is tried again every minute and after a reload, at most 3 times, failed
-reads included. Until then, the merge's update waits, so it reports the outcome. After the
-last attempt, the update reports the failure. A reload during the last attempt doesn't
-earn another: Forgekeeper only reads the dependent again to report what that attempt did.
-The update's details report each outcome.
-
-This is Forgekeeper's own action, through one fixed forge operation: no model or agent
-tool takes part, and nothing touches your checkout, so it doesn't wait for the session to
-be idle. It changes no reviewers, assignments, or discussions, and never merges anything.
-Each event keeps the policy it happened under, and the stricter of that and the current
-policy applies, so enabling `apply` never acts on earlier merges. GitLab supports
-retargeting; GitHub dependents get a proposal instead. GitLab has no conditional update,
-so a change made in the moment between Forgekeeper's read and its retarget is
-overwritten; the read afterwards reports what the MR targets then.
-
-Conflicts and failed jobs only notify, so `lifecycleExecution` has no policy for them.
-Preparing or resolving conflicts needs your checkout, so it needs a lock across OpenCode
-instances and a way to tie tool calls to their step, which OpenCode's plugin API doesn't
-provide yet. An invalid or unsupported policy, such as `"apply"` without actions, falls
-back to `"notify"`, and Forgekeeper shows an error toast saying which options it ignored.
+Conflicts and failed jobs only notify, so `lifecycleExecution` has no policy for them. An
+invalid or unsupported policy, such as `"prepare"` without actions, falls back to
+`"notify"`, and Forgekeeper shows an error toast saying which options it ignored.
 
 ## Options
 
@@ -654,10 +638,8 @@ those links name. No mode executes commands from
 review content, edits repository files, commits, pushes, posts replies, or resolves
 discussions.
 
-The one change Forgekeeper makes on a forge is retargeting a stacked MR after its parent
-merges, and only with `lifecycleExecution.parentMerged` set to `"apply"` with the
-`retarget` action. It uses GitLab's `mergeRequestUpdate` mutation with only the target
-branch, through your `glab` credentials. See [Stacked PRs/MRs](#stacked-prsmrs).
+Forgekeeper changes nothing on a forge. For stacked PRs/MRs, it only proposes retargets.
+See [Stacked PRs/MRs](#stacked-prsmrs).
 Comment links are opened only after user selection and must use HTTPS on the target's
 origin without embedded credentials. Review bodies remain external data, not trusted
 instructions. Analysis and remediation are outside this feature's scope.
@@ -691,7 +673,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).     |
 | `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns). |
 | `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                               |
-| `lifecycleExecution`     | `"notify"`                    | What Forgekeeper does when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                       |
+| `lifecycleExecution`     | `"notify"`                    | What Forgekeeper works out when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                  |
 
 `watch` and `delivery` list only what you change, and sources added in later releases start
 on. For example, this summarizes review feedback and stops watching merge request changes:
@@ -786,16 +768,12 @@ or `delivery.lifecycle` to `"summary"`. Set `status` to `false` to keep only tit
 Forgekeeper 3 renamed and regrouped its options, and the former names show an error toast
 as unknown options:
 
-| Former option                               | Now                                                              |
-| ------------------------------------------- | ---------------------------------------------------------------- |
-| `reviewStatus`                              | `status`                                                         |
-| `notifyHumanReviews`                        | `watch.humanReviews`                                             |
-| `notifyAutomatedReviews`, `notifyDuoReview` | `watch.automatedReviews`, and `watch.reviewBots` for review bots |
-| `reviewFeedbackDelivery`                    | `delivery.reviews`                                               |
-| `lifecycleDelivery`                         | `delivery.lifecycle`                                             |
-| `notifyLifecycle`                           | `watch.lifecycle`                                                |
-| `lifecycleExecution.conflict`               | Removed: conflicts only notify                                   |
-| `resumeSession`                             | `delivery.reviews: "summary"`                                    |
+| Former option                               | Now                                                                                     |
+| ------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `reviewStatus`                              | `status`                                                                                |
+| `notifyHumanReviews`                        | `watch.humanReviews`                                                                    |
+| `notifyAutomatedReviews`, `notifyDuoReview` | `watch.automatedReviews`, and `watch.reviewBots` for review bots                        |
+| `resumeSession`                             | `delivery.reviews`: `"summary"` starts a turn, and `"passive"` queues for the next turn |
 
 ## Code layout
 
@@ -832,8 +810,8 @@ as unknown options:
 - `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
   agent.
 - `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and
-  keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` works out and
-  carries out retargets of stacked PRs/MRs.
+  keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` proposes retargets
+  of stacked PRs/MRs.
 - `src/adapters/gitlab/linked-notes.ts` finds and reads the notes review comments link to.
 
 Shared code never compares a forge against a specific name. It asks the forge's traits, or

@@ -15,8 +15,8 @@ export interface StatusOptions {
 }
 
 // What Forgekeeper watches. Turning a source off stops everything that
-// depends on it: without `lifecycle`, nothing notices merges, so nothing is
-// retargeted either.
+// depends on it: without `lifecycle`, nothing notices merges, so nothing
+// proposes retargets either.
 export interface Watch {
   // People's review comments.
   humanReviews: boolean;
@@ -37,15 +37,15 @@ export interface Delivery {
   lifecycle: FeedbackDelivery;
 }
 
-// What Forgekeeper does about a lifecycle event besides reporting it.
+// What Forgekeeper works out about a lifecycle event besides reporting it.
 // `notify` does nothing more. `prepare` works out the event's actions and
-// reports them. `apply` also carries them out.
-export type ExecutionMode = 'notify' | 'prepare' | 'apply';
+// proposes them. Forgekeeper never carries them out.
+export type ExecutionMode = 'notify' | 'prepare';
 export type ExecutionAction = 'retarget';
 
 export interface EventPolicy {
   mode: ExecutionMode;
-  // What `prepare` works out and `apply` carries out. Empty for `notify`.
+  // What `prepare` works out. Empty for `notify`.
   actions: ExecutionAction[];
 }
 
@@ -77,7 +77,7 @@ const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
 const HOST = /^[a-z0-9.-]+(:\d+)?$/;
 const USERNAME = /^[a-z0-9_.[\]-]+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
-const MODES: readonly ExecutionMode[] = ['notify', 'prepare', 'apply'];
+const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
 // The actions each event supports.
 const ACTIONS: Record<keyof LifecycleExecution, readonly ExecutionAction[]> = {
   parentMerged: ['retarget'],

@@ -57,7 +57,7 @@ import {
   type LifecycleRecord,
   type PipelineState,
 } from './lifecycle-watch';
-import { retargetChildren, stricter, type RetargetEntry } from './lifecycle-execution';
+import { proposeRetargets, stricter } from './lifecycle-execution';
 import {
   pipelineFails,
   jobKey,
@@ -100,8 +100,6 @@ export interface StatusDependencies {
   details?: (request: ReviewRequest, ids: string[]) => Promise<CommentDetail[]>;
   // Reads a note that comments link to. Defaults to its forge's reader.
   linkedNote?: (request: ReviewRequest, url: string) => Promise<LinkedNote | undefined>;
-  // Changes a PR/MR's target branch. Defaults to its forge's retarget action.
-  retarget?: (request: ReviewRequest, branch: string) => Promise<void>;
   now?: () => number;
 }
 
@@ -211,16 +209,12 @@ export const summaryPrefix = (sessionID: string) =>
 // Summary records outlive their turn only until a user prompt follows, or
 // until this age.
 const SUMMARY_RETENTION = 7 * 24 * 60 * 60_000;
-// Each session target's lifecycle baseline and waiting events, and the
-// retargets Forgekeeper started for merged PRs/MRs.
+// Each session target's lifecycle baseline and waiting events.
 const LIFECYCLE_STORE = 'status/lifecycle/';
-const RETARGET_STORE = 'status/retargets/';
 const lifecyclePrefix = (sessionID: string) =>
   `${LIFECYCLE_STORE}${encodeURIComponent(sessionID)}/`;
 const lifecycleKey = (sessionID: string, url: string) =>
   `${lifecyclePrefix(sessionID)}${encodeURIComponent(url)}`;
-const retargetKey = (sessionID: string, parent: string, child: string) =>
-  `${RETARGET_STORE}${encodeURIComponent(sessionID)}/${encodeURIComponent(parent)}/${encodeURIComponent(child)}`;
 // Records unchanged for this long, without waiting events, are removed once
 // their session no longer targets the PR/MR.
 const LIFECYCLE_RETENTION = 30 * 24 * 60 * 60_000;
@@ -568,7 +562,7 @@ export async function setupStatus(
         item.title,
         feedbackTime(item),
         ...links,
-        // Forgekeeper's own facts, from forge data, such as what it retargeted.
+        // Forgekeeper's own facts, from forge data, such as which dependents to retarget.
         ...(event && item.details?.length ? [item.details.join('\n')] : []),
         summary
           ? event
@@ -960,7 +954,7 @@ export async function setupStatus(
   const readLifecycle = async (prefix: string) =>
     (await scanAll(prefix)).map(({ value }) => value as LifecycleRecord);
 
-  // A PR/MR read from its forge, past every cache, for execution steps.
+  // A PR/MR read from its forge, past every cache, for proposals.
   async function fresh(url: string): Promise<ReviewRequest | undefined> {
     const ref = parseUrl(url);
     const forge = ref && deps.forges.forHost(ref.host, directory);
@@ -973,15 +967,14 @@ export async function setupStatus(
   const policyOf = (kind: LifecycleKind) =>
     kind === 'merged' ? settings.lifecycleExecution.parentMerged : undefined;
 
-  // Takes a lifecycle event to the inbox, after any follow-up its policy
-  // allows. Resolves `false` to drop the event, `retry` to keep it while a
-  // follow-up gets another attempt, and rejects to keep it for a retry, such
-  // as while monitoring is paused.
+  // Takes a lifecycle event to the inbox, with what its policy works out.
+  // Resolves `false` to drop the event, and rejects to keep it for a retry,
+  // such as while monitoring is paused.
   async function recordLifecycle(
     record: LifecycleRecord,
     event: LifecycleEvent,
     records: readonly LifecycleRecord[],
-  ): Promise<boolean | 'retry'> {
+  ): Promise<boolean> {
     if (closing) throw new Error('The plugin stopped');
     let session;
     try {
@@ -1011,71 +1004,25 @@ export async function setupStatus(
     )
       return false;
     // Only dependents the session still targets. A dropped one's record stays
-    // until housekeeping, and must not authorize a change.
+    // until housekeeping.
     const children = records.filter(
       (entry) =>
         entry.parent === record.url &&
         entry.url !== record.url &&
         includesRequest(targets, entry.url),
     );
-    const target = requestOf(record);
-    const retargets = !!deps.retarget || !!(target && traitsOf(target).lifecycle?.retarget);
-    const execution =
+    const proposals =
       event.kind === 'merged' && children.length
-        ? await retargetChildren({
+        ? await proposeRetargets({
             parent: record,
             children,
             policy: stricter(event.policy, settings.lifecycleExecution.parentMerged),
             fetch: fresh,
-            allowed: async (child) => {
-              if (closing) throw new Error('The plugin stopped');
-              let current;
-              try {
-                current = await ctx.session.get({ sessionID: record.sessionID });
-              } catch (error) {
-                if (missingSession(error)) return false;
-                throw error;
-              }
-              if (!current || current.time?.archived !== undefined) return false;
-              if (current.location.directory !== directory) return false;
-              if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
-              return includesRequest((await host.state(record.sessionID)).targets, child);
-            },
-            ...(retargets
-              ? {
-                  retarget: async (request: ReviewRequest, branch: string) => {
-                    if (closing) throw new Error('The plugin stopped');
-                    if (deps.retarget) return deps.retarget(request, branch);
-                    await traitsOf(request).lifecycle!.retarget!(
-                      deps.exec,
-                      directory,
-                      request,
-                      branch,
-                    );
-                  },
-                }
-              : {}),
-            journal: {
-              get: async (child) =>
-                (await ctx.storage.get(retargetKey(record.sessionID, record.url, child))) as
-                  | RetargetEntry
-                  | undefined,
-              set: async (child, entry) => {
-                if (closing) throw new Error('The plugin stopped');
-                await ctx.storage.set(
-                  retargetKey(record.sessionID, record.url, child),
-                  entry as never,
-                );
-              },
-            },
           })
-        : undefined;
-    // A retarget that may still succeed holds the update back until it does,
-    // or until its attempts run out, so the update reports the outcome.
-    if (execution?.retry) return 'retry';
+        : [];
     const ci = event.kind === 'ci-failed' ? record.ci : undefined;
     const failures = ci && splitFailures(ci, event.jobs ?? []);
-    const details = ci && failures ? failureDetails(ci, failures) : (execution?.lines ?? []);
+    const details = ci && failures ? failureDetails(ci, failures) : proposals;
     const forge = requestOf(record);
     const title =
       ci && failures

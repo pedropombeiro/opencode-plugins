@@ -251,14 +251,12 @@ export interface LifecycleWatcherOptions {
   // Every record that has events waiting, for retries.
   waiting: () => Promise<LifecycleRecord[]>;
   // Takes an event to the inbox. Resolves `false` to drop it, such as when
-  // the session no longer targets the PR/MR, and `retry` to keep it for
-  // another attempt without an error, such as while a retarget is retried.
-  // Rejects to retry it later.
+  // the session no longer targets the PR/MR. Rejects to retry it later.
   deliver: (
     record: LifecycleRecord,
     event: LifecycleEvent,
     records: readonly LifecycleRecord[],
-  ) => Promise<boolean | 'retry'>;
+  ) => Promise<boolean>;
   reference: (request: ReviewRequest) => string;
   policy?: (kind: LifecycleKind) => EventPolicy | undefined;
   delivery?: () => FeedbackDelivery;
@@ -290,7 +288,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
       let current = record;
       for (const event of record.pending) {
         try {
-          if ((await options.deliver(current, event, records)) === 'retry') continue;
+          await options.deliver(current, event, records);
         } catch (error) {
           failure ??= { error };
           continue;
