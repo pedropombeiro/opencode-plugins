@@ -187,6 +187,15 @@ export async function setupServer(
   );
 
   const settings = statusOptions(ctx.options);
+  // Ignored options fall back to their defaults, and execution policies to
+  // notifying only, so the toast says which and why.
+  if (settings.problems.length)
+    void rpc.events
+      .emit('notice', {
+        message: `Some Forgekeeper options were ignored: ${settings.problems.join('; ')}`,
+        variant: 'error',
+      })
+      .catch(() => {});
   if (status && settings.enabled) {
     watcher = await setupStatus(ctx, settings, status, {
       state: stateFor,
@@ -365,7 +374,7 @@ export async function setupServer(
     return next;
   }
 
-  // Without monitoring, such as after `reviewStatus` is turned off, a
+  // Without monitoring, such as after `status` is turned off, a
   // Forgekeeper message queued earlier can still start a step. Its record
   // isn't read then: the step only says the review text is unavailable.
   // Sessions whose latest request was such a step, for the backstops.

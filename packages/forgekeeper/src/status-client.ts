@@ -40,7 +40,7 @@ export function createStatusClient(options: StatusClientOptions) {
   // The keys this CLI has shown since it started, per directory. The server
   // keeps watching their reviews while they are hidden.
   const shown = new Map<string, Set<string>>();
-  // Whether each directory's server has status on (`reviewStatus`).
+  // Whether each directory's server has status on (`status`).
   const enabled = new Map<string, boolean>();
   let visible: Place | undefined;
   let disposed = false;

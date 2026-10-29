@@ -91,7 +91,7 @@ describe('createStatusClient', () => {
     ]);
   });
 
-  test("follows each directory's own reviewStatus setting", async () => {
+  test("follows each directory's own status setting", async () => {
     const app = harness();
     app.enabled.set('/off', false);
     app.client.show({ directory: '/off', key: 'ses_1' });
