@@ -123,6 +123,11 @@ export function createStatusService(options: StatusServiceOptions) {
   // to watch. Only a lookup can tell, so it polls until one succeeds.
   const unknown = (key: string) => owns(key) && store.get(key).lookup === undefined;
 
+  // Explicit targets that a lookup couldn't resolve, all or some of them, may
+  // become available, so the session keeps being looked up.
+  const retrying = (lookup: Lookup | undefined) =>
+    unresolved(lookup) || (lookup?.kind === 'found' && !!lookup.failed?.length);
+
   const liveLeases = (key: string) =>
     [...(leases.get(key)?.values() ?? [])].filter((lease) => lease.until > now());
 
@@ -134,7 +139,7 @@ export function createStatusService(options: StatusServiceOptions) {
       (discovered.has(key) &&
         owns(key) &&
         (unknown(key) ||
-          unresolved(store.get(key).lookup) ||
+          retrying(store.get(key).lookup) ||
           targets(key, store.get(key).lookup).some((request) => request.state === 'opened'))) ||
       (live.length > 0 && (live.some((lease) => lease.visible) || unknown(key) || needsWatch(key)));
     const release = holds.get(key);

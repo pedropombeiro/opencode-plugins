@@ -1436,6 +1436,59 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
+  test('keeps an ordinary prompt that quotes a Forgekeeper tag, with or without status', async () => {
+    const quoted = [
+      new ProviderMessage({
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'Review this transcript: [forgekeeper:msg_forgekeeper_summary_old]',
+          },
+        ],
+      }),
+    ];
+    for (const pluginOptions of [summaryMode.pluginOptions, { status: false }]) {
+      const app = await harness({ status: new StatusForge(), pluginOptions });
+      app.prompt();
+      const request = await app.request('one', true, quoted);
+      expect(Object.keys(request.tools)).toEqual(['read', 'bash']);
+      expect(textOf(request)).toContain('Review this transcript');
+      expect(await app.toolCall()).toBeUndefined();
+      expect(await app.permission()).toBe('allow');
+      await app.cleanup();
+    }
+  });
+
+  test('posts no automatic summary for an update paused or acknowledged while its comments are read', async () => {
+    for (const action of ['pause', 'acknowledge'] as const) {
+      let started = () => {};
+      let release = () => {};
+      const reading = new Promise<void>((resolve) => (started = resolve));
+      const blocked = new Promise<void>((resolve) => (release = resolve));
+      const { app } = await watchedFeedback({
+        ...summaryMode,
+        details: async (request, ids) => {
+          started();
+          await blocked;
+          return summaryMode.details(request, ids);
+        },
+      });
+      void app.refresh();
+      await reading;
+      const [item] = (await app.feedback()).items;
+      if (action === 'pause') await app.pauseFeedback(true);
+      else await app.acknowledgeFeedback(item.id);
+      release();
+      await settle();
+      expect(app.synthetic).toEqual([]);
+      expect([...app.storage.keys()].filter((key) => key.startsWith('status/summaries/'))).toEqual(
+        [],
+      );
+      await app.cleanup();
+    }
+  });
+
   test('fails a Forgekeeper request it cannot rebuild instead of keeping session messages', async () => {
     const app = await harness({ status: new StatusForge(), ...summaryMode });
     const plain = [

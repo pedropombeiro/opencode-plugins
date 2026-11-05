@@ -379,10 +379,12 @@ export async function setupServer(
   // isn't read then: the step only says the review text is unavailable.
   // Sessions whose latest request was such a step, for the backstops.
   const orphaned = new Set<string>();
+  // A tag counts unless the context shows a user prompt, which may quote one.
   async function orphanedStep(event: SummaryRequest): Promise<boolean> {
-    if (taggedInput(event.messages)) return true;
-    const records = await ctx.storage.scan({ prefix: summaryPrefix(event.sessionID) });
-    if (!records.entries.length) return false;
+    if (!taggedInput(event.messages)) {
+      const records = await ctx.storage.scan({ prefix: summaryPrefix(event.sessionID) });
+      if (!records.entries.length) return false;
+    }
     try {
       const input = turnInput(await ctx.session.context({ sessionID: event.sessionID }));
       // Without an input, such as after a compaction, the step may be one.

@@ -533,13 +533,12 @@ export async function setupStatus(
           .slice(0, MAX_LINKED_NOTES)
       : [];
     // Reading the comments can take a while. The session, its targets, or the
-    // update itself may have changed meanwhile.
+    // update itself may have changed meanwhile: monitoring paused, or the
+    // update acknowledged, cleared, or replaced. A pause keeps it for later.
     if (!(await deliverable(item))) return false;
-    if (requested) {
-      const state = await inbox.list();
-      if (state.paused) throw new Error('Feedback monitoring is paused');
-      if (!state.items.some((entry) => entry.id === item.id)) return false;
-    }
+    const state = await inbox.list();
+    if (state.paused) throw new Error('Feedback monitoring is paused');
+    if (!state.items.some((entry) => entry.id === item.id)) return false;
     // The record is stored before the message, so whichever step delivers the
     // message finds it, even right after a reload.
     const record: SummaryRecord = {
@@ -610,6 +609,16 @@ export async function setupStatus(
     if (!input) return pending.size ? 'failed' : undefined;
     if (input.type === 'user') return undefined;
     return (await readRecord(sessionID, input.id)) ?? 'failed';
+  }
+
+  // Whether the context shows a user prompt as the current step's input. An
+  // unreadable context doesn't rule out a Forgekeeper step.
+  async function userInput(sessionID: string): Promise<boolean> {
+    try {
+      return turnInput(await ctx.session.context({ sessionID }))?.type === 'user';
+    } catch {
+      return false;
+    }
   }
 
   // See `fetchLinked` in the returned object.
@@ -1240,9 +1249,12 @@ export async function setupStatus(
       // Either the context or the request itself can show a Forgekeeper step.
       // Each covers a gap in the other, such as bookkeeping lost to a failed
       // restore, or a reminder sent after the message.
+      // A tag in a user prompt, such as a pasted transcript, doesn't make the
+      // step Forgekeeper's.
       const tagged = taggedInput(event.messages);
       let record = await summaryTurn(event.sessionID);
-      if (!record && tagged) record = (await readRecord(event.sessionID, tagged)) ?? 'failed';
+      if (!record && tagged && !(await userInput(event.sessionID)))
+        record = (await readRecord(event.sessionID, tagged)) ?? 'failed';
       if (!record) {
         requesting.delete(event.sessionID);
         return false;

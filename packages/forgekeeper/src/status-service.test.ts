@@ -184,6 +184,30 @@ describe('createStatusService', () => {
     await app.service.dispose();
   });
 
+  test('keeps retrying a discovered session while one of its targets could not be resolved', async () => {
+    const app = harness({ human: true });
+    const second = 'https://gitlab.com/g/p/-/merge_requests/2';
+    app.lookups.set('one', {
+      kind: 'found',
+      explicitTarget: true,
+      requests: [mr({ state: 'merged' })],
+      failed: [{ url: second, reason: 'Not found' }],
+    });
+    app.service.discover(['one']);
+    await app.advance(0);
+    expect(app.service.polling('one')).toBe(true);
+    app.lookups.set('one', targets(mr({ state: 'merged' }), mr({ iid: '2', url: second })));
+    await app.advance(100);
+    expect(app.loads).toEqual(['one', 'one']);
+    expect(app.checked).toEqual(['one 2']);
+    expect(app.service.polling('one')).toBe(true);
+    // Once every target is found and none is open, polling stops.
+    app.lookups.set('one', targets(mr({ state: 'merged' })));
+    await app.advance(100);
+    expect(app.service.polling('one')).toBe(false);
+    await app.service.dispose();
+  });
+
   test('polls a visible key, and stops once it is hidden without reviews to watch', async () => {
     const app = harness();
     app.lookups.set('ses_1', targets(mr()));

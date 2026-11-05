@@ -43,6 +43,32 @@ toasts.
 Without a forge CLI, titles still follow targets and branches, and `/forge-status` reports
 what's missing, such as `glab is not installed`.
 
+## Upgrade from forgekeeper 2.x
+
+Forgekeeper 3 changes where review notifications go, and renames its options:
+
+- **Notifications:** review feedback no longer resumes the session or asks the agent to
+  address it. It goes to the `/forge-feedback` inbox. To also post it to the session, set
+  `delivery.reviews` to `"passive"` or `"summary"`. See
+  [Review notifications](#review-notifications).
+- **Options:** Forgekeeper no longer reads the former option names. It shows an error toast
+  that names each one, and uses that option's default instead. For example, a former
+  `reviewStatus: false` leaves status on, so rename it to `status: false` before you upgrade.
+- **Monitoring:** Forgekeeper also watches recent sessions with PR/MR targets that no CLI
+  has shown, and announces conflicts, failed jobs, and merges of their targets. See
+  [Which sessions the server watches](#which-sessions-the-server-watches) and
+  [Merge request updates](#merge-request-updates). Set `watch.lifecycle` to `false` to
+  stop the merge request updates.
+
+Rename the former options as follows:
+
+| Former option                               | Now                                                                                     |
+| ------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `reviewStatus`                              | `status`                                                                                |
+| `notifyHumanReviews`                        | `watch.humanReviews`                                                                    |
+| `notifyAutomatedReviews`, `notifyDuoReview` | `watch.automatedReviews`, and `watch.reviewBots` for review bots                        |
+| `resumeSession`                             | `delivery.reviews`: `"summary"` starts a turn, and `"passive"` queues for the next turn |
+
 ## Session targets
 
 The server registers the `set_session_target` tool and adds instructions to the agent's
@@ -214,8 +240,9 @@ reads conversation timestamps locally; it does not send conversations to a model
 
 Discovered sessions poll without a CLI lease while at least one explicit target is open.
 Targets that couldn't be resolved, such as while the forge returns nothing for them, keep
-being retried with the same backoff as failed lookups. When all targets close or merge,
-polling stops. Discovery reevaluates the activity window
+being retried, even when the session's other targets closed or merged. While none of the
+targets resolves, retries back off like failed lookups. Once every target is found and
+closed or merged, polling stops. Discovery reevaluates the activity window
 every 5 minutes. It runs only while OpenCode has this checkout's plugin instance loaded;
 it is not a separate scheduler and cannot wake an unloaded location or stopped service.
 
@@ -278,7 +305,8 @@ automatic retries, including after reloads. Updates that haven't reached their s
 retried every minute and after a reload, each on its own, so one that keeps failing doesn't
 hold the others back. Delivery doesn't hold up the inbox: `/forge-feedback`, pausing, and
 acknowledging work while a summary reads its comments, and an update in flight isn't sent
-again by a retry. An update whose session was deleted, archived, or moved, or that no
+again by a retry. An update acknowledged or cleared while its comments are read isn't
+posted, and one paused meanwhile waits until monitoring resumes. An update whose session was deleted, archived, or moved, or that no
 longer targets the PR/MR, is dropped, including when that changed while its comments were
 read. Switching `delivery.reviews` to `inbox` stops retries of review updates, and
 leaves them undelivered, so they go again once it's switched back. Merge request updates
@@ -350,7 +378,8 @@ Forgekeeper recognizes a step whose input is one of its messages in two independ
 - Every message it posts ends with a tag naming its ID, such as
   `[forgekeeper:msg_forgekeeper_…]`, which the context hook finds in the request it's
   about to send. This doesn't depend on stored state, so a failed restore or an expired
-  record can't let the message run as an ordinary request.
+  record can't let the message run as an ordinary request. A tag in a user prompt, such
+  as a pasted transcript, doesn't count when the session's context shows the prompt.
 - It tracks every message it posts until a user prompt follows that message, and reads the
   session's context before each request. A message still in the queue stays tracked while
   earlier steps run, and a reminder sent after the message doesn't end its step.
@@ -533,7 +562,9 @@ Forgekeeper also watches each session's explicit PR/MR targets for three changes
 
 All come from the forge's own state, compared between two lookups, never from comments
 such as GitLab's "can no longer be merged" note. The first lookup of a target only records
-it, so nothing that happened earlier is announced, including after a restart. A
+it, so nothing that happened before Forgekeeper first saw the target is announced. Records
+persist across restarts, so a change that happened while OpenCode wasn't running is
+announced at the next lookup. A
 mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
 push, keeps the last known state. A conflict that ends and starts again is a new update.
 Sessions are watched the same way as for review feedback, without visiting their tabs.
@@ -631,7 +662,10 @@ the existing concurrency limit of four, and time out after 30 seconds. Their cre
 and environment are those of the OpenCode service; monitoring does not provide OS-level
 isolation or reduce those credentials' scopes.
 
-The `inbox` and `passive` modes never invoke a model. The `summary` mode sends review
+The `inbox` mode invokes a model only when you ask for a summary with Ctrl+R in
+`/forge-feedback`. The `passive` mode starts no turn, but when
+something else wakes the session, its message can run as one step that sends the model
+only the notice's title, time, and links, without tools. The `summary` mode sends review
 text to the session's model in a request whose only possible tool reads GitLab notes that
 the comments link to, as described in [Linked notes](#linked-notes). It reads with your
 `glab` credentials, so it can read private notes in other projects on the same host that
@@ -766,15 +800,8 @@ With default options, the footer and review monitoring start right away. All not
 stay in the feedback inbox, and no session turn starts unless you set `delivery.reviews`
 or `delivery.lifecycle` to `"summary"`. Set `status` to `false` to keep only titles.
 
-Forgekeeper 3 renamed and regrouped its options, and the former names show an error toast
-as unknown options:
-
-| Former option                               | Now                                                                                     |
-| ------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `reviewStatus`                              | `status`                                                                                |
-| `notifyHumanReviews`                        | `watch.humanReviews`                                                                    |
-| `notifyAutomatedReviews`, `notifyDuoReview` | `watch.automatedReviews`, and `watch.reviewBots` for review bots                        |
-| `resumeSession`                             | `delivery.reviews`: `"summary"` starts a turn, and `"passive"` queues for the next turn |
+If you set options for `opencode-forgekeeper` 2.x, also see
+[Upgrade from forgekeeper 2.x](#upgrade-from-forgekeeper-2x).
 
 ## Code layout
 
