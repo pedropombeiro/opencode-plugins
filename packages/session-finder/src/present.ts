@@ -29,7 +29,7 @@ export function noMatches(result: Result) {
   return `No sessions matched "${clip(result.query, 40)}". Searched: ${searches}.`;
 }
 
-export function dialogTitle(result: Result) {
+export function dialogTitle(result: Result, searching = false) {
   const count =
     result.total_sessions > result.sessions.length
       ? `${result.sessions.length} of ${result.total_sessions}`
@@ -38,10 +38,55 @@ export function dialogTitle(result: Result) {
     result.mode === 'words' || result.include.includes('tools')
       ? `, ${describeSearch(result)}`
       : '';
-  return `Sessions matching "${clip(result.query, 40)}" (${count}${fallback})`;
+  const status = searching ? ', searching messages…' : '';
+  return `Sessions matching "${clip(result.query, 40)}" (${count}${fallback}${status})`;
 }
 
-export function toOptions(sessions: Session[]): Option[] {
+export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+export const SPINNER_INTERVAL_MS = 80;
+
+export interface SearchState {
+  query: string;
+  result?: Result;
+  searching: boolean;
+  failed: boolean;
+  frame?: number;
+}
+
+export function stateTitle(state: SearchState) {
+  const title = searchTitle(state);
+  if (!state.searching) return title;
+  const spinner =
+    state.frame === undefined ? '⋯' : SPINNER_FRAMES[state.frame % SPINNER_FRAMES.length];
+  return `${spinner} ${title}`;
+}
+
+function searchTitle(state: SearchState) {
+  const query = clip(state.query, 40);
+  const { result } = state;
+  if (result?.sessions.length) return dialogTitle(result, state.searching);
+  if (state.searching) return `Searching sessions for "${query}"…`;
+  if (state.failed) return `Session search failed for "${query}"`;
+  return result ? noMatches(result) : `No sessions matched "${query}".`;
+}
+
+export function withTitleMatches(full: Result, titles: Result, limit = LIMIT): Result {
+  const updated = new Map(full.sessions.map((session) => [session.id, session]));
+  const kept = titles.sessions.map((session) => updated.get(session.id) ?? session);
+  const shown = new Set(titles.sessions.map((session) => session.id));
+  const added = full.sessions.filter((session) => !shown.has(session.id));
+  const sessions = [...kept, ...added].slice(0, limit);
+  return {
+    ...full,
+    total_sessions: Math.max(full.total_sessions, sessions.length),
+    sessions,
+  };
+}
+
+export function toOptions(sessions: Session[], kept = 0): Option[] {
+  if (kept > 0) {
+    return [...toOptions(sessions.slice(0, kept)), ...toOptions(sessions.slice(kept))];
+  }
   const current = sessions.filter((session) => session.same_project === true);
   const other = sessions.filter((session) => session.same_project !== true);
   return [...current, ...other].map((session) => {
@@ -56,6 +101,17 @@ export function toOptions(sessions: Session[]): Option[] {
       description: details.join(' · '),
       category: session.same_project === true ? 'Current project' : 'Other projects',
     };
+  });
+}
+
+type Searchable = { title: string; category?: string };
+
+export function filterOptions<T extends Searchable>(query: string, options: readonly T[]): T[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return [...options];
+  return options.filter((option) => {
+    const text = `${option.title} ${option.category ?? ''}`.toLowerCase();
+    return terms.every((term) => text.includes(term));
   });
 }
 

@@ -145,6 +145,13 @@ test('the search RPC method serves the palette', async () => {
   )) as Result;
   expect(result.sessions.map((session) => session.id)).toEqual(['ses_current']);
   expect(result.sessions[0]!.matches).toHaveLength(1);
+
+  const titles = (await handlers()['search']!(
+    { query: 'ses_target', titles: true },
+    { signal: new AbortController().signal },
+  )) as Result;
+  expect(titles.sessions.map((session) => session.id)).toEqual(['ses_target']);
+  expect(titles.sessions[0]!.matches[0]!.source).toBe('title');
 });
 
 test('open_session asks the terminal to open the target and reports the action', async () => {

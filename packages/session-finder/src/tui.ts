@@ -1,16 +1,19 @@
 import type { Plugin } from '@opencode/plugin/tui';
-import type { Result, Session } from './db.ts';
+import { createSignal } from 'solid-js';
+import type { Result } from './db.ts';
 import {
   LIMIT,
-  dialogTitle,
-  noMatches,
+  SPINNER_INTERVAL_MS,
+  filterOptions,
   openSession,
+  stateTitle,
   summarize,
   toOptions,
+  withTitleMatches,
   type PromptRequest,
 } from './present.ts';
 import { openRequested } from './route.ts';
-import { SessionSearchRpc, type OpenRequest } from './rpc.ts';
+import { SessionSearchRpc, type OpenRequest, type SearchRequest } from './rpc.ts';
 
 const SEARCH_TIMEOUT_MS = 120_000;
 
@@ -19,6 +22,8 @@ export default {
   setup(context) {
     const rpc = context.client.rpc(SessionSearchRpc);
     const toast = context.ui.toast.show;
+    const animate = context.options?.['animations'] !== false;
+    const lifetime = new AbortController();
 
     function location() {
       const route = context.ui.router.current();
@@ -30,31 +35,97 @@ export default {
       return { sessionID, directory };
     }
 
-    async function choose(query: string, result: Result) {
-      const sessions = new Map<string, Session>(
-        result.sessions.map((session) => [session.id, session]),
+    function failed(error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      toast({ title: 'Session search failed', message: reason, variant: 'error' });
+    }
+
+    async function choose(query: string, titles: Promise<Result>, full: Promise<Result>) {
+      const [result, setResult] = createSignal<Result | undefined>();
+      const [kept, setKept] = createSignal(0);
+      const [searching, setSearching] = createSignal(true);
+      const [failure, setFailure] = createSignal(false);
+      const [frame, setFrame] = createSignal(0);
+      const timer = animate
+        ? setInterval(() => setFrame((value) => value + 1), SPINNER_INTERVAL_MS)
+        : undefined;
+      const stop = () => clearInterval(timer);
+      let open = true;
+      let complete = false;
+      let preview: Result | undefined;
+      const close = () => {
+        if (!open) return;
+        open = false;
+        stop();
+        context.ui.dialog.clear();
+      };
+      lifetime.signal.addEventListener('abort', close, { once: true });
+      void titles.then(
+        (found) => {
+          if (!open || complete || !found.sessions.length) return;
+          preview = found;
+          setKept(found.sessions.length);
+          setResult(found);
+        },
+        () => {},
       );
-      const id = await context.ui.dialog.select({
-        title: dialogTitle(result),
-        options: toOptions(result.sessions),
-        actions: [
-          {
-            bind: 'ctrl+s',
-            title: 'Summarize here',
-            onTrigger: async (value: string) => {
-              const session = sessions.get(value);
-              if (!session) return;
-              context.ui.dialog.clear();
-              toast(
-                await summarize(query, session, context.ui.router.current(), (request) =>
-                  context.client.session.prompt(request as PromptRequest),
-                ),
-              );
-            },
+      void full
+        .then(
+          (found) => {
+            if (!open) return;
+            complete = true;
+            setResult(preview ? withTitleMatches(found, preview) : found);
+            setSearching(false);
           },
-        ],
-      });
-      const session = id ? sessions.get(id) : undefined;
+          (error) => {
+            if (!open) return;
+            failed(error);
+            setFailure(true);
+            setSearching(false);
+          },
+        )
+        .finally(stop);
+      const find = (id: string) => result()?.sessions.find((session) => session.id === id);
+      let id: string | undefined;
+      try {
+        id = await context.ui.dialog.select<string>({
+          get title() {
+            return stateTitle({
+              query,
+              result: result(),
+              searching: searching(),
+              failed: failure(),
+              ...(animate ? { frame: frame() } : {}),
+            });
+          },
+          placeholder: 'Filter results',
+          get options() {
+            return toOptions(result()?.sessions ?? [], kept());
+          },
+          search: filterOptions,
+          actions: [
+            {
+              bind: 'ctrl+s',
+              title: 'Summarize here',
+              onTrigger: async (value: string) => {
+                const session = find(value);
+                if (!session) return;
+                context.ui.dialog.clear();
+                toast(
+                  await summarize(query, session, context.ui.router.current(), (request) =>
+                    context.client.session.prompt(request as PromptRequest),
+                  ),
+                );
+              },
+            },
+          ],
+        });
+      } finally {
+        lifetime.signal.removeEventListener('abort', close);
+        open = false;
+        stop();
+      }
+      const session = id ? find(id) : undefined;
       if (!session) return;
       const warning = openSession(context.ui, session);
       if (warning) toast(warning);
@@ -71,24 +142,30 @@ export default {
         )?.trim();
       if (!query) return;
 
-      toast({ message: `Searching sessions for "${query}"…`, variant: 'info' });
       const { sessionID, directory } = location();
-      let result: Result;
+      const cancel = new AbortController();
+      const call = {
+        location: { directory },
+        signal: AbortSignal.any([
+          cancel.signal,
+          lifetime.signal,
+          AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+        ]),
+      };
+      const request: SearchRequest = {
+        query,
+        directory,
+        limit: LIMIT,
+        ...(sessionID ? { sessionID } : {}),
+      };
+      const search = (body: SearchRequest) => rpc.search(body, call) as unknown as Promise<Result>;
+      const full = search(request);
+      const titles = search({ ...request, titles: true });
       try {
-        result = (await rpc.search(
-          { query, directory, limit: LIMIT, ...(sessionID ? { sessionID } : {}) },
-          { location: { directory }, signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS) },
-        )) as unknown as Result;
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        toast({ title: 'Session search failed', message: reason, variant: 'error' });
-        return;
+        await choose(query, titles, full);
+      } finally {
+        cancel.abort();
       }
-      if (result.sessions.length === 0) {
-        toast({ message: noMatches(result), variant: 'warning' });
-        return;
-      }
-      await choose(query, result);
     }
 
     const stopSlot = context.ui.slot({
@@ -123,6 +200,7 @@ export default {
     });
 
     return () => {
+      lifetime.abort();
       stopSlot();
       stopEvents();
     };

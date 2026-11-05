@@ -207,6 +207,36 @@ describe('searchSessions', () => {
     expect(result.sessions[0]!.matches.every((match) => match.source === 'title')).toBe(true);
   });
 
+  test('searches only titles, without fallbacks', () => {
+    const { path } = fixture(
+      [
+        { id: 'ses_title', title: '[#123, !267387] Review' },
+        { id: 'ses_message' },
+        { id: 'ses_words', title: 'Runner fleet cleanup' },
+      ],
+      [
+        user('ses_message', 'see !267387'),
+        assistant('ses_message', [
+          { type: 'tool', name: 'shell', state: { input: { command: 'fleet runner' } } },
+        ]),
+      ],
+    );
+    const result = run(path, { query: '!267387', titles: true });
+    expect(result.sessions.map((session) => session.id)).toEqual(['ses_title']);
+    expect(result.searches).toEqual([{ mode: 'phrase', include: [], total_sessions: 1 }]);
+
+    const phrase = run(path, { query: 'fleet runner', titles: true });
+    expect(phrase.sessions).toEqual([]);
+    expect(phrase.searches).toEqual([{ mode: 'phrase', include: [], total_sessions: 0 }]);
+
+    const words = run(path, { query: 'fleet runner', words: true, titles: true });
+    expect(words.sessions.map((session) => session.id)).toEqual(['ses_words']);
+    expect(words.searches).toEqual([{ mode: 'words', include: [], total_sessions: 1 }]);
+
+    const none = run(path, { query: 'missing', titles: true });
+    expect(none.searches).toEqual([{ mode: 'phrase', include: [], total_sessions: 0 }]);
+  });
+
   test('escapes LIKE wildcards, JSON characters, and regular expressions', () => {
     const { path } = fixture(
       [{ id: 'ses_a' }, { id: 'ses_b' }],

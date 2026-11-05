@@ -16,15 +16,22 @@ Open the search with **`<leader>f`** (**Ctrl+X**, then **F**), from the command 
 
 - Without arguments, the command asks for a keyword or sentence. A search takes several
   seconds on a large database, longer when it falls back to tool output.
-- The results open in a searchable list, with sessions of the current project first. Each entry
-  shows the date of its last match and an excerpt, plus the directory for sessions of other
-  projects. The title notes when the results come from a fallback search.
+- The results list opens right away and fills in as the search runs. Sessions whose titles
+  match, such as an MR ID in the title, appear first, within a fraction of a second. The other
+  matches appear below them when the message search finishes, without moving the selection.
+  The list title shows the search's progress, and closing the list cancels the search.
+- Within the title matches and within the other matches, sessions of the current project come
+  first. Each entry shows its project, the date of its last match and an excerpt, plus the
+  directory for sessions of other projects. The title notes when the results come from a
+  fallback search.
+- The list's filter keeps sessions whose title or project contains each typed word, in their
+  existing order.
 - **Enter** focuses the session's tab, or switches to it for child sessions or when tabs are
   off. Sessions of other projects stay closed, and a toast shows the
   `opencode --session <id>` command to reopen them.
 - **Ctrl+S** (**Summarize here**) queues a prompt in the current session that asks the agent to
   read the session's matches with `search_sessions` and summarize them.
-- When nothing matches, a toast lists the searches that ran.
+- When nothing matches, the list title lists the searches that ran.
 
 The search excludes the session on screen and shows at most 30 sessions.
 
@@ -100,6 +107,19 @@ interface part along with it:
   "plugins": [
     { "package": "opencode-session-finder", "options": { "database": "/path/to/opencode.db" } }
   ]
+}
+```
+
+The terminal interface takes its options from `cli.json`. Add the plugin there with the same
+package name or path as in `opencode.json`:
+
+| Option       | Default | Description                                                                 |
+| ------------ | ------- | --------------------------------------------------------------------------- |
+| `animations` | `true`  | Animates the results list title while searching. `false` shows `⋯` instead. |
+
+```json
+{
+  "plugins": [{ "package": "opencode-session-finder", "options": { "animations": false } }]
 }
 ```
 

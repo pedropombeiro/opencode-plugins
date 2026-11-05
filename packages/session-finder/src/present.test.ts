@@ -3,11 +3,14 @@ import type { Result, Session } from './db.ts';
 import {
   clip,
   dialogTitle,
+  filterOptions,
   noMatches,
   openSession,
+  stateTitle,
   summarize,
   summaryPrompt,
   toOptions,
+  withTitleMatches,
 } from './present.ts';
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -79,6 +82,99 @@ test('titles the dialog with the count and any fallback', () => {
   expect(dialogTitle(result({ mode: 'words', include: ['tools'], total_sessions: 40 }))).toBe(
     'Sessions matching "palette" (1 of 40, all words, tool output)',
   );
+  expect(dialogTitle(result(), true)).toBe('Sessions matching "palette" (1, searching messages…)');
+});
+
+test('titles the dialog for each stage of the search', () => {
+  const query = 'palette';
+  const none = result({ sessions: [], total_sessions: 0 });
+  expect(stateTitle({ query, searching: true, failed: false })).toBe(
+    '⋯ Searching sessions for "palette"…',
+  );
+  expect(stateTitle({ query, searching: true, failed: false, frame: 12 })).toBe(
+    '⠹ Searching sessions for "palette"…',
+  );
+  expect(stateTitle({ query, result: result(), searching: true, failed: false, frame: 0 })).toBe(
+    '⠋ Sessions matching "palette" (1, searching messages…)',
+  );
+  expect(stateTitle({ query, result: result(), searching: false, failed: false, frame: 3 })).toBe(
+    'Sessions matching "palette" (1)',
+  );
+  expect(stateTitle({ query, result: result(), searching: false, failed: true })).toBe(
+    'Sessions matching "palette" (1)',
+  );
+  expect(stateTitle({ query, result: none, searching: false, failed: false })).toBe(
+    'No sessions matched "palette". Searched: exact phrase.',
+  );
+  expect(stateTitle({ query, searching: false, failed: true })).toBe(
+    'Session search failed for "palette"',
+  );
+});
+
+test('keeps title matches first and in their order, within the limit', () => {
+  const ids = (value: Result) => value.sessions.map((entry) => entry.id);
+  const titles = result({ sessions: [session({ id: 'ses_title' })] });
+  const full = result({
+    total_sessions: 2,
+    sessions: [session({ id: 'ses_newer' }), session({ id: 'ses_title' })],
+  });
+  const merged = withTitleMatches(full, titles);
+  expect(ids(merged)).toEqual(['ses_title', 'ses_newer']);
+  expect(merged.total_sessions).toBe(2);
+
+  const refreshed = session({ id: 'ses_title', match_count: 9, last_match: '2026-11-05' });
+  const details = withTitleMatches(result({ sessions: [refreshed] }), titles);
+  expect(details.sessions[0]).toBe(refreshed);
+
+  const many = result({
+    total_sessions: 40,
+    sessions: ['ses_b', 'ses_c', 'ses_d'].map((id) => session({ id })),
+  });
+  const limited = withTitleMatches(many, titles, 3);
+  expect(ids(limited)).toEqual(['ses_title', 'ses_b', 'ses_c']);
+  expect(dialogTitle(limited)).toBe('Sessions matching "palette" (3 of 40)');
+});
+
+test('sorts kept options apart from the ones added after them', () => {
+  const other = session({ id: 'ses_other', same_project: false });
+  const mine = session({ id: 'ses_mine' });
+  expect(toOptions([other, mine]).map((option) => option.value)).toEqual(['ses_mine', 'ses_other']);
+  expect(toOptions([other, mine], 1).map((option) => option.value)).toEqual([
+    'ses_other',
+    'ses_mine',
+  ]);
+});
+
+test('filters options by every word of the title or project, keeping their order', () => {
+  const options = toOptions([
+    session({ id: 'ses_b', title: 'Runner fleet', same_project: false }),
+    session({ id: 'ses_a', title: 'Fleet review' }),
+  ]);
+  const values = (query: string) => filterOptions(query, options).map((option) => option.value);
+  expect(values('')).toEqual(['ses_a', 'ses_b']);
+  expect(values('FLEET')).toEqual(['ses_a', 'ses_b']);
+  expect(values('fleet other')).toEqual(['ses_b']);
+  expect(values('review current')).toEqual(['ses_a']);
+  expect(values('missing')).toEqual([]);
+});
+
+test('keeps a filtered session listed when its date and excerpt change', () => {
+  const preview = session({ id: 'ses_mr', title: '!267387 review', last_match: '2026-10-01' });
+  const titles = result({ sessions: [preview] });
+  const refreshed = session({
+    id: 'ses_mr',
+    title: '!267387 review',
+    last_match: '2026-11-05',
+    matches: [{ excerpt: 'feedback', message_id: 'msg_2', source: 'user', time: '2026-11-05' }],
+  });
+  const other = session({ id: 'ses_other', title: 'Another review', last_match: '2026-10-01' });
+  const merged = withTitleMatches(result({ sessions: [refreshed, other] }), titles);
+  const values = (value: Result, query: string) =>
+    filterOptions(query, toOptions(value.sessions, 1)).map((option) => option.value);
+  expect(values(titles, '267387')).toEqual(['ses_mr']);
+  expect(values(merged, '267387')).toEqual(['ses_mr']);
+  expect(values(titles, '2026-10-01')).toEqual([]);
+  expect(values(merged, 'palette')).toEqual([]);
 });
 
 test('reports every search that ran when nothing matched', () => {
