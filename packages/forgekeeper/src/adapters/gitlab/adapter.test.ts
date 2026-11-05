@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import type { Exec } from './exec';
-import type { Repository } from './git';
-import { footerSegments } from './format';
-import { ForgeError } from './forge';
+import type { Exec } from '../../exec';
+import type { Repository } from '../../git';
+import { footerSegments } from '../../format';
+import { ForgeError, pipelineFails } from '../../forge';
 import {
   classifyError,
   DISCUSSIONS_QUERY,
@@ -10,7 +10,7 @@ import {
   glabGraphQL,
   SOURCE_BRANCH_QUERY,
   type GraphQL,
-} from './gitlab';
+} from './adapter';
 
 const repository: Repository = {
   head: 'abc',
@@ -229,6 +229,106 @@ describe('GitLabForge.findByNumber', () => {
       expect(mr?.duoReviewState).toBe(reviewState ?? undefined);
     },
   );
+
+  // A failed job, required unless `allowFailure` says otherwise.
+  const job = (id: string, allowFailure = false) => ({
+    id: `gid://gitlab/Ci::Build/${id}`,
+    name: `job-${id}`,
+    allowFailure,
+    webPath: `/group/project/-/jobs/${id}`,
+    stage: { name: 'test' },
+  });
+  const page = (nodes: unknown[], hasNextPage = false) => ({ pageInfo: { hasNextPage }, nodes });
+  const pipeline = (jobs: unknown, status = 'RUNNING') => ({
+    id: 'gid://gitlab/Ci::Pipeline/9',
+    status,
+    path: '/group/project/-/pipelines/9',
+    detailedStatus: { label: status.toLowerCase() },
+    jobs,
+  });
+  // The pipeline a forge reads with the MR, and how many queries it sent.
+  const readPipeline = async (headPipeline: unknown) => {
+    let queries = 0;
+    const mr = await new GitLabForge(async () => {
+      queries++;
+      return { p0: { mergeRequest: node({ headPipeline }) } };
+    }).findByNumber(projects, '1');
+    return { pipeline: mr?.pipeline, queries };
+  };
+
+  test("reads the pipeline's failed jobs that fail it, while it still runs", async () => {
+    let seen = '';
+    const mr = await new GitLabForge(async (_host, text) => {
+      seen = String(text);
+      return {
+        p0: { mergeRequest: node({ headPipeline: pipeline(page([job('1'), job('2', true)])) }) },
+      };
+    }).findByNumber(projects, '1');
+    expect(seen).toContain('jobs(statuses: [FAILED], retried: false, first: 10)');
+    expect(mr?.pipeline).toEqual({
+      status: 'RUNNING',
+      label: 'running',
+      url: 'https://gitlab.com/group/project/-/pipelines/9',
+      id: 'gid://gitlab/Ci::Pipeline/9',
+      failedJobs: [
+        {
+          id: 'gid://gitlab/Ci::Build/1',
+          name: 'job-1',
+          url: 'https://gitlab.com/group/project/-/jobs/1',
+          stage: 'test',
+        },
+      ],
+      failedJobsComplete: true,
+    });
+  });
+
+  test('reads only the first failed jobs, and never counts unread ones as failing the pipeline', async () => {
+    // Every job read is allowed to fail, and more failed.
+    const optional = Array.from({ length: 10 }, (_, index) => job(String(index), true));
+    const { pipeline: read, queries } = await readPipeline(pipeline(page(optional, true)));
+    expect(queries).toBe(1);
+    expect(read).toMatchObject({ failedJobs: [], failedJobsComplete: false });
+    expect(pipelineFails(read)).toBe(false);
+    // Once the pipeline is over, its status says whether an unread job failed it.
+    const failed = await readPipeline(pipeline(page(optional, true), 'FAILED'));
+    expect(pipelineFails(failed.pipeline)).toBe(true);
+    // One read required failure is enough, however many more there are.
+    const required = await readPipeline(pipeline(page([job('1'), ...optional.slice(1)], true)));
+    expect(required.pipeline?.failedJobs?.map((entry) => entry.name)).toEqual(['job-1']);
+    expect(pipelineFails(required.pipeline)).toBe(true);
+  });
+
+  test('reads the source branch, and treats mergeability as unknown while GitLab rechecks it', async () => {
+    const read = async (overrides: Record<string, unknown>) =>
+      new GitLabForge(async () => ({
+        p0: { mergeRequest: node({ sourceBranch: 'feature', ...overrides }) },
+      })).findByNumber(projects, '1');
+    expect(await read({})).toMatchObject({
+      sourceProject: 'me/project',
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+      conflictsKnown: true,
+    });
+    for (const status of ['CHECKING', 'UNCHECKED', 'PREPARING'])
+      expect((await read({ detailedMergeStatus: status, conflicts: true }))?.conflictsKnown).toBe(
+        false,
+      );
+    expect(await read({ detailedMergeStatus: 'CONFLICT', conflicts: true })).toMatchObject({
+      conflicts: true,
+      conflictsKnown: true,
+    });
+    // After its target branch moves, a conflicting MR reads `conflicts: false`
+    // until GitLab rechecks it, though its detailed status still says CONFLICT.
+    expect(
+      await read({
+        mergeStatusEnum: 'CANNOT_BE_MERGED_RECHECK',
+        detailedMergeStatus: 'CONFLICT',
+        conflicts: false,
+      }),
+    ).toMatchObject({ conflicts: true, conflictsKnown: false });
+    // A deleted fork has no source project.
+    expect((await read({ sourceProject: null }))?.sourceProject).toBeUndefined();
+  });
 
   test('does not report human or unrelated bot reviews as Duo', async () => {
     const graphql: GraphQL = async () => ({

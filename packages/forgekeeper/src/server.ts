@@ -1,9 +1,20 @@
 import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
+import { createKeyedQueue } from './keyed-queue';
 import { statusOptions } from './options';
+import {
+  LINKED_NOTE_TOOL,
+  restrictRequest,
+  summarySystem,
+  taggedInput,
+  turnInput,
+  UNAVAILABLE_TEXT,
+  type SummaryRequest,
+} from './review-summary';
 import { ForgeSessionRpc, implement } from './rpc';
 import { setupStatus, type Status, type StatusDependencies } from './status-server';
+import { summaryPrefix } from './summary-delivery';
 import type { Snapshot } from './store';
 import {
   applyTargetChange,
@@ -81,8 +92,8 @@ export async function setupServer(
   lookups: TitleLookups,
   status?: StatusDependencies,
 ) {
-  const pending = new Map<string, Promise<void>>();
-  const instructing = new Map<string, Promise<unknown>>();
+  const pending = createKeyedQueue();
+  const instructing = createKeyedQueue();
   const controller = new AbortController();
   // Set when cleanup starts. No title update or target change starts after
   // it, and one that is running stops before it writes, so it can't
@@ -97,13 +108,20 @@ export async function setupServer(
   const revision = (sessionID: string) => revisions.get(sessionID) ?? 0;
   const bump = (sessionID: string) => revisions.set(sessionID, revision(sessionID) + 1);
 
-  async function stateFor(sessionID: string): Promise<SessionState> {
-    const started = revision(sessionID);
+  const readState = async (sessionID: string) => {
     const stored =
       ((await ctx.storage.get(`sessions/${sessionID}`)) as StoredState | undefined) ?? {};
-    const targets = Array.isArray(stored.targets) ? stored.targets : [];
-    if (revision(sessionID) === started) known.set(sessionID, targets);
-    return { targets, ...(stored.prefix ? { prefix: stored.prefix } : {}) };
+    return {
+      targets: Array.isArray(stored.targets) ? stored.targets : [],
+      ...(stored.prefix ? { prefix: stored.prefix } : {}),
+    };
+  };
+
+  async function stateFor(sessionID: string): Promise<SessionState> {
+    const started = revision(sessionID);
+    const state = await readState(sessionID);
+    if (revision(sessionID) === started) known.set(sessionID, state.targets);
+    return state;
   }
 
   // Bumps the revision before and after the write, so neither a read that
@@ -126,6 +144,22 @@ export async function setupServer(
   const rpc = await ctx.rpc.register(
     ForgeSessionRpc,
     implement({
+      monitoringStatus: async ({ sessionID }) =>
+        watcher
+          ? json(await watcher.monitoringStatus(sessionID))
+          : {
+              enabled: false,
+              directory: ctx.location.directory,
+              sessionID,
+              discovered: false,
+              leased: false,
+              polling: false,
+              paused: false,
+              humanFeedback: false,
+              automatedFeedback: false,
+              status: { loading: false },
+              targets: [],
+            },
       target: async ({ sessionID }) => targetOutput((await stateFor(sessionID)).targets),
       watch: async ({ clientID, keys, visible }) =>
         watcher
@@ -136,20 +170,46 @@ export async function setupServer(
         return {};
       },
       refresh: async ({ key }) =>
-        watcher ? { enabled: true, snapshot: json(await watcher.service.refresh(key)) } : DISABLED,
+        watcher ? { enabled: true, snapshot: json(await watcher.refresh(key)) } : DISABLED,
+      feedback: async () => (watcher ? watcher.inbox.list() : { items: [], paused: false }),
+      acknowledgeFeedback: async ({ id }) =>
+        watcher ? watcher.inbox.acknowledge(id) : { items: [], paused: false },
+      summarizeFeedback: async ({ id }) => {
+        if (!watcher) throw new Error('PR/MR status is disabled');
+        return watcher.summarize(id);
+      },
+      pauseFeedback: async ({ paused }) => {
+        if (!watcher) return { items: [], paused: false };
+        const state = await watcher.inbox.pause(paused);
+        watcher.service.pauseFeedback(paused);
+        await watcher.discovery.refresh();
+        return state;
+      },
     }),
   );
 
   const settings = statusOptions(ctx.options);
+  if (settings.problems.length)
+    void rpc.events
+      .emit('notice', {
+        message: `Some Forgekeeper options were ignored: ${settings.problems.join('; ')}`,
+        variant: 'error',
+      })
+      .catch(() => {});
   if (status && settings.enabled) {
     watcher = await setupStatus(ctx, settings, status, {
       state: stateFor,
+      storedTargets: async (sessionID) => (await readState(sessionID)).targets,
       isTarget: (sessionID, url) => includesRequest(known.get(sessionID) ?? [], url),
       publish: (key: string, snapshot: Snapshot) =>
         void rpc.events
           .emit('status', { directory: ctx.location.directory, key, snapshot: json(snapshot) })
           .catch(() => {}),
       notice: (notice) => void rpc.events.emit('notice', json(notice)).catch(() => {}),
+      feedbackChanged: () =>
+        void rpc.events
+          .emit('feedbackChanged', { directory: ctx.location.directory })
+          .catch(() => {}),
     });
   }
 
@@ -184,14 +244,7 @@ export async function setupServer(
   // ending at once can't interleave their reads and writes.
   function schedule(sessionID: string, action = () => update(sessionID)): Promise<void> {
     if (closing) return Promise.reject(new Error('The plugin is reloading. Try again.'));
-    const previous = pending.get(sessionID) ?? Promise.resolve();
-    const next = previous.then(action);
-    const settled = next.catch(() => {});
-    pending.set(sessionID, settled);
-    void settled.then(() => {
-      if (pending.get(sessionID) === settled) pending.delete(sessionID);
-    });
-    return next;
+    return pending.run(sessionID, action);
   }
 
   // Infers the related issue of each PR/MR target from its source branch.
@@ -267,6 +320,28 @@ export async function setupServer(
         return { content: toolResult(result.targets, result.missing) };
       },
     });
+    // Offered only in review summaries whose comments link to other notes;
+    // the context hook removes it from every other request.
+    if (watcher) {
+      const summaries = watcher;
+      editor.add({
+        name: LINKED_NOTE_TOOL,
+        options: { codemode: false },
+        description:
+          'Read a note that the review comments being summarized link to. Works only during a Forgekeeper review summary, and only for the links its request lists as readable.',
+        input: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'One of the readable links, exactly as listed.' },
+          },
+          required: ['url'],
+          additionalProperties: false,
+        },
+        execute: async (input, { sessionID }) => ({
+          content: await summaries.fetchLinked(sessionID, (input as { url?: unknown })?.url),
+        }),
+      });
+    }
   });
 
   async function writeInstructions(sessionID: string): Promise<string[]> {
@@ -281,19 +356,41 @@ export async function setupServer(
   }
 
   function instruct(sessionID: string): Promise<string[]> {
-    const next = (instructing.get(sessionID) ?? Promise.resolve()).then(() =>
-      writeInstructions(sessionID),
-    );
-    const settled = next.catch(() => {});
-    instructing.set(sessionID, settled);
-    void settled.then(() => {
-      if (instructing.get(sessionID) === settled) instructing.delete(sessionID);
-    });
-    return next;
+    return instructing.run(sessionID, () => writeInstructions(sessionID));
   }
 
-  // A failure here must not block the model request, so it only skips the guidance.
+  // Without monitoring, such as after `status` is turned off, a
+  // Forgekeeper message queued earlier can still start a step. Its record
+  // isn't read then: the step only says the review text is unavailable.
+  // Sessions whose latest request was such a step, for the backstops.
+  const orphaned = new Set<string>();
+  // A tag counts unless the context shows a user prompt, which may quote one.
+  async function orphanedStep(event: SummaryRequest): Promise<boolean> {
+    if (!taggedInput(event.messages)) {
+      const records = await ctx.storage.scan({ prefix: summaryPrefix(event.sessionID) });
+      if (!records.entries.length) return false;
+    }
+    try {
+      const input = turnInput(await ctx.session.context({ sessionID: event.sessionID }));
+      // Without an input, such as after a compaction, the step may be one.
+      return !input || input.type !== 'user';
+    } catch {
+      return true;
+    }
+  }
+
+  // A summary turn's request is replaced before anything else runs, and its
+  // failures propagate, so the request never runs with the session's tools.
+  // A failure in the guidance must not block the request, so it's skipped.
   await ctx.session.hook('context', async (event) => {
+    if (watcher) {
+      if (await watcher.prepareSummary(event)) return;
+    } else if (await orphanedStep(event)) {
+      orphaned.add(event.sessionID);
+      restrictRequest(event, summarySystem(false), UNAVAILABLE_TEXT);
+      return;
+    } else orphaned.delete(event.sessionID);
+    if (event.tools) delete event.tools[LINKED_NOTE_TOOL];
     try {
       const session = await ctx.session.get({ sessionID: event.sessionID });
       if (session.parentID || session.location.directory !== ctx.location.directory) return;
@@ -303,6 +400,23 @@ export async function setupServer(
     } catch {
       // The request goes ahead without the guidance.
     }
+  });
+
+  // Backstops for a summary turn whose request still reached tools, such as
+  // after a hook ordering change. Each refuses the action outright. The
+  // linked-note tool checks its own calls, and asks for no permissions.
+  // They stay without monitoring too, for steps of messages queued earlier.
+  const summarizing = async (sessionID: string) =>
+    watcher ? watcher.summarizing(sessionID) : orphaned.has(sessionID);
+  await ctx.tool.hook('execute.before', async (event) => {
+    if (watcher && event.tool === LINKED_NOTE_TOOL) return;
+    if (await summarizing(event.sessionID))
+      throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
+  });
+  await ctx.permission.hook('evaluate', async (event) => {
+    if (!(await summarizing(event.sessionID))) return;
+    event.effect = 'deny';
+    event.message = 'Forgekeeper review summaries run without tools.';
   });
 
   void (async () => {
@@ -350,7 +464,7 @@ export async function setupServer(
   return async () => {
     closing = true;
     controller.abort();
-    await drain([...pending.values()], DRAIN_TIME);
+    await drain(pending.tasks(), DRAIN_TIME);
     await watcher?.dispose();
     await tools.dispose();
     await rpc.dispose();

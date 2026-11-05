@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
-import { checks, ghGraphQL, GitHubForge, type GraphQL } from './github';
-import { classifyTargets } from './target';
-import { detailsMessage, responsiveFooterSegments } from './format';
+import { checks, ghGraphQL, GitHubForge, type GraphQL } from './adapter';
+import { classifyTargets } from '../../target';
+import { detailsMessage, responsiveFooterSegments } from '../../format';
 
 const pull = (number = 1) => ({
   number,
@@ -143,6 +143,38 @@ test('check rollup prioritizes failures and never marks partial checks green', (
       'url',
     ).status,
   ).toBe('PENDING');
+});
+
+test('check rollup names the failed checks of a commit while others still run', () => {
+  const rollup = checks(
+    [
+      {
+        __typename: 'CheckRun',
+        id: 'CR_1',
+        name: 'test',
+        status: 'COMPLETED',
+        conclusion: 'FAILURE',
+        detailsUrl: 'https://github.com/o/r/actions/runs/1',
+      },
+      { __typename: 'StatusContext', id: 'SC_1', context: 'ci/legacy', state: 'ERROR' },
+      { __typename: 'CheckRun', name: 'build', status: 'IN_PROGRESS' },
+    ],
+    true,
+    'url',
+    'abc123',
+  );
+  expect(rollup).toMatchObject({
+    status: 'FAILED',
+    id: 'abc123',
+    running: true,
+    failedJobsComplete: true,
+    failedJobs: [
+      { id: 'CR_1', name: 'test', url: 'https://github.com/o/r/actions/runs/1' },
+      { id: 'SC_1', name: 'ci/legacy' },
+    ],
+  });
+  // Without the commit, the checks aren't one identified run.
+  expect(checks([], true, 'url').id).toBeUndefined();
 });
 
 test('check rollup distinguishes passed, skipped, and neutral checks', () => {

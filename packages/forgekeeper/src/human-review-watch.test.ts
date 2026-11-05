@@ -47,6 +47,120 @@ const seen = (baseline = 0, ...announced: string[]): SeenComments => ({
 });
 
 describe('eligibleFeedback', () => {
+  test('subscription-backed checks refetch before delivery, reconcile, and resume polling after disconnect', async () => {
+    let clock = 0;
+    let connected = true;
+    let reads = 0;
+    let sent = 0;
+    let current = snapshot();
+    const watcher = createFeedbackWatcher({
+      record: async () => undefined,
+      persist: () => {},
+      current: () => true,
+      fetch: async () => {
+        reads++;
+        return current;
+      },
+      send: async () => {
+        sent++;
+      },
+      now: () => clock,
+      interval: () => (connected ? 15 * MINUTE : FETCH_INTERVAL),
+    });
+    await watcher.check('one', mr);
+    current = snapshot(comment('1', { editedAt: MINUTE }));
+    clock = MINUTE;
+    await watcher.check('one', mr);
+    expect(reads).toBe(1);
+    watcher.invalidate('one', mr);
+    await watcher.check('one', mr);
+    expect(reads).toBe(2);
+    clock += SETTLE_TIME;
+    current = snapshot(comment('1', { resolved: true }));
+    await watcher.check('one', mr);
+    expect(reads).toBe(3);
+    expect(sent).toBe(0);
+    clock += 15 * MINUTE;
+    await watcher.check('one', mr);
+    expect(reads).toBe(4);
+    connected = false;
+    clock += FETCH_INTERVAL;
+    await watcher.check('one', mr);
+    expect(reads).toBe(5);
+    current = snapshot(comment('2', { editedAt: clock }));
+    connected = true;
+    watcher.invalidate('one', mr);
+    await watcher.check('one', mr);
+    clock += SETTLE_TIME;
+    await watcher.check('one', mr);
+    expect(sent).toBe(1);
+  });
+
+  test('an event during a fetch discards stale feedback and preserves a follow-up fetch', async () => {
+    let release!: (value: FeedbackSnapshot) => void;
+    let calls = 0;
+    let sent = 0;
+    const watcher = createFeedbackWatcher({
+      record: async () => ({ baseline: 0, announced: [], seenAt: 0 }),
+      persist: () => {},
+      current: () => true,
+      fetch: async () => {
+        calls++;
+        return calls === 1
+          ? new Promise<FeedbackSnapshot>((resolve) => {
+              release = resolve;
+            })
+          : snapshot();
+      },
+      send: async () => {
+        sent++;
+      },
+      now: () => SETTLE_TIME,
+    });
+    const first = watcher.check('one', mr);
+    watcher.invalidate('one', mr);
+    release(snapshot(comment('1')));
+    await first;
+    await watcher.check('one', mr);
+    expect(calls).toBe(2);
+    expect(sent).toBe(0);
+  });
+
+  test('passes only fetches that no later change made obsolete to `accepted`', async () => {
+    let release!: (value: FeedbackSnapshot) => void;
+    let calls = 0;
+    let current = true;
+    const accepted: FeedbackSnapshot[] = [];
+    const watcher = createFeedbackWatcher({
+      record: async () => ({ baseline: 0, announced: [], seenAt: 0 }),
+      persist: () => {},
+      current: () => current,
+      fetch: async () => {
+        calls++;
+        return calls === 1
+          ? new Promise<FeedbackSnapshot>((resolve) => {
+              release = resolve;
+            })
+          : snapshot(comment('1'));
+      },
+      send: async () => {},
+      accepted: (_request, value) => void accepted.push(value),
+      now: () => SETTLE_TIME,
+    });
+    const first = watcher.check('one', mr);
+    watcher.invalidate('one', mr);
+    // The obsolete fetch says the comment was resolved.
+    release(snapshot(comment('1', { resolved: true })));
+    await first;
+    expect(accepted).toEqual([]);
+    await watcher.check('one', mr);
+    expect(accepted).toEqual([snapshot(comment('1'))]);
+    current = false;
+    watcher.invalidate('one', mr);
+    await watcher.check('one', mr);
+    expect(accepted).toHaveLength(1);
+  });
+
   test('recognizes unseen IDs at the baseline timestamp', () => {
     const comments = snapshot(comment('1', { order: 100 }), comment('2', { order: 100 }));
     expect(
@@ -74,6 +188,28 @@ describe('eligibleFeedback', () => {
     expect(eligibleFeedback(comments, seen(10, '11'), SETTLE_TIME).map((n) => n.id)).toEqual([
       '16',
     ]);
+  });
+
+  test("counts configured review bots' comments, but never ones another watcher owns", () => {
+    const security = { bot: true, username: 'duo-security-review-gitlab-org' };
+    const comments = snapshot(
+      comment('11', security),
+      comment('12', { bot: true, username: 'gitlab-bot' }),
+      // GitLab Duo's findings belong to the automated review watcher.
+      comment('13', {
+        ...security,
+        automated: { reviewer: 'GitLab Duo', finding: true },
+      }),
+      comment('14'),
+    );
+    const reviewBot = (entry: { username: string }) =>
+      entry.username.startsWith('duo-security-review-');
+    const ids = (counts?: Parameters<typeof eligibleFeedback>[3]) =>
+      eligibleFeedback(comments, seen(10), SETTLE_TIME, counts).map((entry) => entry.id);
+    expect(ids()).toEqual(['14']);
+    expect(ids({ reviewBot })).toEqual(['11', '14']);
+    // With human feedback off, only the review bots count.
+    expect(ids({ humans: false, reviewBot })).toEqual(['11']);
   });
 
   test('treats comments at or below the baseline as old after deletions shift the window', () => {

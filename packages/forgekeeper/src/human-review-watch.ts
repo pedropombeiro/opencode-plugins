@@ -87,11 +87,28 @@ const isNew = (comment: ReviewComment, seen: SeenComments) =>
       !seen.baselineIDs.includes(comment.id))) &&
   !seen.announced.has(comment.id);
 
-// Unresolved comments from people other than the viewer.
-const humanFeedback = (snapshot: FeedbackSnapshot) =>
+// Unresolved comments from people other than the viewer, and from the bots
+// `reviewBot` accepts, such as security reviewers. Comments an automated
+// review watcher owns, such as GitLab Duo's, never count here.
+const humanFeedback = (snapshot: FeedbackSnapshot, counts: Counts = {}) =>
   snapshot.comments.filter(
-    (comment) => !comment.bot && comment.authorID !== snapshot.viewerID && !comment.resolved,
+    (comment) =>
+      (comment.bot
+        ? !comment.automated && !!counts.reviewBot?.(comment)
+        : counts.humans !== false) &&
+      comment.authorID !== snapshot.viewerID &&
+      !comment.resolved,
   );
+
+// Whether a bot's comment counts as review feedback.
+export type ReviewBot = (comment: ReviewComment) => boolean;
+
+// Whose comments count: people's, unless `humans` is false, and bots that
+// `reviewBot` accepts.
+export interface Counts {
+  humans?: boolean;
+  reviewBot?: ReviewBot;
+}
 
 // New human comments, but only once no human comment, announced or not, has
 // been added or edited for SETTLE_TIME. Any activity restarts the wait for the
@@ -100,8 +117,9 @@ export function eligibleFeedback(
   snapshot: FeedbackSnapshot,
   seen: SeenComments,
   now: number,
+  counts?: Counts,
 ): ReviewComment[] {
-  const human = humanFeedback(snapshot);
+  const human = humanFeedback(snapshot, counts);
   const pending = human.filter((comment) => isNew(comment, seen));
   if (pending.length === 0) return [];
   const lastActivity = Math.max(...human.map((comment) => comment.editedAt));
@@ -151,6 +169,13 @@ export interface FeedbackWatcherOptions {
   onFetchError?: (error: unknown) => void;
   onSendError?: (error: unknown, sessionID: string) => void;
   now?: () => number;
+  interval?: (request: ReviewRequest) => number;
+  select?: (snapshot: FeedbackSnapshot, request: ReviewRequest) => FeedbackSnapshot;
+  ready?: (snapshot: FeedbackSnapshot, now: number, request: ReviewRequest) => boolean;
+  // Receives each complete fetch that no later change made obsolete, before
+  // `select` narrows it.
+  accepted?: (request: ReviewRequest, snapshot: FeedbackSnapshot) => void;
+  counts?: Counts;
 }
 
 export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
@@ -161,6 +186,8 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
   const inflight = new Set<string>();
   const fetchedAt = new Map<string, number>();
   const retryAt = new Map<string, number>();
+  const snapshots = new Map<string, FeedbackSnapshot>();
+  const dirty = new Set<string>();
 
   // Merges the stored and local records. The higher baseline is the safer one.
   const seen = (key: string, shared: FeedbackRecord | undefined): SeenComments | undefined => {
@@ -198,8 +225,9 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
         .map((comment) => comment.id);
       return remember(key, { baseline, baselineIDs }, at);
     }
+    if (options.ready && !options.ready(snapshot, at, request)) return;
     if (at < (retryAt.get(key) ?? 0)) return;
-    const comments = eligibleFeedback(snapshot, previous, at).filter(
+    const comments = eligibleFeedback(snapshot, previous, at, options.counts).filter(
       (comment) => !reserved.has(`${key} ${comment.id}`),
     );
     if (comments.length === 0) {
@@ -221,19 +249,51 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
   }
 
   return {
+    invalidate(sessionID: string, request: ReviewRequest) {
+      const key = feedbackKey(sessionID, request);
+      fetchedAt.delete(key);
+      snapshots.delete(key);
+      dirty.add(key);
+    },
     // Fetches the request's comments, unless a fetch is running or ran
     // recently, and announces settled feedback. Resolves once that work is done.
     async check(sessionID: string, request: ReviewRequest): Promise<void> {
       const key = feedbackKey(sessionID, request);
-      if (inflight.has(key) || now() - (fetchedAt.get(key) ?? -Infinity) < FETCH_INTERVAL) return;
+      if (inflight.has(key)) return;
       if (!options.current(sessionID, request)) return;
       inflight.add(key);
-      fetchedAt.set(key, now());
       try {
-        const snapshot = await options.fetch(sessionID, request);
-        if (!snapshot || !options.current(sessionID, request)) return;
+        if (
+          now() - (fetchedAt.get(key) ?? -Infinity) <
+          (options.interval?.(request) ?? FETCH_INTERVAL)
+        ) {
+          if (now() - (fetchedAt.get(key) ?? -Infinity) < FETCH_INTERVAL) return;
+          const snapshot = snapshots.get(key);
+          const previous = seen(key, await options.record(key));
+          if (
+            !snapshot ||
+            !previous ||
+            eligibleFeedback(snapshot, previous, now(), options.counts).length === 0
+          )
+            return;
+          if (now() < (retryAt.get(key) ?? 0)) return;
+        }
+        dirty.delete(key);
+        fetchedAt.set(key, now());
+        const fetched = await options.fetch(sessionID, request);
+        const snapshot = fetched && (options.select?.(fetched, request) ?? fetched);
+        if (!snapshot?.complete) {
+          fetchedAt.delete(key);
+          snapshots.delete(key);
+          return;
+        }
+        if (dirty.has(key) || !options.current(sessionID, request)) return;
+        if (fetched) options.accepted?.(request, fetched);
+        snapshots.set(key, snapshot);
         await observe(sessionID, request, snapshot);
       } catch (error) {
+        fetchedAt.delete(key);
+        snapshots.delete(key);
         options.onFetchError?.(error);
       } finally {
         inflight.delete(key);

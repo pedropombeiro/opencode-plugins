@@ -1,4 +1,4 @@
-import type { Exec } from './exec';
+import type { Exec } from '../../exec';
 import {
   ForgeError,
   humanize,
@@ -7,14 +7,18 @@ import {
   prefixReferences,
   yesNo,
   type AutomatedReviewState,
+  type FailedJob,
   type Forge,
   type ForgeTraits,
   type GitLabMergeRequest,
   type ReviewRef,
-} from './forge';
-import type { RemoteProject, Repository } from './git';
-import { fetchComments } from './gitlab-feedback';
-import { query, typed, type Query, type Transport, type Typed } from './graphql';
+} from '../../forge';
+import type { RemoteProject, Repository } from '../../git';
+import { fetchComments, fetchDetails } from './feedback';
+import { fetchLinkedNote, linkedNotes } from './linked-notes';
+import { duoFindings, duoReady } from './review-feedback';
+import { subscribeToNotes } from './subscription';
+import { query, typed, type Query, type Transport, type Typed } from '../../graphql';
 
 interface DiscussionPage {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
@@ -30,16 +34,29 @@ interface MergeRequestNode {
   conflicts: boolean;
   approved: boolean | null;
   approvedBy: { nodes: Array<{ id: string; bot?: boolean }> } | null;
+  mergeStatusEnum?: string | null;
   detailedMergeStatus: string | null;
   diffHeadSha: string | null;
   updatedAt: string | null;
   targetBranch: string;
+  sourceBranch: string;
   sourceProject: { fullPath: string } | null;
   targetProject: { fullPath: string };
   headPipeline: {
+    id?: string | null;
     status: string;
     path: string | null;
     detailedStatus: { label: string | null } | null;
+    jobs?: {
+      pageInfo?: { hasNextPage: boolean } | null;
+      nodes: Array<{
+        id?: string | null;
+        name: string | null;
+        allowFailure: boolean;
+        webPath: string | null;
+        stage: { name: string | null } | null;
+      }>;
+    } | null;
   } | null;
   discussions: DiscussionPage;
   reviewers?: { nodes: ReviewerNode[] } | null;
@@ -63,12 +80,30 @@ const DISCUSSIONS = 'pageInfo { hasNextPage endCursor } nodes { resolvable resol
 const PAGE_SIZE = 100;
 export const MAX_DISCUSSION_PAGES = 50;
 
+// The failed jobs read with each MR. One that isn't allowed to fail is enough
+// to tell the pipeline fails; past these, only the pipeline's status can tell.
+const FIRST_FAILED_JOBS = 10;
+const FAILED_JOBS =
+  'pageInfo { hasNextPage } nodes { id name allowFailure webPath stage { name } }';
+
+type FailedJobPage = NonNullable<NonNullable<MergeRequestNode['headPipeline']>['jobs']>;
+
+// Merge statuses during which GitLab hasn't settled whether the MR conflicts.
+const RECHECKING = new Set(['CHECKING', 'UNCHECKED', 'PREPARING']);
+// GitLab's `conflicts` is true only in the CANNOT_BE_MERGED merge status. When
+// the target branch moves, a conflicting MR goes to this one, where `conflicts`
+// reads false and the detailed status still says CONFLICT, until a recheck.
+const CONFLICT_RECHECK = 'CANNOT_BE_MERGED_RECHECK';
+
 const MERGE_REQUEST_FIELDS = `
-  iid title webUrl state draft conflicts approved detailedMergeStatus diffHeadSha updatedAt targetBranch
+  iid title webUrl state draft conflicts approved mergeStatusEnum detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
   approvedBy(first: 100) { nodes { id bot } }
   sourceProject { fullPath }
   targetProject { fullPath }
-  headPipeline { status path detailedStatus { label } }
+  headPipeline {
+    id status path detailedStatus { label }
+    jobs(statuses: [FAILED], retried: false, first: ${FIRST_FAILED_JOBS}) { ${FAILED_JOBS} }
+  }
   reviewers(first: 100) { nodes { type username bot mergeRequestInteraction { reviewState approved } } }
   discussions(first: ${PAGE_SIZE}) { ${DISCUSSIONS} }
 `;
@@ -222,6 +257,7 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     return lines;
   },
   automatedReview: {
+    publishedFeedback: { storageKey: 'duo', select: duoFindings, ready: duoReady },
     name: 'GitLab Duo',
     status(request) {
       const state = request.duoReviewState;
@@ -230,11 +266,25 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     },
   },
   feedback: {
+    subscribe: subscribeToNotes,
     async fetch(run, directory, request) {
       const ref = gitlabTraits.parseUrl(request.url);
       return ref
         ? fetchComments(glabGraphQL(run, directory), ref.host, ref.project, ref.iid)
         : undefined;
+    },
+    async details(run, directory, request, ids) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      return ref ? fetchDetails(glabGraphQL(run, directory), ref.host, ref.project, ids) : [];
+    },
+    commentID: (url) => url.match(/#note_(\d+)$/)?.[1],
+    linkedNotes(request, details) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      return ref ? linkedNotes(ref.host, details) : [];
+    },
+    async linkedNote(run, directory, request, url) {
+      const ref = gitlabTraits.parseUrl(request.url);
+      return ref ? fetchLinkedNote(glabGraphQL(run, directory), ref.host, url) : undefined;
     },
   },
 };
@@ -243,6 +293,35 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
 // that was reset to unreviewed, needs nothing from the agent. New GitLab
 // states stay silent until they are added here.
 const DUO_FEEDBACK = new Set(['REVIEWED', 'REQUESTED_CHANGES']);
+
+// The pipeline's ID, and the read failed jobs that fail it. When it has more
+// failed jobs than were read, the list is incomplete, and none of the unread
+// ones counts as failing it.
+function failedJobs(host: string, pipeline: NonNullable<MergeRequestNode['headPipeline']>) {
+  if (!pipeline.id || !pipeline.jobs) return {};
+  return {
+    id: pipeline.id,
+    failedJobs: requiredFailures(host, pipeline.jobs.nodes),
+    failedJobsComplete: !pipeline.jobs.pageInfo?.hasNextPage,
+  };
+}
+
+// The failed jobs that fail the pipeline. Jobs allowed to fail don't, and the
+// query leaves out retried ones.
+function requiredFailures(host: string, nodes: FailedJobPage['nodes']): FailedJob[] {
+  return nodes.flatMap((job) =>
+    !job.allowFailure && job.name
+      ? [
+          {
+            ...(job.id ? { id: job.id } : {}),
+            name: job.name,
+            ...(job.webPath ? { url: `https://${host}${job.webPath}` } : {}),
+            ...(job.stage?.name ? { stage: job.stage.name } : {}),
+          },
+        ]
+      : [],
+  );
+}
 
 function duoState(state: string): AutomatedReviewState {
   if (state === 'REVIEW_STARTED') return 'running';
@@ -368,8 +447,14 @@ export class GitLabForge implements Forge {
       url: node.webUrl,
       state: node.state.toLowerCase(),
       draft: node.draft,
-      conflicts: node.conflicts,
-      conflictsKnown: true,
+      // A conflict that GitLab rechecks still counts, but as unknown, so the
+      // last known state stands until the recheck settles it.
+      conflicts: node.conflicts || node.mergeStatusEnum === CONFLICT_RECHECK,
+      // While GitLab recalculates mergeability, `conflicts` may describe an
+      // older commit.
+      conflictsKnown:
+        node.mergeStatusEnum !== CONFLICT_RECHECK &&
+        !RECHECKING.has(node.detailedMergeStatus ?? ''),
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
@@ -378,6 +463,8 @@ export class GitLabForge implements Forge {
       mergeStatus: node.detailedMergeStatus ?? undefined,
       targetProject: node.targetProject.fullPath,
       targetBranch: node.targetBranch,
+      ...(node.sourceProject ? { sourceProject: node.sourceProject.fullPath } : {}),
+      sourceBranch: node.sourceBranch,
       headSha: node.diffHeadSha ?? undefined,
       updatedAt: node.updatedAt ?? undefined,
       pipeline: pipeline
@@ -386,6 +473,7 @@ export class GitLabForge implements Forge {
             label:
               pipeline.detailedStatus?.label ?? pipeline.status.toLowerCase().replace(/_/g, ' '),
             url: pipeline.path ? `https://${host}${pipeline.path}` : undefined,
+            ...failedJobs(host, pipeline),
           }
         : undefined,
       unresolvedThreads: threads.count,

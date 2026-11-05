@@ -10,7 +10,46 @@ export interface Pipeline {
   status: string;
   label: string;
   url?: string;
+  // Identifies the run, so another run counts as new: GitLab's pipeline ID,
+  // or the commit GitHub's checks ran on.
+  id?: string;
+  // Jobs or checks that failed and fail the run, not ones allowed to fail or
+  // retried. Absent when the forge doesn't say.
+  failedJobs?: FailedJob[];
+  // False when the run has more failed jobs than the adapter reads, which may
+  // or may not fail it.
+  failedJobsComplete?: boolean;
+  // Whether jobs are still running, when the status doesn't say, such as for
+  // GitHub checks that report a failure while others run.
+  running?: boolean;
 }
+
+export interface FailedJob {
+  // Identifies the attempt, so a retry that fails again is a new failure.
+  id?: string;
+  name: string;
+  url?: string;
+  stage?: string;
+}
+
+// A failed job's identity, falling back to its name.
+export const jobKey = (job: FailedJob) => job.id ?? `name:${job.name}`;
+
+// Pipeline statuses that mean the run is over, on either forge.
+const FINISHED = new Set(['SUCCESS', 'FAILED', 'CANCELED', 'CANCELLED', 'SKIPPED', 'MANUAL']);
+export const pipelineRunning = (pipeline: Pipeline | undefined) =>
+  !!pipeline && (pipeline.running ?? !FINISHED.has(pipeline.status));
+
+// Whether a failed job the adapter didn't read fails the run. Only the run's
+// status can tell, once it's over: jobs allowed to fail never fail it.
+export const unlistedFailure = (pipeline: Pipeline | undefined) =>
+  pipeline?.failedJobsComplete === false &&
+  !pipeline.failedJobs?.length &&
+  pipeline.status === 'FAILED';
+
+// Whether a job that isn't allowed to fail failed the run. One is enough.
+export const pipelineFails = (pipeline: Pipeline | undefined) =>
+  !!pipeline?.failedJobs?.length || unlistedFailure(pipeline);
 
 interface Common {
   iid: string;
@@ -30,6 +69,10 @@ interface Common {
   reviewersComplete: boolean;
   targetProject: string;
   targetBranch: string;
+  // Where the PR/MR's commits come from. Absent when the forge doesn't say,
+  // such as for a deleted fork.
+  sourceProject?: string;
+  sourceBranch?: string;
   headSha?: string;
   updatedAt?: string;
   pipeline?: Pipeline;
@@ -141,6 +184,11 @@ export interface CompletedReview {
 
 // A forge's automated code reviewer, such as GitLab Duo or GitHub Copilot.
 export interface AutomatedReview<Request extends ReviewRequest = ReviewRequest> {
+  readonly publishedFeedback?: {
+    storageKey: string;
+    select(snapshot: FeedbackSnapshot): FeedbackSnapshot;
+    ready(snapshot: FeedbackSnapshot, now: number): boolean;
+  };
   readonly name: string;
   // The reviewer's review of a request, or undefined without one.
   status(request: Request): AutomatedReviewStatus | undefined;
@@ -149,6 +197,7 @@ export interface AutomatedReview<Request extends ReviewRequest = ReviewRequest> 
 // A comment on a PR/MR, as read by a forge's `feedback` capability. The forge
 // leaves out entries that aren't comments, such as GitLab's system notes.
 export interface ReviewComment {
+  automated?: { reviewer: string; finding: boolean; runID?: string; status?: string };
   // Identifies the comment, for remembering which comments were announced.
   id: string;
   // Orders comments by when they were posted, across all comment types.
@@ -172,10 +221,69 @@ export interface FeedbackSnapshot {
   comments: ReviewComment[];
 }
 
+export type FeedbackTarget = Pick<ReviewRequest, 'forge' | 'url'>;
+
 // Reads a request's review comments, for announcing new human feedback.
 export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
+  subscribe?(
+    run: Exec,
+    directory: string,
+    request: Request,
+    events: FeedbackEvents,
+    signal: AbortSignal,
+  ): Promise<void>;
   // Undefined when the request doesn't exist.
   fetch(run: Exec, directory: string, request: Request): Promise<FeedbackSnapshot | undefined>;
+  // The text of the comments with these IDs, for summarizing feedback. Leaves
+  // out comments it can't read. The text is written by reviewers, so callers
+  // treat it as untrusted.
+  details?(
+    run: Exec,
+    directory: string,
+    request: FeedbackTarget,
+    ids: string[],
+  ): Promise<CommentDetail[]>;
+  // The comment ID a comment link names, for updates stored before they kept
+  // their comment IDs. Undefined when the link doesn't name one.
+  commentID?(url: string): string | undefined;
+  // Links to other comments that these comments' own text names directly,
+  // which a summary may read. Each is canonical, on the request's forge host,
+  // and not one of the comments. Links in replies or code don't count.
+  linkedNotes?(request: FeedbackTarget, details: readonly CommentDetail[]): string[];
+  // Reads the comment a link from `linkedNotes` names. Undefined when it
+  // can't be read, or when what the forge returns isn't that comment.
+  linkedNote?(
+    run: Exec,
+    directory: string,
+    request: FeedbackTarget,
+    url: string,
+  ): Promise<LinkedNote | undefined>;
+}
+
+// A comment that review feedback links to. Its text is untrusted.
+export interface LinkedNote {
+  url: string;
+  username: string;
+  body: string;
+}
+
+export interface CommentDetail {
+  id: string;
+  url: string;
+  username: string;
+  body: string;
+  path?: string;
+  line?: number;
+  // The code the comment is on: numbered file lines around it, or the diff
+  // hunk that ends at it. Written by the PR/MR's author, so also untrusted.
+  code?: { path: string; text: string };
+  // Earlier comments in the same thread, oldest first.
+  replies?: Array<{ username: string; body: string }>;
+}
+
+export interface FeedbackEvents {
+  connected: () => void;
+  changed: () => void;
 }
 
 // A type guard for one forge's requests, for its traits' `owns`.

@@ -1,4 +1,4 @@
-import type { Exec } from './exec';
+import type { Exec } from '../../exec';
 import {
   type CopilotReview,
   type AutomatedReviewStatus,
@@ -12,11 +12,11 @@ import {
   type GitHubPullRequest,
   type Pipeline,
   type ReviewRef,
-} from './forge';
-import type { RemoteProject, Repository } from './git';
-import { fetchComments } from './github-feedback';
-import { gitlabTraits } from './gitlab';
-import { query, typed, type Transport, type Typed } from './graphql';
+} from '../../forge';
+import type { RemoteProject, Repository } from '../../git';
+import { fetchComments, fetchDetails } from './feedback';
+import { gitlabTraits } from '../gitlab/adapter';
+import { query, typed, type Transport, type Typed } from '../../graphql';
 
 interface Connection<T> {
   nodes: T[];
@@ -25,6 +25,11 @@ interface Connection<T> {
 
 interface Check {
   __typename: string;
+  // Each run of a check has its own ID.
+  id?: string;
+  // A check run's name, or a status context's.
+  name?: string;
+  context?: string;
   status?: string;
   conclusion?: string;
   state?: string;
@@ -66,7 +71,7 @@ const fields = `number title url state isDraft mergeable reviewDecision headRefO
   reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
   copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
   commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
-    nodes { __typename ... on CheckRun { status conclusion detailsUrl } ... on StatusContext { state targetUrl } }
+    nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } }
     pageInfo { hasNextPage endCursor }
   } } } } }`;
 
@@ -140,11 +145,24 @@ const STATES = ['SUCCESS', 'FAILURE', 'ERROR', 'PENDING', 'EXPECTED'];
 
 // Summarizes the head commit's checks. Failures win over pending checks, and
 // partial or unrecognized results never report success.
-export function checks(nodes: Check[], complete: boolean, url: string): Pipeline {
+export function checks(nodes: Check[], complete: boolean, url: string, id?: string): Pipeline {
   const count = (value: number) => `${value} check${value === 1 ? '' : 's'}`;
-  const failed = nodes.filter((node) =>
-    FAILED.includes(node.conclusion ?? node.state ?? ''),
-  ).length;
+  const failing = nodes.filter((node) => FAILED.includes(node.conclusion ?? node.state ?? ''));
+  const failed = failing.length;
+  // The checks of one commit count as one run.
+  const run = id
+    ? {
+        id,
+        failedJobs: failing.flatMap((node) => {
+          const name = node.name ?? node.context;
+          const link = node.detailsUrl ?? node.targetUrl;
+          return name
+            ? [{ ...(node.id ? { id: node.id } : {}), name, ...(link ? { url: link } : {}) }]
+            : [];
+        }),
+        failedJobsComplete: complete,
+      }
+    : {};
   const pending = nodes.filter((node) =>
     node.status ? node.status !== 'COMPLETED' : ['PENDING', 'EXPECTED'].includes(node.state ?? ''),
   ).length;
@@ -158,12 +176,16 @@ export function checks(nodes: Check[], complete: boolean, url: string): Pipeline
       status: 'FAILED',
       label: `${count(failed)} failed${pending ? `, ${count(pending)} pending` : ''}${complete ? '' : ' (partial)'}`,
       url,
+      ...run,
+      // GitHub reports a failure before the other checks finish.
+      running: pending > 0,
     };
   if (pending || !complete || unknown)
     return {
       status: 'PENDING',
       label: `${pending ? `${count(pending)} pending` : 'unknown'}${complete ? '' : ' (partial)'}`,
       url,
+      ...run,
     };
   const label = [
     ['SUCCESS', 'passed'],
@@ -175,7 +197,7 @@ export function checks(nodes: Check[], complete: boolean, url: string): Pipeline
       return total ? [`${count(total)} ${text}`] : [];
     })
     .join(', ');
-  return { status: 'SUCCESS', label: label || '0 checks', url };
+  return { status: 'SUCCESS', label: label || '0 checks', url, ...run };
 }
 
 // GitHub URLs are accepted on any host, for GitHub Enterprise, except GitLab
@@ -216,6 +238,10 @@ export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
       return ref
         ? fetchComments(ghGraphQL(run, directory), ref.host, ref.project, ref.iid)
         : undefined;
+    },
+    async details(run, directory, request, ids) {
+      const ref = githubTraits.parseUrl(request.url);
+      return ref ? fetchDetails(ghGraphQL(run, directory), ref.host, ids) : [];
     },
   },
 };
@@ -405,7 +431,7 @@ export class GitHubForge implements Forge {
           }>
         >(`query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String!) {
         repository(owner:$owner,name:$repo) { object(oid:$oid) { ... on Commit { statusCheckRollup {
-          contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { status conclusion detailsUrl } ... on StatusContext { state targetUrl } } pageInfo { hasNextPage endCursor } }
+          contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } } pageInfo { hasNextPage endCursor } }
         } } } } }`),
         { owner, repo, oid: node.headRefOid, after: cursor.endCursor },
       );
@@ -471,11 +497,13 @@ export class GitHubForge implements Forge {
       reviewersComplete: !reviewers.pageInfo?.hasNextPage,
       targetProject: node.baseRepository.nameWithOwner,
       targetBranch: node.baseRefName,
+      ...(node.headRepository ? { sourceProject: node.headRepository.nameWithOwner } : {}),
+      sourceBranch: node.headRefName,
       headSha: node.headRefOid,
       updatedAt: node.updatedAt,
       pipeline:
         contexts.nodes.length || !contexts.complete
-          ? checks(contexts.nodes, contexts.complete, `${node.url}/checks`)
+          ? checks(contexts.nodes, contexts.complete, `${node.url}/checks`, node.headRefOid)
           : undefined,
       unresolvedThreads: threads.unresolved,
       threadsComplete: threads.complete,

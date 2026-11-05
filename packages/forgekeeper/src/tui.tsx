@@ -23,6 +23,7 @@ import { showNotice } from './notice';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
 import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
+import { feedbackTime, linkOptions, type InboxState } from './feedback-inbox';
 import type { Repository } from './git';
 import type { Lookup } from './store';
 
@@ -30,6 +31,15 @@ export default {
   id: 'pedropombeiro.forgekeeper',
   async setup(context) {
     const rpc = context.client.rpc(ForgeSessionRpc);
+    const [feedback, setFeedback] = createSignal<InboxState>({ items: [], paused: false });
+    const feedbackDirectory = () => currentPlace().directory;
+    let feedbackRequest = 0;
+    async function loadFeedback(directory = feedbackDirectory()) {
+      const request = ++feedbackRequest;
+      const state = (await rpc.feedback({}, { location: { directory } })) as InboxState;
+      if (directory === feedbackDirectory() && request === feedbackRequest) setFeedback(state);
+      return state;
+    }
 
     const [version, setVersion] = createSignal(0);
     const client = createStatusClient({
@@ -66,7 +76,7 @@ export default {
       return client.snapshot(place);
     };
 
-    // `reviewStatus: false` on a directory's server turns its footer and
+    // `status: false` on a directory's server turns its footer and
     // commands off. Each directory has its own options.
     const enabledFor = (directory: string) => {
       version();
@@ -74,7 +84,10 @@ export default {
     };
 
     const refresh = (place: Place) => client.refresh(place);
-    const heartbeat = setInterval(() => client.heartbeat(), HEARTBEAT);
+    const heartbeat = setInterval(() => {
+      client.heartbeat();
+      void loadFeedback().catch(() => {});
+    }, HEARTBEAT);
 
     const color = (tone: Tone) => {
       const feedback = context.theme.text.feedback;
@@ -178,7 +191,7 @@ export default {
     const statusOff = (place: Place) => {
       if (enabledFor(place.directory)) return false;
       context.ui.toast.show({
-        message: "PR/MR status is off in the plugin's options (reviewStatus: false)",
+        message: "PR/MR status is off in the plugin's options (status: false)",
         variant: 'info',
       });
       return true;
@@ -492,6 +505,75 @@ export default {
       context.ui.dialog.show(() => <StatusDialog place={place} />);
     }
 
+    async function showFeedback() {
+      const directory = feedbackDirectory();
+      const state = await loadFeedback(directory);
+      const selected = await context.ui.dialog.select({
+        title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
+        options: state.items.map((item) => ({
+          title: item.title,
+          // A lifecycle event's first fact, such as a proposed retarget, shows too.
+          description: [
+            context.data.session.get(item.sessionID)?.title ?? item.sessionID,
+            feedbackTime(item),
+            ...(item.details?.length
+              ? [
+                  `${item.details[0]}${item.details.length > 1 ? ` (+${item.details.length - 1})` : ''}`,
+                ]
+              : []),
+          ].join(' · '),
+          value: item.id,
+        })),
+        actions: [
+          {
+            bind: 'ctrl+d',
+            title: 'Acknowledge',
+            onTrigger: async (id) => {
+              await rpc.acknowledgeFeedback({ id }, { location: { directory } });
+              context.ui.dialog.clear();
+              void showFeedback();
+            },
+          },
+          {
+            bind: 'ctrl+r',
+            title: 'Summarize in session',
+            onTrigger: async (id) => {
+              context.ui.dialog.clear();
+              try {
+                await rpc.summarizeFeedback({ id }, { location: { directory } });
+                context.ui.toast.show({
+                  message: 'Summarizing the update in its session, without tools.',
+                  variant: 'info',
+                });
+              } catch (error) {
+                context.ui.toast.show({
+                  message: `Could not summarize: ${error instanceof Error ? error.message : String(error)}`,
+                  variant: 'error',
+                });
+              }
+            },
+          },
+          {
+            bind: 'ctrl+s',
+            title: state.paused ? 'Resume monitoring' : 'Pause monitoring',
+            selection: 'none',
+            onTrigger: async () => {
+              await rpc.pauseFeedback({ paused: !state.paused }, { location: { directory } });
+              context.ui.dialog.clear();
+              void showFeedback();
+            },
+          },
+        ],
+      });
+      const item = state.items.find((entry) => entry.id === selected);
+      if (!item) return;
+      const link = await context.ui.dialog.select({
+        title: item.title,
+        options: linkOptions(item),
+      });
+      if (link) openUrl(link);
+    }
+
     async function openRequest() {
       const place = currentPlace();
       if (statusOff(place)) return;
@@ -533,9 +615,22 @@ export default {
     context.ui.slot({
       append: 'app',
       render: () => {
+        createEffect(() => {
+          const directory = feedbackDirectory();
+          setFeedback({ items: [], paused: false });
+          void loadFeedback(directory).catch(() => {});
+        });
         context.keymap.layer(() => ({
           mode: 'global',
           commands: [
+            {
+              id: 'forge.review.feedback',
+              title: 'Show pending review feedback',
+              group: 'Forge',
+              palette: true,
+              slash: { name: 'forge-feedback' },
+              run: () => showFeedback(),
+            },
             {
               id: 'forge.review.status',
               title: 'Show PR/MR status',
@@ -558,14 +653,40 @@ export default {
       },
     });
 
+    context.ui.slot({
+      append: 'home.footer.status',
+      render: () => (
+        <Show when={feedback().items.length > 0 || feedback().paused}>
+          <text fg={context.theme.text.muted} onMouseUp={() => void showFeedback()}>
+            {feedback().items.length} review updates{feedback().paused ? ' (paused)' : ''}
+          </text>
+        </Show>
+      ),
+    });
+    context.ui.slot({
+      append: 'prompt.footer.status',
+      render: () => (
+        <Show when={feedback().items.length > 0 || feedback().paused}>
+          <text fg={context.theme.text.muted} onMouseUp={() => void showFeedback()}>
+            {feedback().items.length} review updates{feedback().paused ? ' (paused)' : ''}
+          </text>
+        </Show>
+      ),
+    });
+
     const stops = [
+      rpc.events.on('feedbackChanged', (event) => {
+        const { directory } = event.data as EventData<'feedbackChanged'>;
+        if (directory === feedbackDirectory()) void loadFeedback(directory).catch(() => {});
+      }),
       rpc.events.on('status', (event) => {
         const { directory, key, snapshot } = event.data as EventData<'status'>;
         client.receive(directory, key, snapshot);
       }),
       rpc.events.on('notice', (event) =>
         showNotice(event.data as EventData<'notice'>, {
-          hasShown: client.hasShown,
+          hasShown: (sessionID) =>
+            client.hasShown(sessionID) || event.location?.directory === feedbackDirectory(),
           openTab: (sessionID) => context.ui.tabs.open(sessionID),
           toast: context.ui.toast.show,
         }),

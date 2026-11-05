@@ -76,6 +76,11 @@ interface Entry {
   timer?: unknown;
 }
 
+// Explicit PR/MR targets that none of could be resolved, such as while the
+// forge returns nothing for them.
+export const unresolved = (lookup: Lookup | undefined) =>
+  lookup?.kind === 'none' && lookup.explicitTarget === true;
+
 export function createStatusStore(options: StoreOptions) {
   const now = options.now ?? Date.now;
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
@@ -124,8 +129,14 @@ export function createStatusStore(options: StoreOptions) {
     if (disposed || value.refs === 0) return;
     const lookup = value.snapshot.lookup;
     // Without a PR/MR there is nothing to watch; turn ends, branch changes, and
-    // the command still look again.
-    if (!value.snapshot.error && (lookup?.kind !== 'found' || lookup.requests.length === 0)) return;
+    // the command still look again. Explicit targets that couldn't be resolved
+    // are retried, with backoff, since they may become available.
+    if (
+      !value.snapshot.error &&
+      !unresolved(lookup) &&
+      (lookup?.kind !== 'found' || lookup.requests.length === 0)
+    )
+      return;
     value.timer = setTimer(() => {
       value.timer = undefined;
       void refresh(key);
@@ -146,7 +157,8 @@ export function createStatusStore(options: StoreOptions) {
           // describes the old state. It must not reach the watchers.
           if (disposed || value.invalidated) return;
           const previous = value.snapshot.lookup;
-          value.failures = 0;
+          // An unresolved explicit target backs off like a failure.
+          value.failures = unresolved(lookup) ? value.failures + 1 : 0;
           update(key, value, {
             lookup,
             fetchedAt: now(),

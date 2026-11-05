@@ -11,6 +11,8 @@
 // so the schemas stay the single description of what crosses the RPC.
 import type { FromSchema, JSONSchema } from 'json-schema-to-ts';
 import type { Snapshot } from './store';
+import type { InboxState } from './feedback-inbox';
+import type { MonitoringStatus } from './monitoring-status';
 
 const urls = {
   url: { type: 'string' },
@@ -35,7 +37,8 @@ const key = { type: 'string' } as const;
 // A `Snapshot` from src/store.ts. Its title lets `Deserialize` map it to that
 // type, so the schema doesn't repeat the lookup's shape.
 const snapshot = { type: 'object', title: 'Snapshot' } as const;
-// `enabled` is false when the plugin's `reviewStatus` option is off.
+const inboxState = { type: 'object', title: 'InboxState' } as const;
+// `enabled` is false when the plugin's `status` option is off.
 const status = {
   type: 'object',
   properties: { enabled: { type: 'boolean' }, snapshot },
@@ -46,6 +49,47 @@ const status = {
 export const ForgeSessionRpc = {
   id: 'opencode-forgekeeper',
   methods: {
+    monitoringStatus: {
+      input: {
+        type: 'object',
+        properties: { sessionID: { type: 'string' } },
+        required: ['sessionID'],
+        additionalProperties: false,
+      },
+      output: { type: 'object', title: 'MonitoringStatus' },
+    },
+    feedback: {
+      input: { type: 'object', additionalProperties: false },
+      output: inboxState,
+    },
+    acknowledgeFeedback: {
+      input: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: inboxState,
+    },
+    // Starts a tool-free summary turn for an update in its session.
+    summarizeFeedback: {
+      input: {
+        type: 'object',
+        properties: { id: { type: 'string' } },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: inboxState,
+    },
+    pauseFeedback: {
+      input: {
+        type: 'object',
+        properties: { paused: { type: 'boolean' } },
+        required: ['paused'],
+        additionalProperties: false,
+      },
+      output: inboxState,
+    },
     // The session's explicit targets, or `{}` in automatic branch mode.
     target: {
       input: {
@@ -102,6 +146,14 @@ export const ForgeSessionRpc = {
     },
   },
   events: {
+    feedbackChanged: {
+      schema: {
+        type: 'object',
+        properties: { directory: { type: 'string' } },
+        required: ['directory'],
+        additionalProperties: false,
+      },
+    },
     // Fires after set_session_target runs. Has only `sessionID` in branch mode.
     targetChanged: {
       schema: {
@@ -147,8 +199,16 @@ export const LEASE_TIME = 3 * HEARTBEAT;
 
 type Methods = typeof ForgeSessionRpc.methods;
 type Events = typeof ForgeSessionRpc.events;
-type Deserialize = { pattern: { type: 'object'; title: 'Snapshot' }; output: Snapshot };
-type Typed<S extends JSONSchema> = FromSchema<S, { deserialize: [Deserialize] }>;
+type Typed<S extends JSONSchema> = FromSchema<
+  S,
+  {
+    deserialize: [
+      { pattern: { type: 'object'; title: 'Snapshot' }; output: Snapshot },
+      { pattern: { type: 'object'; title: 'InboxState' }; output: InboxState },
+      { pattern: { type: 'object'; title: 'MonitoringStatus' }; output: MonitoringStatus },
+    ];
+  }
+>;
 
 export type MethodName = keyof Methods;
 export type EventName = keyof Events;
@@ -165,6 +225,14 @@ export type Handlers = { [M in MethodName]: (input: Input<M>) => Promise<Output<
 // OpenCode checks each call against the schemas before it reaches a handler,
 // and types the input as `unknown`. This is the one place that narrows it.
 export const implement = (handlers: Handlers) => ({
+  monitoringStatus: (input: unknown) =>
+    handlers.monitoringStatus(input as Input<'monitoringStatus'>),
+  feedback: () => handlers.feedback({}),
+  acknowledgeFeedback: (input: unknown) =>
+    handlers.acknowledgeFeedback(input as Input<'acknowledgeFeedback'>),
+  summarizeFeedback: (input: unknown) =>
+    handlers.summarizeFeedback(input as Input<'summarizeFeedback'>),
+  pauseFeedback: (input: unknown) => handlers.pauseFeedback(input as Input<'pauseFeedback'>),
   target: (input: unknown) => handlers.target(input as Input<'target'>),
   watch: (input: unknown) => handlers.watch(input as Input<'watch'>),
   release: (input: unknown) => handlers.release(input as Input<'release'>),
