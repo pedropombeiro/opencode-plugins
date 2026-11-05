@@ -46,6 +46,6 @@ jobs:
       - name: Build
         run: mise run build "$(basename "${{ inputs.package-path }}")"
 
-      - name: Publish
-        run: npm publish --access public --tag ${{ inputs.tag }}
+      - name: Stage
+        run: npm stage publish --access public --provenance --tag ${{ inputs.tag }}
         working-directory: ${{ inputs.package-path }}
