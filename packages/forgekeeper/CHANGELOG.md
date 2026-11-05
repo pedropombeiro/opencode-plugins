@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **forgekeeper:** Review notifications no longer resume the session or ask the agent to address feedback. They go to the inbox only, by default. The `resumeSession` option is removed, and saved values have no effect. Set `reviewFeedbackDelivery` to `"passive"` or `"summary"` to post updates to the session.
+* **forgekeeper:** Review notifications now go to the inbox by default. `resumeSession` and the former option names are removed. Configure `delivery.reviews` and `delivery.lifecycle` as `"passive"` or `"summary"` to post updates to sessions. See the [README's upgrade guide](README.md#upgrade-from-forgekeeper-2x) for the option mapping.
 
 ### Features
 
