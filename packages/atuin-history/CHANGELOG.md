@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-1.0.1...opencode-atuin-history-1.0.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **atuin-history:** say shell commands, not bash commands, in the package description ([#117](https://github.com/pedropombeiro/opencode-plugins/issues/117)) ([e57208d](https://github.com/pedropombeiro/opencode-plugins/commit/e57208dee991f7744ac33b0421379c32cc337ea7))
+
 ## [1.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-1.0.0...opencode-atuin-history-1.0.1) (2026-09-24)
 
 
