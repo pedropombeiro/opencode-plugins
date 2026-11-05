@@ -47,4 +47,8 @@ Releases are fully automated via [release-please](https://github.com/googleapis/
 
 1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `fix:`, `feat:`, `chore:`).
 2. Release-please creates separate release PRs per package.
-3. Merge the release PR — this creates a GitHub Release and triggers npm publish.
+3. Merge the release PR. This creates a GitHub Release and stages the version on npm with
+   `npm stage publish`.
+4. Approve the staged version with two-factor authentication, on the **Staged Packages** tab on
+   npmjs.com or with `npm stage list` and `npm stage approve <stage-id>`. Until then, the version
+   isn't installable.
