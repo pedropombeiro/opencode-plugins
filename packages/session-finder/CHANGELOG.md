@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-session-finder-1.1.0...opencode-session-finder-1.1.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **session-finder:** apply since and until to title matches ([#119](https://github.com/pedropombeiro/opencode-plugins/issues/119)) ([44c9da5](https://github.com/pedropombeiro/opencode-plugins/commit/44c9da5a9e7a3156c6c42a00d3a44842c3d2e8c7))
+
 ## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-session-finder-1.0.0...opencode-session-finder-1.1.0) (2026-11-05)
 
 
