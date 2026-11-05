@@ -221,6 +221,8 @@ export interface FeedbackSnapshot {
   comments: ReviewComment[];
 }
 
+export type FeedbackTarget = Pick<ReviewRequest, 'forge' | 'url'>;
+
 // Reads a request's review comments, for announcing new human feedback.
 export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
   subscribe?(
@@ -235,20 +237,25 @@ export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
   // The text of the comments with these IDs, for summarizing feedback. Leaves
   // out comments it can't read. The text is written by reviewers, so callers
   // treat it as untrusted.
-  details?(run: Exec, directory: string, request: Request, ids: string[]): Promise<CommentDetail[]>;
+  details?(
+    run: Exec,
+    directory: string,
+    request: FeedbackTarget,
+    ids: string[],
+  ): Promise<CommentDetail[]>;
   // The comment ID a comment link names, for updates stored before they kept
   // their comment IDs. Undefined when the link doesn't name one.
   commentID?(url: string): string | undefined;
   // Links to other comments that these comments' own text names directly,
   // which a summary may read. Each is canonical, on the request's forge host,
   // and not one of the comments. Links in replies or code don't count.
-  linkedNotes?(request: Request, details: readonly CommentDetail[]): string[];
+  linkedNotes?(request: FeedbackTarget, details: readonly CommentDetail[]): string[];
   // Reads the comment a link from `linkedNotes` names. Undefined when it
   // can't be read, or when what the forge returns isn't that comment.
   linkedNote?(
     run: Exec,
     directory: string,
-    request: Request,
+    request: FeedbackTarget,
     url: string,
   ): Promise<LinkedNote | undefined>;
 }

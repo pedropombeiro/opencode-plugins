@@ -844,10 +844,18 @@ If you set options for `opencode-forgekeeper` 2.x, also see
   renders the footer and dialog.
 - `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
   agent.
+- `src/review-monitoring.ts` configures the review watchers, stores their state, and records
+  review updates in the inbox.
 - `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and
   keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` proposes retargets
   of stacked PRs/MRs.
+- `src/lifecycle-notifications.ts` formats lifecycle updates, checks retarget proposals, and
+  connects lifecycle events to the inbox. `src/feedback-cleanup.ts` identifies resolved,
+  closed, and settled updates for removal.
 - `src/adapters/gitlab/linked-notes.ts` finds and reads the notes review comments link to.
+- `src/summary-delivery.ts` stores and delivers summary turns, restricts their model requests,
+  and handles linked-note access. `src/review-summary.ts` formats their content.
+- `src/keyed-queue.ts` serializes updates by session or record while allowing other keys to progress.
 
 Shared code never compares a forge against a specific name. It asks the forge's traits, or
 checks for a capability, instead. To add a forge, add its kind to `ForgeKind` and

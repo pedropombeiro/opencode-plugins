@@ -18,7 +18,8 @@ export const traits = <Kind extends ForgeKind>(kind: Kind) => registry[kind];
 
 // The traits of a request's forge. The lookup keys on the request's own
 // forge, so the traits' methods always receive a request of their type.
-export const traitsOf = (request: ReviewRequest): ForgeTraits => registry[request.forge];
+export const traitsOf = (request: Pick<ReviewRequest, 'forge'>): ForgeTraits =>
+  registry[request.forge];
 
 // The request's number as its forge writes it, such as `!45` or `#7`.
 export const reference = (request: ReviewRequest) => traitsOf(request).reference(request.iid);

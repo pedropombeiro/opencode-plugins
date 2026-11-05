@@ -11,9 +11,6 @@ import type { ReviewRequest } from './forge';
 import type { LifecycleRecord } from './lifecycle-watch';
 import type { EventPolicy, ExecutionMode } from './options';
 
-// The stricter of two policies: the lower mode, and only the actions both
-// allow. A mode this release doesn't know, such as `apply` in an event
-// stored by an earlier one, counts as `notify`.
 export function stricter(a: EventPolicy | undefined, b: EventPolicy): EventPolicy {
   if (!a) return { mode: 'notify', actions: [] };
   const order: ExecutionMode[] = ['notify', 'prepare'];
@@ -37,15 +34,13 @@ export interface RetargetOptions {
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 // One line per dependent PR/MR: whether it needs a new target, and which.
-export async function proposeRetargets(options: RetargetOptions): Promise<string[]> {
+export async function proposeRetargets(options: RetargetOptions) {
   const { parent, policy } = options;
   const from = parent.sourceBranch;
   const to = parent.targetBranch;
-  // The policy's actions say what `prepare` works out.
-  const preparing = policy.mode === 'prepare' && policy.actions.includes('retarget');
 
   async function line(child: LifecycleRecord): Promise<string> {
-    if (!preparing)
+    if (policy.mode !== 'prepare' || !policy.actions.includes('retarget'))
       return `${child.reference} builds on ${parent.reference}: it targets ${from ?? 'its source branch'}.`;
     // A fork's branch can't stand in for the target project's branch.
     if (!from || !parent.sourceProject || parent.sourceProject !== parent.targetProject)
@@ -66,7 +61,7 @@ export async function proposeRetargets(options: RetargetOptions): Promise<string
     return `Proposed: retarget ${child.reference} from ${from} to ${to}.`;
   }
 
-  const lines: string[] = [];
-  for (const child of options.children) lines.push(await line(child));
+  const lines: { url: string; text: string }[] = [];
+  for (const child of options.children) lines.push({ url: child.url, text: await line(child) });
   return lines;
 }

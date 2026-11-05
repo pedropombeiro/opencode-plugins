@@ -130,29 +130,22 @@ describe('statusOptions', () => {
 
   test('falls back to notifying for every invalid or unsupported policy, and says why', () => {
     for (const [policy, reason] of [
-      // The actions say what preparing works out, so without one there's nothing to prepare.
       [{ mode: 'prepare', actions: [] }, 'mode "prepare" needs at least one action'],
       [
         { mode: 'prepare', actions: ['push'] },
         'actions has ["push"], but supports only "retarget"',
       ],
       [{ mode: 'everything' }, 'mode must be one of "notify", "prepare"'],
-      // Forgekeeper never retargets itself, so applying isn't a mode.
       [{ mode: 'apply', actions: ['retarget'] }, 'mode must be one of "notify", "prepare"'],
       [{ mode: 'prepare', actions: 'retarget' }, 'actions must be a list'],
-      ['apply', 'must be an object'],
+      ['apply', 'must be an object, such as {"mode": "notify"}'],
     ] as const) {
       const options = statusOptions({ lifecycleExecution: { parentMerged: policy } });
       expect(options.lifecycleExecution.parentMerged).toEqual(notify);
       expect(options.problems).toEqual([
-        expect.stringMatching(
-          new RegExp(
-            `^lifecycleExecution\\.parentMerged .*${reason.replace(/[[\]"()]/g, '\\$&')}.*; using "notify"$`,
-          ),
-        ),
+        `lifecycleExecution.parentMerged ${reason}; using "notify"`,
       ]);
     }
-    // Notifying takes no actions, and an unknown key is reported too.
     const extra = statusOptions({
       lifecycleExecution: { parentMerged: { mode: 'notify', actions: ['retarget'], when: 'now' } },
     });

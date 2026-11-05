@@ -17,6 +17,7 @@ import {
   type ReviewRequest,
 } from './forge';
 import type { EventPolicy, FeedbackDelivery } from './options';
+import { createKeyedQueue } from './keyed-queue';
 
 export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed';
 
@@ -56,8 +57,6 @@ export interface LifecycleEvent {
   // Stable across retries, so the inbox records each event once.
   id: string;
   detectedAt: number;
-  // The policy when the event happened. Execution uses the stricter of this
-  // and the current one, so enabling execution never acts on old events.
   policy?: EventPolicy;
   // How the event reaches its session, as the mode was when it happened.
   // Absent in inbox mode, so enabling summaries never starts turns for it.
@@ -250,13 +249,12 @@ export interface LifecycleWatcherOptions {
   write: (record: LifecycleRecord) => Promise<void>;
   // Every record that has events waiting, for retries.
   waiting: () => Promise<LifecycleRecord[]>;
-  // Takes an event to the inbox. Resolves `false` to drop it, such as when
-  // the session no longer targets the PR/MR. Rejects to retry it later.
+  // Takes an event to the inbox. Rejects to retry it later.
   deliver: (
     record: LifecycleRecord,
     event: LifecycleEvent,
     records: readonly LifecycleRecord[],
-  ) => Promise<boolean>;
+  ) => Promise<void>;
   reference: (request: ReviewRequest) => string;
   policy?: (kind: LifecycleKind) => EventPolicy | undefined;
   delivery?: () => FeedbackDelivery;
@@ -268,16 +266,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
   const now = options.now ?? Date.now;
   // One session's work at a time, so a lookup and a retry can't both write
   // its records.
-  const queues = new Map<string, Promise<unknown>>();
-  const serialized = <T>(sessionID: string, task: () => Promise<T>): Promise<T> => {
-    const next = (queues.get(sessionID) ?? Promise.resolve()).then(task, task);
-    const settled = next.catch(() => {});
-    queues.set(sessionID, settled);
-    void settled.then(() => {
-      if (queues.get(sessionID) === settled) queues.delete(sessionID);
-    });
-    return next;
-  };
+  const queue = createKeyedQueue();
 
   // Delivers the session's waiting events, oldest first. A failed event
   // stays for the next retry; the others still go.
@@ -303,7 +292,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
   return {
     // Records a lookup of the session's targets, then delivers what it found.
     observe: (sessionID: string, requests: readonly ReviewRequest[]) =>
-      serialized(sessionID, async () => {
+      queue.run(sessionID, async () => {
         if (requests.length === 0) return;
         const stored = new Map(
           (await options.records(sessionID)).map((record) => [record.url, record]),
@@ -325,9 +314,9 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
     retry: async () => {
       const sessions = new Set((await options.waiting()).map((record) => record.sessionID));
       for (const sessionID of sessions)
-        await serialized(sessionID, () => flush(sessionID)).catch((error) =>
-          options.onError?.(error),
-        );
+        await queue
+          .run(sessionID, () => flush(sessionID))
+          .catch((error) => options.onError?.(error));
     },
   };
 }

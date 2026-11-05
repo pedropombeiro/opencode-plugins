@@ -1,84 +1,18 @@
 import type { Plugin } from '@opencode/plugin';
-import { createHash } from 'node:crypto';
-import {
-  automatedReview,
-  createAutomatedReviewWatcher,
-  reviewTitle,
-  notificationKey,
-  type PendingDeliveries,
-  type PendingDelivery,
-  type ReviewHistory,
-} from './automated-review-watch';
-import type { Exec } from './exec';
+import { automatedReview } from './automated-review-watch';
 import { createRequestCache } from './request-cache';
 import { createFeedbackSubscriptions, RECONCILE_INTERVAL } from './feedback-subscriptions';
-import {
-  createFeedbackInbox,
-  feedbackLinks,
-  feedbackTime,
-  type FeedbackItem,
-  type InboxState,
-} from './feedback-inbox';
-import {
-  addLinked,
-  findingsText,
-  LIFECYCLE_SYSTEM,
-  lifecycleText,
-  LINKED_NOTE_TOOL,
-  linkedContext,
-  MAX_FINDINGS,
-  MAX_LINK_LENGTH,
-  MAX_LINKED_CALLS,
-  MAX_LINKED_NOTES,
-  MAX_TOTAL,
-  MESSAGE_PREFIX,
-  messageTag,
-  NOTICE_KIND,
-  noticeText,
-  taggedInput,
-  superseded,
-  restrictRequest,
-  SUMMARY_KIND,
-  SUMMARY_PREFIX,
-  summarySystem,
-  turnInput,
-  UNAVAILABLE_TEXT,
-  type LinkedResult,
-  type LinkedState,
-  type SummaryRequest,
-} from './review-summary';
+import { createFeedbackInbox, type FeedbackItem, type InboxState } from './feedback-inbox';
+import { closedFeedback, resolvedFeedback, settledFeedback } from './feedback-cleanup';
+import { createSummaryDelivery, type SummaryDependencies } from './summary-delivery';
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
-import {
-  createLifecycleWatcher,
-  failureKeys,
-  UNLISTED_FAILURE,
-  type LifecycleEvent,
-  type LifecycleKind,
-  type LifecycleRecord,
-  type PipelineState,
-} from './lifecycle-watch';
-import { proposeRetargets, stricter } from './lifecycle-execution';
-import {
-  pipelineFails,
-  jobKey,
-  type CommentDetail,
-  type FailedJob,
-  type FeedbackSnapshot,
-  type LinkedNote,
-  type ReviewComment,
-  type ReviewRequest,
-} from './forge';
-import { parseUrl, reference, traits, traitsOf, type ForgeCatalog } from './forges';
-import {
-  applyFeedback,
-  FETCH_INTERVAL,
-  createFeedbackWatcher,
-  isExpired,
-  type Counts,
-  type FeedbackRecord,
-} from './human-review-watch';
+import { createLifecycleNotifications } from './lifecycle-notifications';
+import { createReviewMonitoring } from './review-monitoring';
+import type { FeedbackSnapshot, ReviewRequest } from './forge';
+import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
+import { FETCH_INTERVAL } from './human-review-watch';
 import { locate } from './locate';
-import { matchesReviewBot, type StatusOptions } from './options';
+import type { StatusOptions } from './options';
 import type { Notice } from './rpc';
 import type { MonitoringStatus } from './monitoring-status';
 import { createStatusService, HOME } from './status-service';
@@ -89,86 +23,18 @@ import { classifyTargets, includesRequest, targetOutput, type Target } from './t
 // noticed promptly.
 const REVIEW_POLL_SECONDS = 30;
 
-export interface StatusDependencies {
+export interface StatusDependencies extends SummaryDependencies {
   // Forges and commands for status lookups and feedback, which share one
   // concurrency limit.
   forges: ForgeCatalog;
-  exec: Exec;
   // Reads a PR/MR's review comments. Defaults to its forge's feedback reader.
   feedback?: (request: ReviewRequest, directory: string) => Promise<FeedbackSnapshot | undefined>;
-  // Reads comment text for summaries. Defaults to its forge's detail reader.
-  details?: (request: ReviewRequest, ids: string[]) => Promise<CommentDetail[]>;
-  // Reads a note that comments link to. Defaults to its forge's reader.
-  linkedNote?: (request: ReviewRequest, url: string) => Promise<LinkedNote | undefined>;
-  now?: () => number;
 }
 
 // How long cleanup waits for running review checks before giving up. They
 // can't send or write anything after cleanup starts, so this only bounds how
 // long a stopped plugin keeps work around.
 const DRAIN_TIME = 5_000;
-
-// What the linked-note tool returns, which stays in the session's history.
-// It names the link only; the note's text reaches only the summary request.
-const receipt = (note: LinkedResult) =>
-  note.status === 'fetched'
-    ? `Read ${note.url}. Its text is in the request, in a <linked-note> block.`
-    : note.status === 'omitted'
-      ? `${note.url} was left out because of size limits.`
-      : `Could not read ${note.url}.`;
-
-// The failed jobs a failed-pipeline update lists by name. More are counted.
-const MAX_LISTED_JOBS = 10;
-
-// A pipeline's failed jobs: the event's new ones that still fail, and the
-// ones that failed before them. `unlisted` is whether the event is the
-// pipeline's status reporting a failure no read job explains.
-function splitFailures(ci: PipelineState, keys: readonly string[]) {
-  const wanted = new Set(keys);
-  return {
-    fresh: ci.jobs.filter((job) => wanted.has(jobKey(job))),
-    earlier: ci.jobs.filter((job) => !wanted.has(jobKey(job))),
-    unlisted: ci.unlisted && wanted.has(UNLISTED_FAILURE),
-  };
-}
-
-// A failed-pipeline update's title, such as `!1: job rspec failed in its
-// pipeline, which is still running`. `word` is the forge's word for it.
-function failureTitle(
-  reference: string,
-  ci: PipelineState,
-  failures: ReturnType<typeof splitFailures>,
-  word: string,
-) {
-  const { fresh } = failures;
-  if (!fresh.length) return `${reference}: its ${word} failed`;
-  const what = fresh.length === 1 ? `job ${fresh[0].name} failed` : `${fresh.length} jobs failed`;
-  return `${reference}: ${what} in its ${word}${ci.running ? ', which is still running' : ''}`;
-}
-
-// One line per failed job, new ones first, from forge data, for the update's
-// details.
-function failureDetails(ci: PipelineState, failures: ReturnType<typeof splitFailures>): string[] {
-  const line = (job: FailedJob, when = '') =>
-    `${job.name} failed${when}${job.stage ? ` in stage ${job.stage}` : ''}.`;
-  const listed = [
-    ...failures.fresh.map((job) => line(job)),
-    ...failures.earlier.map((job) => line(job, ' earlier')),
-  ];
-  const more = listed.length - MAX_LISTED_JOBS;
-  return [
-    ...listed.slice(0, MAX_LISTED_JOBS),
-    ...(more > 0 ? [`${more} more jobs failed.`] : []),
-    ...(failures.unlisted
-      ? [
-          'A job that is not allowed to fail failed the pipeline, but it is not among the failed jobs Forgekeeper reads.',
-        ]
-      : ci.complete
-        ? []
-        : ['More jobs failed than Forgekeeper reads.']),
-    ...(ci.running ? ['Other jobs are still running.'] : []),
-  ];
-}
 
 // Waits for the tasks, or for `limit` milliseconds, whichever comes first.
 async function drain(tasks: ReadonlySet<Promise<unknown>>, limit: number) {
@@ -192,48 +58,6 @@ export interface StatusHost {
   notice: (notice: Notice) => void;
   feedbackChanged?: () => void;
 }
-
-// Storage keys. Every checkout's instance shares this plugin's storage, so
-// each record has its own key, and instances never overwrite each other's
-// records. Encoding keeps IDs and URLs from adding path separators.
-const PENDING_PREFIX = 'status/pending/';
-const FEEDBACK_PREFIX = 'status/feedback/';
-const pendingPrefix = (sessionID: string) => `${PENDING_PREFIX}${encodeURIComponent(sessionID)}/`;
-const pendingKey = (sessionID: string, url: string) =>
-  `${pendingPrefix(sessionID)}${encodeURIComponent(url)}`;
-const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
-// The review text of summary turns, which must not enter session history.
-const SUMMARY_STORE = 'status/summaries/';
-export const summaryPrefix = (sessionID: string) =>
-  `${SUMMARY_STORE}${encodeURIComponent(sessionID)}/`;
-// Summary records outlive their turn only until a user prompt follows, or
-// until this age.
-const SUMMARY_RETENTION = 7 * 24 * 60 * 60_000;
-// Each session target's lifecycle baseline and waiting events.
-const LIFECYCLE_STORE = 'status/lifecycle/';
-const lifecyclePrefix = (sessionID: string) =>
-  `${LIFECYCLE_STORE}${encodeURIComponent(sessionID)}/`;
-const lifecycleKey = (sessionID: string, url: string) =>
-  `${lifecyclePrefix(sessionID)}${encodeURIComponent(url)}`;
-// Records unchanged for this long, without waiting events, are removed once
-// their session no longer targets the PR/MR.
-const LIFECYCLE_RETENTION = 30 * 24 * 60 * 60_000;
-
-interface SummaryRecord {
-  sessionID: string;
-  messageID: string;
-  findings: string;
-  at: number;
-  // The PR/MR, and the notes its comments link to, for summaries whose
-  // comments link to any.
-  request?: string;
-  linked?: LinkedState;
-  // A lifecycle event, which has its own instructions.
-  system?: 'lifecycle';
-}
-
-const reviewHistoryKey = (sessionID: string, url: string) =>
-  `status/reviews/${encodeURIComponent(sessionID)}/${encodeURIComponent(url)}`;
 
 // The title without the prefix this plugin wrote.
 export function userTitle(
@@ -302,7 +126,7 @@ export async function setupStatus(
     ...(settings.delivery.reviews === 'inbox' && settings.delivery.lifecycle === 'inbox'
       ? {}
       : {
-          notify: async (item) => void (await deliver(item)),
+          notify: async (item) => void (await summaries.deliver(item)),
           enabled: (item) =>
             (item.kind ? settings.delivery.lifecycle : settings.delivery.reviews) !== 'inbox',
         }),
@@ -320,72 +144,12 @@ export async function setupStatus(
     return task;
   };
 
-  // Messages Forgekeeper posted whose turns may not have finished, by session.
-  // A session in this map has its context read before each model request.
-  // Messages are also tagged, so missing bookkeeping, such as a failed restore
-  // or an expired record, never lets one run as an ordinary request.
-  const summaries = new Map<string, Set<string>>();
-  // Sessions whose latest model request was a Forgekeeper request, for the
-  // tool and permission backstops, with the message whose record it read.
-  // The linked-note tool reads only that record's links.
-  const requesting = new Map<string, string | undefined>();
-  // Changes to a record, one at a time, so concurrent tool calls can't both
-  // spend the same call.
-  const updating = new Map<string, Promise<unknown>>();
-  const serialized = <T>(key: string, task: () => Promise<T>): Promise<T> => {
-    const next = (updating.get(key) ?? Promise.resolve()).then(task, task);
-    const settled = next.catch(() => {});
-    updating.set(key, settled);
-    void settled.then(() => {
-      if (updating.get(key) === settled) updating.delete(key);
-    });
-    return next;
-  };
-  const summaryKey = (sessionID: string, messageID: string) =>
-    `${summaryPrefix(sessionID)}${messageID}`;
-  const track = (sessionID: string, messageID: string) =>
-    summaries.set(sessionID, (summaries.get(sessionID) ?? new Set()).add(messageID));
-  let restoring: Promise<void> | undefined;
-  // Restores the records, retrying after a failure on the next request.
-  const restore = () =>
-    (restoring ??= scanAll(SUMMARY_STORE).then(
-      (entries) => {
-        for (const { value } of entries) {
-          const record = value as SummaryRecord;
-          track(record.sessionID, record.messageID);
-        }
-      },
-      (error) => {
-        restoring = undefined;
-        reportOnce('summary', 'Could not restore review summary turns', error);
-      },
-    ));
-  void restore();
-  // An expired record reads as missing, so its step runs as an unreadable
-  // summary even before housekeeping removes it.
-  const readRecord = async (sessionID: string, messageID: string) => {
-    const record = (await ctx.storage
-      .get(summaryKey(sessionID, messageID))
-      .catch(() => undefined)) as SummaryRecord | undefined;
-    return record && (deps.now ?? Date.now)() - record.at < SUMMARY_RETENTION ? record : undefined;
-  };
-
   // Whether the session's latest lookup says a conflict or a failed pipeline
   // announced for the PR/MR is over: it no longer conflicts, its pipeline no
   // longer fails or another one replaced it, or it merged or closed. Without
   // a lookup of it, the update counts as current, and merges always do.
   function settled(item: Pick<FeedbackItem, 'sessionID' | 'url' | 'kind' | 'pipeline'>): boolean {
-    if (item.kind !== 'conflict' && item.kind !== 'ci-failed') return false;
-    const lookup = service.get(item.sessionID).lookup;
-    const request =
-      lookup?.kind === 'found'
-        ? lookup.requests.find((entry) => entry.url === item.url)
-        : undefined;
-    if (!request) return false;
-    if (request.state !== 'opened') return true;
-    if (item.kind === 'conflict') return request.conflictsKnown && !request.conflicts;
-    const pipeline = request.pipeline;
-    return !!pipeline?.id && (pipeline.id !== item.pipeline || !pipelineFails(pipeline));
+    return settledFeedback(item, service.get(item.sessionID).lookup);
   }
 
   // Whether an error says the session doesn't exist, which ends its delivery.
@@ -413,20 +177,6 @@ export async function setupStatus(
     return includesRequest(targets, item.url);
   }
 
-  // The request an update is about. The adapters only read its URL.
-  const requestOf = (item: Pick<FeedbackItem, 'url'>) => {
-    const ref = parseUrl(item.url);
-    return ref && ({ forge: ref.forge, url: item.url } as ReviewRequest);
-  };
-
-  // The comments an update announced. Updates stored before they kept their
-  // IDs name them only in links, which some forges can read IDs from.
-  const commentIDsOf = (item: FeedbackItem) => {
-    const request = requestOf(item);
-    const capability = request && traitsOf(request).feedback;
-    return item.commentIDs ?? item.links.flatMap((link) => capability?.commentID?.(link) ?? []);
-  };
-
   // Retries the updates that haven't reached their sessions.
   const notifyPending = () =>
     tracked(
@@ -442,15 +192,8 @@ export async function setupStatus(
   // snapshot doesn't list, such as one outside its window, isn't resolved.
   function clearResolved(url: string, snapshot: FeedbackSnapshot | undefined) {
     if (closing || !snapshot?.complete) return;
-    const resolved = new Set(
-      snapshot.comments.filter((comment) => comment.resolved).map((comment) => comment.id),
-    );
     void inbox
-      .prune((item) => {
-        if (item.url !== url) return false;
-        const ids = commentIDsOf(item);
-        return ids.length > 0 && ids.every((id) => resolved.has(id));
-      })
+      .prune(resolvedFeedback(url, snapshot))
       .catch((error) => reportOnce('inbox', 'Could not clear resolved review updates', error));
   }
 
@@ -463,211 +206,14 @@ export async function setupStatus(
   function clearStale(sessionID: string, snapshot: Snapshot) {
     if (closing || sessionID === HOME || foreign.has(sessionID)) return;
     if (snapshot.loading || snapshot.fetchedAt === undefined || !snapshot.lookup) return;
-    const lookup = snapshot.lookup;
-    const closed = new Set(
-      lookup.kind === 'found'
-        ? lookup.requests
-            .filter((request) => request.state !== 'opened')
-            .map((request) => request.url)
-        : [],
-    );
+    const closed = closedFeedback(snapshot.lookup);
     void inbox
       .prune(
         (item) =>
           item.sessionID === sessionID &&
-          (!host.isTarget(sessionID, item.url) ||
-            (item.kind !== 'merged' && closed.has(item.url)) ||
-            settled(item)),
+          (!host.isTarget(sessionID, item.url) || closed(item) || settled(item)),
       )
       .catch((error) => reportOnce('inbox', 'Could not clear stale review updates', error));
-  }
-
-  // Posts an update to its session, as the delivery mode says, or as a summary
-  // when the user asks for one. Returns whether the session still takes it.
-  // Explicit requests run outside the inbox's queue, so they also check that
-  // the update is still in the inbox and monitoring isn't paused.
-  async function deliver(item: FeedbackItem, requested = false): Promise<boolean> {
-    const mode = requested ? 'summary' : item.delivery;
-    if (!mode) return false;
-    if (!(await deliverable(item))) return false;
-    // Automatic deliveries reuse the update's ID, so retries queue nothing new.
-    // A requested summary is a new request each time.
-    const hash = createHash('sha256')
-      .update(requested ? `${item.id} ${(deps.now ?? Date.now)()}` : item.id)
-      .digest('hex');
-    const links = feedbackLinks(item);
-    const request = requestOf(item);
-    const reader = request && traitsOf(request).feedback?.details;
-    const details =
-      deps.details ??
-      (reader &&
-        ((target: ReviewRequest, ids: string[]) => reader(deps.exec, directory, target, ids)));
-    const commentIDs = commentIDsOf(item);
-    // A lifecycle event is summarized from Forgekeeper's own facts, review
-    // feedback from its comments.
-    const event = item.kind;
-    const review = mode === 'summary' && !event && request && details && commentIDs.length;
-    const summary = (mode === 'summary' && !!event) || !!review;
-    if (requested && !summary)
-      throw new Error('This update has no comments that can be summarized');
-    const messageID = `${summary ? SUMMARY_PREFIX : MESSAGE_PREFIX}${hash}`;
-    // The time lets the model say how recent the feedback is.
-    const described = `${item.title} (${feedbackTime(item)})`;
-    const read = review ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2)) : [];
-    const findings =
-      summary && event
-        ? lifecycleText({ ...item, kind: event }, feedbackTime(item))
-        : review
-          ? findingsText(described, item.url, read)
-          : noticeText(described, links);
-    // Only the PR/MR's own comments can name notes to read, as only they
-    // reach the summary.
-    const allowed = review
-      ? (
-          traitsOf(request).feedback?.linkedNotes?.(
-            request,
-            read.filter((detail) => detail.url.startsWith(`${item.url}#`)),
-          ) ?? []
-        )
-          .filter((url) => url.length <= MAX_LINK_LENGTH)
-          .slice(0, MAX_LINKED_NOTES)
-      : [];
-    // Reading the comments can take a while. The session, its targets, or the
-    // update itself may have changed meanwhile: monitoring paused, or the
-    // update acknowledged, cleared, or replaced. A pause keeps it for later.
-    if (!(await deliverable(item))) return false;
-    const state = await inbox.list();
-    if (state.paused) throw new Error('Feedback monitoring is paused');
-    if (!state.items.some((entry) => entry.id === item.id)) return false;
-    // The record is stored before the message, so whichever step delivers the
-    // message finds it, even right after a reload.
-    const record: SummaryRecord = {
-      sessionID: item.sessionID,
-      messageID,
-      findings,
-      at: (deps.now ?? Date.now)(),
-      ...(allowed.length
-        ? { request: item.url, linked: { links: allowed, calls: 0, notes: [] } }
-        : {}),
-      ...(event ? { system: 'lifecycle' as const } : {}),
-    };
-    await ctx.storage.set(summaryKey(item.sessionID, messageID), record as never);
-    track(item.sessionID, messageID);
-    if (closing) throw new Error('The plugin stopped');
-    await ctx.session.synthetic({
-      sessionID: item.sessionID,
-      id: messageID,
-      text: [
-        item.title,
-        feedbackTime(item),
-        ...links,
-        // Forgekeeper's own facts, from forge data, such as which dependents to retarget.
-        ...(event && item.details?.length ? [item.details.join('\n')] : []),
-        summary
-          ? event
-            ? 'Forgekeeper summarizes this merge request change without tools.'
-            : allowed.length
-              ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
-              : 'Forgekeeper summarizes this review feedback without tools.'
-          : event
-            ? 'Merge request update only. No action requested.'
-            : 'Review update only. No action requested.',
-        messageTag(messageID),
-      ].join('\n\n'),
-      description: item.title,
-      metadata: { forgekeeper: summary ? SUMMARY_KIND : NOTICE_KIND },
-      delivery: 'queue',
-      resume: !!summary,
-    });
-    return true;
-  }
-
-  // The summary record of the session's current turn, `failed` when the turn
-  // can't be read, or undefined for an ordinary turn. A failed read counts as a
-  // summary turn, so an unreadable session never gets its tools back early.
-  async function summaryTurn(sessionID: string): Promise<SummaryRecord | 'failed' | undefined> {
-    await restore();
-    const pending = summaries.get(sessionID);
-    if (!pending?.size) return undefined;
-    let messages;
-    try {
-      messages = await ctx.session.context({ sessionID });
-    } catch {
-      return 'failed';
-    }
-    // A record ends only once a user prompt follows its delivered message. One
-    // still queued stays, even while an earlier step runs.
-    for (const messageID of [...pending]) {
-      if (!superseded(messages, messageID)) continue;
-      pending.delete(messageID);
-      write(() => ctx.storage.remove(summaryKey(sessionID, messageID)));
-    }
-    const input = turnInput(messages);
-    if (!pending.size) summaries.delete(sessionID);
-    // With messages pending but no input in the context, such as after a
-    // compaction, the step can't be told apart from a Forgekeeper step.
-    if (!input) return pending.size ? 'failed' : undefined;
-    if (input.type === 'user') return undefined;
-    return (await readRecord(sessionID, input.id)) ?? 'failed';
-  }
-
-  // Whether the context shows a user prompt as the current step's input. An
-  // unreadable context doesn't rule out a Forgekeeper step.
-  async function userInput(sessionID: string): Promise<boolean> {
-    try {
-      return turnInput(await ctx.session.context({ sessionID }))?.type === 'user';
-    } catch {
-      return false;
-    }
-  }
-
-  // See `fetchLinked` in the returned object.
-  async function fetchLinked(sessionID: string, input: unknown): Promise<string> {
-    const refuse = () =>
-      new Error(`${LINKED_NOTE_TOOL} works only while Forgekeeper summarizes review feedback.`);
-    const messageID = requesting.get(sessionID);
-    if (!messageID) throw refuse();
-    const url = typeof input === 'string' ? input.trim() : '';
-    const key = summaryKey(sessionID, messageID);
-    // Writes the record unless cleanup started, which makes this instance's
-    // copy stale.
-    const store = async (record: SummaryRecord) => {
-      if (closing) throw new Error('The plugin stopped');
-      await ctx.storage.set(key, record as never);
-    };
-    return serialized(key, async () => {
-      if (closing) throw new Error('The plugin stopped');
-      // The step must still be this summary's: a user prompt since its
-      // request, or an expired record, ends the tool's access.
-      const current = await summaryTurn(sessionID);
-      if (current === undefined || current === 'failed' || current.messageID !== messageID)
-        throw refuse();
-      const record = current;
-      const linked = record.linked;
-      if (!record.request || !linked) throw new Error('This summary has no linked notes to read.');
-      if (linked.calls >= MAX_LINKED_CALLS)
-        throw new Error('The linked-note call limit is reached. Summarize with what you have.');
-      // The call is spent before anything else, so neither a failure nor a
-      // reload gives it back.
-      const spent: SummaryRecord = { ...record, linked: { ...linked, calls: linked.calls + 1 } };
-      await store(spent);
-      if (!linked.links.includes(url))
-        throw new Error('Only the links the request lists as readable can be read.');
-      const known = linked.notes.find((note) => note.url === url);
-      if (known) return receipt(known);
-      const request = requestOf({ url: record.request });
-      const reader =
-        deps.linkedNote ??
-        ((target: ReviewRequest, link: string) =>
-          traitsOf(target).feedback?.linkedNote?.(deps.exec, directory, target, link) ??
-          Promise.resolve(undefined));
-      const note = request ? await reader(request, url).catch(() => undefined) : undefined;
-      // The summary may have ended while the note was read.
-      if (!(await readRecord(sessionID, messageID))) throw new Error('The summary ended.');
-      const next: SummaryRecord = { ...spent, linked: addLinked(spent.linked!, url, note) };
-      await store(next);
-      return receipt(next.linked!.notes.find((entry) => entry.url === url)!);
-    });
   }
 
   // Storage writes run one at a time, so a record's read and write can't
@@ -705,7 +251,7 @@ export async function setupStatus(
   function markForeign(sessionID: string) {
     if (foreign.has(sessionID)) return;
     foreign.add(sessionID);
-    automated?.forget(sessionID);
+    reviews.forget(sessionID);
     invalidate(sessionID);
   }
 
@@ -718,18 +264,18 @@ export async function setupStatus(
     notice({ message: `${prefix}: ${reason}`, variant: 'error' });
   };
 
-  // Tells the session about the requests that are still its targets, and
-  // returns them. The message is composed from those requests only, right
-  // before sending, because the targets can change while ownership is read.
-  // A request that is no longer a target, or a session that moved to another
-  // checkout, ends the delivery without a retry. Rejects when the session
-  // can't be read or cleanup stopped the delivery, so it stays pending.
-  async function tell(
+  const summaries = createSummaryDelivery(ctx, deps, {
+    closing: () => closing,
+    inbox: inbox.list,
+    deliverable,
+    scan: scanAll,
+    write,
+    report: (error) => reportOnce('summary', 'Could not restore review summary turns', error),
+  });
+
+  async function currentReviews(
     sessionID: string,
     requests: ReviewRequest[],
-    title: (requests: ReviewRequest[]) => string,
-    links: string[] = [],
-    comments: { identity?: string; ids?: string[]; postedAt?: number } = {},
   ): Promise<ReviewRequest[]> {
     if (closing) throw new Error('The plugin stopped');
     const session = await ctx.session.get({ sessionID });
@@ -740,35 +286,7 @@ export async function setupStatus(
     if (session.time?.archived !== undefined) return [];
     if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
     if (closing) throw new Error('The plugin stopped');
-    const current = requests.filter((request) => isTarget(sessionID, request.url));
-    if (current.length === 0) return [];
-    const description = title(current);
-    for (const request of current) {
-      // Once the inbox has the update, the session counts as told: the inbox
-      // retries a failed session message itself, and an acknowledgement ends
-      // those retries, so the update never comes back.
-      const { delivery } = await inbox.record({
-        id: JSON.stringify([
-          sessionID,
-          request.url,
-          comments.identity ??
-            automatedReview(request)?.completed?.id ??
-            (links.length ? [...links].sort() : description),
-        ]),
-        sessionID,
-        url: request.url,
-        title: description,
-        links: links.length ? links : [request.url],
-        ...(comments.ids?.length ? { commentIDs: comments.ids } : {}),
-        ...(comments.postedAt !== undefined ? { postedAt: comments.postedAt } : {}),
-        // Recorded with the update, so changing the mode affects later updates
-        // only, and an update stored in inbox mode never starts a turn.
-        ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
-        at: (deps.now ?? Date.now)(),
-      });
-      void tracked(delivery.catch((error) => deliveryFailed(sessionID, error)));
-    }
-    return current;
+    return requests.filter((request) => isTarget(sessionID, request.url));
   }
 
   // An update the inbox has, but couldn't post to its session. The inbox
@@ -790,6 +308,11 @@ export async function setupStatus(
     });
   };
 
+  const record = async (item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) => {
+    const { delivery } = await inbox.record(item, supersedes);
+    void tracked(delivery.catch((error) => deliveryFailed(item.sessionID, error)));
+  };
+
   const readFeedback =
     deps.feedback ??
     (async (request: ReviewRequest, cwd: string) =>
@@ -808,345 +331,64 @@ export async function setupStatus(
           if (closing) return;
           const ref = parseUrl(url);
           if (ref) feedbackCache.invalidate(requestKey(ref));
-          service.checkFeedback(url, (sessionID, request) => {
-            human?.invalidate(sessionID, request);
-            publishedFeedback?.invalidate(sessionID, request);
-          });
+          service.checkFeedback(url, reviews.invalidate);
         }, 1000),
       );
     },
   });
 
-  const automated = settings.watch.automatedReviews
-    ? createAutomatedReviewWatcher({
-        isTarget: (sessionID, url) => {
-          const ref = parseUrl(url);
-          return (
-            isTarget(sessionID, url) &&
-            !(ref && traits(ref.forge).automatedReview?.publishedFeedback)
-          );
-        },
-        now: deps.now,
-        readHistory: async (sessionID, url) =>
-          (await ctx.storage.get(reviewHistoryKey(sessionID, url))) as ReviewHistory | undefined,
-        writeHistory: (sessionID, url, history) => {
-          const snapshot = { observed: [...history.observed], delivered: [...history.delivered] };
-          write(() => ctx.storage.set(reviewHistoryKey(sessionID, url), snapshot));
-        },
-        async read(sessionID) {
-          const deliveries: PendingDeliveries = {};
-          for (const { value } of await scanAll(pendingPrefix(sessionID))) {
-            const delivery = value as PendingDelivery;
-            deliveries[notificationKey(sessionID, delivery)] = delivery;
-          }
-          return deliveries;
-        },
-        write: (sessionID, url, delivery) =>
-          write(() =>
-            delivery
-              ? ctx.storage.set(pendingKey(sessionID, url), delivery as never)
-              : ctx.storage.remove(pendingKey(sessionID, url)),
-          ),
-        async send(sessionID, requests) {
-          const sent = await tell(sessionID, requests, reviewTitle);
-          if (sent.length > 0)
-            notice({
-              sessionID,
-              title: reviewTitle(sent),
-              message: 'New feedback in /forge-feedback.',
-              variant: 'info',
-            });
-        },
-        onSendError(error, sessionID, requests) {
-          const reason = error instanceof Error ? error.message : String(error);
-          const name = automatedReview(requests[0])?.name ?? 'the automated reviewer';
-          notice({
-            sessionID,
-            message: `Could not tell the session about ${name}'s review: ${reason}. Retrying in 10 minutes.`,
-            variant: 'error',
-          });
-        },
-      })
-    : undefined;
-
-  const recordKey = (key: string, automatedFeedback: boolean) => {
-    if (!automatedFeedback) return key;
-    const ref = parseUrl(key.slice(key.indexOf(' ') + 1));
-    const namespace = ref && traits(ref.forge).automatedReview?.publishedFeedback?.storageKey;
-    return `${namespace ?? 'automated'} ${key}`;
-  };
-
-  const feedbackWatcher = (automatedFeedback: boolean, counts?: Counts) =>
-    createFeedbackWatcher({
-      ...(counts ? { counts } : {}),
-      ...(automatedFeedback
-        ? {
-            select: (snapshot: FeedbackSnapshot, request: ReviewRequest) =>
-              traitsOf(request).automatedReview?.publishedFeedback?.select(snapshot) ?? snapshot,
-            ready: (snapshot: FeedbackSnapshot, now: number, request: ReviewRequest) =>
-              traitsOf(request).automatedReview?.publishedFeedback?.ready(snapshot, now) ?? false,
-          }
-        : {}),
-      interval: (request) =>
-        subscriptions.connected(request.url) ? RECONCILE_INTERVAL : FETCH_INTERVAL,
-      record: async (key) =>
-        (await ctx.storage.get(feedbackRecordKey(recordKey(key, automatedFeedback)))) as
-          | FeedbackRecord
-          | undefined,
-      now: deps.now,
-      persist: (key, change, at) =>
-        write(async () => {
-          key = recordKey(key, automatedFeedback);
-          const stored = (await ctx.storage.get(feedbackRecordKey(key))) as
-            | FeedbackRecord
-            | undefined;
-          await ctx.storage.set(feedbackRecordKey(key), applyFeedback(stored, change, at) as never);
-        }),
-      fetch: async (_sessionID, request) => {
+  const reviews = createReviewMonitoring(
+    ctx.storage,
+    settings,
+    {
+      current: currentReviews,
+      isTarget,
+      fetch: async (request) => {
         if (closing) return undefined;
         const ref = parseUrl(request.url);
         return ref
           ? feedbackCache.get(requestKey(ref), () => readFeedback(request, directory))
           : readFeedback(request, directory);
       },
-      // Only a fetch the watcher accepts, one that no later change made
-      // obsolete, may clear updates.
-      accepted: (request, snapshot) => clearResolved(request.url, snapshot),
-      current: (sessionID, request) => isTarget(sessionID, request.url),
-      async send(sessionID: string, request: ReviewRequest, comments: ReviewComment[]) {
-        const title = automatedFeedback
-          ? `New ${traitsOf(request).automatedReview?.name ?? 'automated'} review feedback on ${reference(request)}`
-          : `New review feedback on ${reference(request)}`;
-        const groups = automatedFeedback
-          ? [...new Set(comments.map((comment) => comment.automated?.runID ?? 'unlinked'))].map(
-              (runID) =>
-                comments.filter((comment) => (comment.automated?.runID ?? 'unlinked') === runID),
-            )
-          : [comments];
-        for (const group of groups) {
-          const sent = await tell(
-            sessionID,
-            [request],
-            () => title,
-            group.map((comment) => comment.url),
-            {
-              identity: automatedFeedback
-                ? JSON.stringify([
-                    group[0].automated?.runID ?? 'unlinked',
-                    group.map((comment) => comment.id).sort(),
-                  ])
-                : JSON.stringify(['human', group.map((comment) => comment.id).sort()]),
-              ids: group.map((comment) => comment.id),
-              postedAt: Math.max(...group.map((comment) => comment.editedAt)),
-            },
-          );
-          if (sent.length > 0)
-            notice({
-              sessionID,
-              title,
-              message: 'New feedback in /forge-feedback.',
-              variant: 'info',
-            });
-        }
-      },
-      onFetchError: (error) =>
+      interval: (request) =>
+        subscriptions.connected(request.url) ? RECONCILE_INTERVAL : FETCH_INTERVAL,
+      accepted: clearResolved,
+      scan: scanAll,
+      write,
+      record,
+      notice,
+      error: (error) =>
         reportOnce('feedback-fetch', 'Could not check PR/MR review feedback', error),
-      onSendError: (error, sessionID) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        notice({
-          sessionID,
-          message: `Could not tell the session about review feedback: ${reason}. Retrying in 10 minutes.`,
-          variant: 'error',
-        });
-      },
-    });
+    },
+    deps.now,
+  );
 
-  // People's comments, and review bots' such as security reviewers', each
-  // watched on its own. A review bot counts only on its own host, which its
-  // comment's URL names.
-  const reviewBots = settings.watch.reviewBots ? settings.reviewBots : {};
-  const commentHost = (url: string) => {
-    try {
-      return new URL(url).host;
-    } catch {
-      return undefined;
-    }
-  };
-  const human =
-    settings.watch.humanReviews || Object.values(reviewBots).some((names) => names.length)
-      ? feedbackWatcher(false, {
-          humans: settings.watch.humanReviews,
-          reviewBot: (comment) => {
-            const host = commentHost(comment.url);
-            return !!host && matchesReviewBot(reviewBots, host, comment.username);
-          },
-        })
-      : undefined;
-  const publishedFeedback = settings.watch.automatedReviews ? feedbackWatcher(true) : undefined;
-
-  const readLifecycle = async (prefix: string) =>
-    (await scanAll(prefix)).map(({ value }) => value as LifecycleRecord);
-
-  // A PR/MR read from its forge, past every cache, for proposals.
-  async function fresh(url: string): Promise<ReviewRequest | undefined> {
-    const ref = parseUrl(url);
-    const forge = ref && deps.forges.forHost(ref.host, directory);
-    if (!ref || !forge) return undefined;
-    return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
-  }
-
-  // The current policy for an event. Conflicts and failed pipelines only
-  // notify.
-  const policyOf = (kind: LifecycleKind) =>
-    kind === 'merged' ? settings.lifecycleExecution.parentMerged : undefined;
-
-  // Takes a lifecycle event to the inbox, with what its policy works out.
-  // Resolves `false` to drop the event, and rejects to keep it for a retry,
-  // such as while monitoring is paused.
-  async function recordLifecycle(
-    record: LifecycleRecord,
-    event: LifecycleEvent,
-    records: readonly LifecycleRecord[],
-  ): Promise<boolean> {
-    // The session's targets, while it still takes the event: it exists here,
-    // isn't archived, and targets the PR/MR. Undefined drops the event.
-    const targetsNow = async () => {
+  const lifecycle = createLifecycleNotifications(ctx, settings, deps, {
+    async targets(sessionID, url) {
       if (closing) throw new Error('The plugin stopped');
       let session;
       try {
-        session = await ctx.session.get({ sessionID: record.sessionID });
+        session = await ctx.session.get({ sessionID });
       } catch (error) {
         if (missingSession(error)) return undefined;
         throw error;
       }
       if (!session || session.time?.archived !== undefined) return undefined;
-      // That checkout's instance delivers it.
       if (session.location.directory !== directory)
         throw new Error('The session moved to another checkout');
       if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
-      const targets = (await host.state(record.sessionID)).targets;
-      return includesRequest(targets, record.url) ? targets : undefined;
-    };
-    const targets = await targetsNow();
-    if (!targets) return false;
-    // A conflict that's already over isn't news, nor is a failed pipeline that
-    // passed on a retry or that another pipeline replaced.
-    if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
-      return false;
-    // The same goes for failed jobs that passed on a retry since.
-    const still = new Set(record.ci ? failureKeys(record.ci) : []);
-    if (
-      event.kind === 'ci-failed' &&
-      (record.state !== 'opened' ||
-        record.ci?.id !== event.pipeline ||
-        !(event.jobs ?? []).some((key) => still.has(key)))
-    )
-      return false;
-    // Only dependents the session still targets. A dropped one's record stays
-    // until housekeeping.
-    const children = records.filter(
-      (entry) =>
-        entry.parent === record.url &&
-        entry.url !== record.url &&
-        includesRequest(targets, entry.url),
-    );
-    let proposals: string[] = [];
-    if (event.kind === 'merged' && children.length) {
-      const lines = await proposeRetargets({
-        parent: record,
-        children,
-        policy: stricter(event.policy, settings.lifecycleExecution.parentMerged),
-        fetch: fresh,
-      });
-      // Reading the dependents can take a while. The session may have dropped
-      // the PR/MR, or some of the dependents, meanwhile.
-      const latest = await targetsNow();
-      if (!latest) return false;
-      proposals = lines.filter((_, index) => includesRequest(latest, children[index].url));
-    }
-    const ci = event.kind === 'ci-failed' ? record.ci : undefined;
-    const failures = ci && splitFailures(ci, event.jobs ?? []);
-    const details = ci && failures ? failureDetails(ci, failures) : proposals;
-    const forge = requestOf(record);
-    const title =
-      ci && failures
-        ? failureTitle(record.reference, ci, failures, forge ? traitsOf(forge).ci : 'pipeline')
-        : event.kind === 'conflict'
-          ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
-          : `${record.reference} merged into ${record.targetBranch}`;
-    const item: FeedbackItem = {
-      id: event.id,
-      kind: event.kind,
-      sessionID: record.sessionID,
-      url: record.url,
-      title,
-      // The new failures first, so Enter opens the first of them.
-      links: [
-        ...(failures
-          ? [...failures.fresh, ...failures.earlier]
-              .slice(0, MAX_LISTED_JOBS)
-              .flatMap((job) => job.url ?? [])
-          : []),
-        record.url,
-      ],
-      ...(details.length ? { details } : {}),
-      ...(event.pipeline ? { pipeline: event.pipeline } : {}),
-      // The mode when the event happened, so a change since then affects only
-      // later events.
-      ...(event.delivery ? { delivery: event.delivery } : {}),
-      at: event.detectedAt,
-    };
-    // A delivery that fails leaves the update in the inbox, which retries it,
-    // so only a failure to store it keeps the event. A pipeline's new failures
-    // replace its earlier update, which they list too.
-    const samePipeline = (entry: FeedbackItem) =>
-      item.kind === 'ci-failed' &&
-      entry.kind === 'ci-failed' &&
-      entry.sessionID === item.sessionID &&
-      entry.url === item.url &&
-      entry.pipeline === item.pipeline;
-    const { delivery } = await inbox.record(item, samePipeline);
-    void tracked(delivery.catch((error) => deliveryFailed(record.sessionID, error)));
-    notice({
-      sessionID: record.sessionID,
-      title,
-      message: 'New merge request update in /forge-feedback.',
-      variant: 'info',
-    });
-    return true;
-  }
-
-  const lifecycle = settings.watch.lifecycle
-    ? createLifecycleWatcher({
-        records: (sessionID) => readLifecycle(lifecyclePrefix(sessionID)),
-        write: async (record) => {
-          if (closing) throw new Error('The plugin stopped');
-          await ctx.storage.set(lifecycleKey(record.sessionID, record.url), record as never);
-        },
-        // Only this checkout's sessions: another checkout's instance owns
-        // the rest.
-        waiting: async () => {
-          const waiting = (await readLifecycle(LIFECYCLE_STORE)).filter(
-            (record) => record.pending.length,
-          );
-          const here = await Promise.all(
-            [...new Set(waiting.map((record) => record.sessionID))].map(async (sessionID) => {
-              const session = await ctx.session.get({ sessionID }).catch(() => undefined);
-              return session?.location.directory === directory ? sessionID : undefined;
-            }),
-          );
-          return waiting.filter((record) => here.includes(record.sessionID));
-        },
-        deliver: recordLifecycle,
-        reference,
-        policy: policyOf,
-        delivery: () => settings.delivery.lifecycle,
-        onError: (error) =>
-          reportOnce('lifecycle', 'Could not record merge request changes', error),
-        now: deps.now,
-      })
-    : undefined;
-  const retryLifecycle = () => (lifecycle ? tracked(lifecycle.retry()) : Promise.resolve());
+      const targets = (await host.state(sessionID)).targets;
+      return includesRequest(targets, url) ? targets : undefined;
+    },
+    storedTargets: host.storedTargets,
+    closing: () => closing,
+    scan: scanAll,
+    record,
+    notice,
+    error: (error) => reportOnce('lifecycle', 'Could not record merge request changes', error),
+  });
+  const retryLifecycle = () =>
+    lifecycle.watcher ? tracked(lifecycle.watcher.retry()) : Promise.resolve();
 
   const service = createStatusService({
     async load(key, previous) {
@@ -1157,7 +399,7 @@ export async function setupStatus(
       if (session.location.directory !== directory) {
         // Not `markForeign`: invalidating would discard this very lookup.
         foreign.add(key);
-        automated?.forget(key);
+        reviews.forget(key);
         return { kind: 'none', reason: 'The session moved to another checkout' };
       }
       foreign.delete(key);
@@ -1176,23 +418,10 @@ export async function setupStatus(
       host.publish(key, snapshot);
       clearStale(key, snapshot);
     },
-    automated,
-    human:
-      human || publishedFeedback
-        ? {
-            watches: (request) => !!human || !!traitsOf(request).automatedReview?.publishedFeedback,
-            async check(sessionID, request) {
-              await Promise.all([
-                human?.check(sessionID, request),
-                traitsOf(request).automatedReview?.publishedFeedback
-                  ? publishedFeedback?.check(sessionID, request)
-                  : undefined,
-              ]);
-            },
-          }
-        : undefined,
+    automated: reviews.automated,
+    human: reviews.feedback,
     feedbackTargets: (sessionID, requests) => subscriptions.update(sessionID, requests),
-    ...(lifecycle ? { lifecycle } : {}),
+    ...(lifecycle.watcher ? { lifecycle: lifecycle.watcher } : {}),
     onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
@@ -1250,71 +479,16 @@ export async function setupStatus(
   // Housekeeping, on the write queue so it doesn't hold up setup: removes
   // feedback records not seen for a long time.
   write(async () => {
-    const at = (deps.now ?? Date.now)();
-    for (const { key, value } of await scanAll(FEEDBACK_PREFIX)) {
-      if (isExpired(value as FeedbackRecord, at)) await ctx.storage.remove(key);
-    }
-    for (const { key, value } of await scanAll(SUMMARY_STORE)) {
-      const record = value as SummaryRecord;
-      if (at - record.at < SUMMARY_RETENTION) continue;
-      await ctx.storage.remove(key);
-      summaries.get(record.sessionID)?.delete(record.messageID);
-    }
-    // A record changes only when its PR/MR does, so its age alone doesn't make
-    // it stale: one the session still targets keeps its baseline and its
-    // stack link.
-    for (const { key, value } of await scanAll(LIFECYCLE_STORE)) {
-      const record = value as LifecycleRecord;
-      if (record.pending.length || at - record.at < LIFECYCLE_RETENTION) continue;
-      const targets = await host.storedTargets(record.sessionID).catch(() => undefined);
-      if (targets && !includesRequest(targets, record.url)) await ctx.storage.remove(key);
-    }
+    await reviews.prune();
+    await summaries.prune();
+    await lifecycle.prune();
   });
 
   return {
     service,
     inbox,
     discovery,
-    // Turns a summary turn's model request into a tool-free request that sees
-    // only the summary instructions and the review text. Returns whether it
-    // did. Without a message to copy, only the links are summarized.
-    async prepareSummary(event: SummaryRequest): Promise<boolean> {
-      // Either the context or the request itself can show a Forgekeeper step.
-      // Each covers a gap in the other, such as bookkeeping lost to a failed
-      // restore, or a reminder sent after the message.
-      // A tag in a user prompt, such as a pasted transcript, doesn't make the
-      // step Forgekeeper's.
-      const tagged = taggedInput(event.messages);
-      let record = await summaryTurn(event.sessionID);
-      if (!record && tagged && !(await userInput(event.sessionID)))
-        record = (await readRecord(event.sessionID, tagged)) ?? 'failed';
-      if (!record) {
-        requesting.delete(event.sessionID);
-        return false;
-      }
-      requesting.set(event.sessionID, record === 'failed' ? undefined : record.messageID);
-      // Each step sends only the findings and what the tool read, never the
-      // step's earlier tool calls, so the request holds nothing from the
-      // session's history. The comments come first; linked notes get what
-      // they leave of the budget.
-      const linked =
-        record === 'failed' || !record.linked
-          ? undefined
-          : linkedContext(record.linked, MAX_TOTAL - record.findings.length - 2);
-      // The linked-note tool stays only while it has links left to read.
-      const tool = linked?.tool ? event.tools[LINKED_NOTE_TOOL] : undefined;
-      restrictRequest(
-        event,
-        record !== 'failed' && record.system === 'lifecycle'
-          ? LIFECYCLE_SYSTEM
-          : summarySystem(!!tool, !!linked),
-        record === 'failed'
-          ? UNAVAILABLE_TEXT
-          : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n'),
-        tool ? { name: LINKED_NOTE_TOOL, value: tool } : undefined,
-      );
-      return true;
-    },
+    prepareSummary: summaries.prepare,
     // Starts a summary turn for an update on request, in any delivery mode.
     summarize: (id: string): Promise<InboxState> =>
       tracked(
@@ -1323,7 +497,7 @@ export async function setupStatus(
           const item = state.items.find((entry) => entry.id === id);
           if (!item) throw new Error('The update is no longer in the feedback inbox');
           if (state.paused) throw new Error('Feedback monitoring is paused');
-          if (!(await deliver(item, true)))
+          if (!(await summaries.deliver(item, true)))
             throw new Error("The update's session no longer targets this PR/MR here");
           return inbox.list();
         })(),
@@ -1331,9 +505,7 @@ export async function setupStatus(
     // Whether the session's current step is Forgekeeper's, whose tools and
     // permissions are refused. Tools come from a model response, so a session
     // whose latest request was Forgekeeper's counts too.
-    async summarizing(sessionID: string): Promise<boolean> {
-      return requesting.has(sessionID) || (await summaryTurn(sessionID)) !== undefined;
-    },
+    summarizing: summaries.summarizing,
     // Reads a linked note for the summary of the session's latest model
     // request, and returns a receipt. The note's text goes to that summary's
     // record, and from there only into its next request, so it never enters
@@ -1343,7 +515,7 @@ export async function setupStatus(
     // once cleanup starts, so a stopped instance can't overwrite the record
     // its replacement uses.
     fetchLinked: (sessionID: string, input: unknown): Promise<string> =>
-      tracked(fetchLinked(sessionID, input)),
+      tracked(summaries.fetchLinked(sessionID, input)),
     async monitoringStatus(sessionID: string): Promise<MonitoringStatus> {
       const targets = await host.storedTargets(sessionID);
       const enrollment = service.inspect(sessionID);
@@ -1385,10 +557,7 @@ export async function setupStatus(
     async refresh(sessionID: string) {
       const lookup = service.get(sessionID).lookup;
       if (lookup?.kind === 'found')
-        for (const request of lookup.requests) {
-          human?.invalidate(sessionID, request);
-          publishedFeedback?.invalidate(sessionID, request);
-        }
+        for (const request of lookup.requests) reviews.invalidate(sessionID, request);
       for (const target of (await host.state(sessionID)).targets) {
         const ref = parseUrl(target.url);
         if (!ref) continue;
@@ -1426,10 +595,7 @@ export async function setupStatus(
       for (const key of service.keys()) {
         const lookup = service.get(key).lookup;
         if (lookup?.kind === 'found')
-          for (const request of lookup.requests) {
-            human?.invalidate(key, request);
-            publishedFeedback?.invalidate(key, request);
-          }
+          for (const request of lookup.requests) reviews.invalidate(key, request);
         service.notify(key);
       }
       void discovery.refresh();

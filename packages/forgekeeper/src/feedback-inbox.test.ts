@@ -9,6 +9,11 @@ import {
   type FeedbackItem,
 } from './feedback-inbox';
 
+const recordAndDeliver = async (
+  inbox: ReturnType<typeof createFeedbackInbox>,
+  ...args: Parameters<typeof inbox.record>
+) => (await inbox.record(...args)).delivery;
+
 describe('feedback inbox', () => {
   test('offers comment links before the PR/MR, labeled by their anchor', () => {
     const url = 'https://gitlab.com/g/p/-/merge_requests/1';
@@ -73,7 +78,7 @@ describe('feedback inbox', () => {
       at: 1,
     };
     const inbox = createFeedbackInbox(options);
-    await expect(inbox.add(item)).rejects.toThrow('session unavailable');
+    await expect(recordAndDeliver(inbox, item)).rejects.toThrow('session unavailable');
     expect((await inbox.list()).items).toEqual([item]);
     await inbox.pause(true);
     await createFeedbackInbox(options).notifyPending();
@@ -82,7 +87,7 @@ describe('feedback inbox', () => {
     await inbox.pause(false);
     await createFeedbackInbox(options).notifyPending();
     expect(sent).toEqual(['a', 'a']);
-    await inbox.add(item);
+    await recordAndDeliver(inbox, item);
     expect(sent).toEqual(['a', 'a']);
     expect((await inbox.list()).items).toMatchObject([{ id: 'a', notifiedAt: 10 }]);
   });
@@ -139,7 +144,7 @@ describe('feedback inbox', () => {
       delivery: 'summary',
       at: 0,
     };
-    await inbox.add(item);
+    await recordAndDeliver(inbox, item);
     expect(delivered).toEqual([]);
     expect((await inbox.list()).items[0].notifiedAt).toBeUndefined();
     enabled = true;
@@ -171,12 +176,12 @@ describe('feedback inbox', () => {
       delivery: 'summary',
       at: 0,
     });
-    const adding = inbox.add(update('slow'));
+    const adding = recordAndDeliver(inbox, update('slow'));
     await Bun.sleep(0);
     expect(sent).toEqual(['slow']);
     // Reads and changes don't wait for the delivery.
     expect((await inbox.list()).items.map((item) => item.id)).toEqual(['slow']);
-    await inbox.add({ ...update('other'), delivery: undefined });
+    await recordAndDeliver(inbox, { ...update('other'), delivery: undefined });
     const retries = Promise.all([inbox.notifyPending(), inbox.notifyPending()]);
     await Bun.sleep(0);
     expect(sent).toEqual(['slow']);
@@ -272,12 +277,12 @@ describe('feedback inbox', () => {
       at: 0,
     });
     const same = (next: FeedbackItem) => (entry: FeedbackItem) => entry.pipeline === next.pipeline;
-    await inbox.add(item('a', 'p1'));
-    await inbox.add(item('other', 'p2'));
-    await inbox.add(item('b', 'p1'), same(item('b', 'p1')));
+    await recordAndDeliver(inbox, item('a', 'p1'));
+    await recordAndDeliver(inbox, item('other', 'p2'));
+    await recordAndDeliver(inbox, item('b', 'p1'), same(item('b', 'p1')));
     expect((await inbox.list()).items.map((entry) => entry.id)).toEqual(['b', 'other']);
     // A retry of an update that exists changes nothing.
-    await inbox.add(item('other', 'p2'), () => true);
+    await recordAndDeliver(inbox, item('other', 'p2'), () => true);
     expect((await inbox.list()).items.map((entry) => entry.id)).toEqual(['other', 'b']);
   });
 
@@ -317,13 +322,16 @@ describe('feedback inbox', () => {
       links: [],
       at: 1,
     };
-    await Promise.all([inbox.add(item), inbox.add({ ...item, id: 'b' })]);
+    await Promise.all([
+      recordAndDeliver(inbox, item),
+      recordAndDeliver(inbox, { ...item, id: 'b' }),
+    ]);
     expect((await inbox.list()).items.map((entry) => entry.id)).toEqual(['b', 'a']);
-    await inbox.add(item);
+    await recordAndDeliver(inbox, item);
     expect((await inbox.list()).items).toHaveLength(2);
     await inbox.acknowledge('a');
     await inbox.pause(true);
-    await expect(inbox.add(item)).rejects.toThrow('Feedback monitoring is paused');
+    await expect(recordAndDeliver(inbox, item)).rejects.toThrow('Feedback monitoring is paused');
     expect(await createFeedbackInbox(options).list()).toMatchObject({
       items: [{ id: 'b' }],
       paused: true,

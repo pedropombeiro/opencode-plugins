@@ -37,20 +37,15 @@ export interface Delivery {
   lifecycle: FeedbackDelivery;
 }
 
-// What Forgekeeper works out about a lifecycle event besides reporting it.
-// `notify` does nothing more. `prepare` works out the event's actions and
-// proposes them. Forgekeeper never carries them out.
 export type ExecutionMode = 'notify' | 'prepare';
 export type ExecutionAction = 'retarget';
 
 export interface EventPolicy {
   mode: ExecutionMode;
-  // What `prepare` works out. Empty for `notify`.
   actions: ExecutionAction[];
 }
 
 export interface LifecycleExecution {
-  // A PR/MR that another target of the session builds on merged.
   parentMerged: EventPolicy;
 }
 
@@ -78,7 +73,6 @@ const HOST = /^[a-z0-9.-]+(:\d+)?$/;
 const USERNAME = /^[a-z0-9_.[\]-]+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
-// The actions each event supports.
 const ACTIONS: Record<keyof LifecycleExecution, readonly ExecutionAction[]> = {
   parentMerged: ['retarget'],
 };
@@ -183,8 +177,6 @@ class Reader {
     return bots;
   }
 
-  // An event's policy. Anything invalid falls back to `notify`, so a mistake
-  // never grants more than intended.
   policy(event: keyof LifecycleExecution, value: unknown): EventPolicy {
     const path = `lifecycleExecution.${event}`;
     if (value === undefined) return NOTIFY;

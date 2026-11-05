@@ -184,9 +184,6 @@ export function createFeedbackInbox(options: {
   return {
     list: () => run(read),
     record,
-    // Like `record`, but resolves once the update is delivered too.
-    add: async (item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) =>
-      (await record(item, supersedes)).delivery,
     notifyPending: async () => notify((await run(read)).items),
     acknowledge: (id: string) =>
       change((state) => ({ ...state, items: state.items.filter((item) => item.id !== id) })),

@@ -1,6 +1,7 @@
 import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
+import { createKeyedQueue } from './keyed-queue';
 import { statusOptions } from './options';
 import {
   LINKED_NOTE_TOOL,
@@ -12,7 +13,8 @@ import {
   type SummaryRequest,
 } from './review-summary';
 import { ForgeSessionRpc, implement } from './rpc';
-import { setupStatus, summaryPrefix, type Status, type StatusDependencies } from './status-server';
+import { setupStatus, type Status, type StatusDependencies } from './status-server';
+import { summaryPrefix } from './summary-delivery';
 import type { Snapshot } from './store';
 import {
   applyTargetChange,
@@ -90,8 +92,8 @@ export async function setupServer(
   lookups: TitleLookups,
   status?: StatusDependencies,
 ) {
-  const pending = new Map<string, Promise<void>>();
-  const instructing = new Map<string, Promise<unknown>>();
+  const pending = createKeyedQueue();
+  const instructing = createKeyedQueue();
   const controller = new AbortController();
   // Set when cleanup starts. No title update or target change starts after
   // it, and one that is running stops before it writes, so it can't
@@ -187,8 +189,6 @@ export async function setupServer(
   );
 
   const settings = statusOptions(ctx.options);
-  // Ignored options fall back to their defaults, and execution policies to
-  // notifying only, so the toast says which and why.
   if (settings.problems.length)
     void rpc.events
       .emit('notice', {
@@ -244,14 +244,7 @@ export async function setupServer(
   // ending at once can't interleave their reads and writes.
   function schedule(sessionID: string, action = () => update(sessionID)): Promise<void> {
     if (closing) return Promise.reject(new Error('The plugin is reloading. Try again.'));
-    const previous = pending.get(sessionID) ?? Promise.resolve();
-    const next = previous.then(action);
-    const settled = next.catch(() => {});
-    pending.set(sessionID, settled);
-    void settled.then(() => {
-      if (pending.get(sessionID) === settled) pending.delete(sessionID);
-    });
-    return next;
+    return pending.run(sessionID, action);
   }
 
   // Infers the related issue of each PR/MR target from its source branch.
@@ -363,15 +356,7 @@ export async function setupServer(
   }
 
   function instruct(sessionID: string): Promise<string[]> {
-    const next = (instructing.get(sessionID) ?? Promise.resolve()).then(() =>
-      writeInstructions(sessionID),
-    );
-    const settled = next.catch(() => {});
-    instructing.set(sessionID, settled);
-    void settled.then(() => {
-      if (instructing.get(sessionID) === settled) instructing.delete(sessionID);
-    });
-    return next;
+    return instructing.run(sessionID, () => writeInstructions(sessionID));
   }
 
   // Without monitoring, such as after `status` is turned off, a
@@ -479,7 +464,7 @@ export async function setupServer(
   return async () => {
     closing = true;
     controller.abort();
-    await drain([...pending.values()], DRAIN_TIME);
+    await drain(pending.tasks(), DRAIN_TIME);
     await watcher?.dispose();
     await tools.dispose();
     await rpc.dispose();

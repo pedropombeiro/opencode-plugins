@@ -255,7 +255,12 @@ describe('observe', () => {
       (kind) => (kind === 'merged' ? policy : undefined),
     );
     expect(record.pending).toEqual([
-      { kind: 'merged', id: JSON.stringify(['one', mr('1').url, 'merged']), detectedAt: 5, policy },
+      {
+        kind: 'merged',
+        id: JSON.stringify(['one', mr('1').url, 'merged']),
+        detectedAt: 5,
+        policy,
+      },
     ]);
   });
 
@@ -294,7 +299,7 @@ describe('observe', () => {
 });
 
 describe('createLifecycleWatcher', () => {
-  function harness(deliver: (event: LifecycleEvent) => Promise<boolean>) {
+  function harness(deliver: (event: LifecycleEvent) => Promise<void>) {
     const stored = new Map<string, LifecycleRecord>();
     const writes: LifecycleRecord[] = [];
     const watcher = createLifecycleWatcher({
@@ -318,7 +323,6 @@ describe('createLifecycleWatcher', () => {
       // The event is already stored when its delivery starts.
       expect(app.stored.get(mr('1').url)?.pending.map((entry) => entry.id)).toContain(event.id);
       delivered.push(event.kind);
-      return true;
     });
     await app.watcher.observe('one', [mr('1')]);
     expect(app.writes).toHaveLength(1);
@@ -330,13 +334,12 @@ describe('createLifecycleWatcher', () => {
     expect(app.stored.get(mr('1').url)?.pending).toEqual([]);
   });
 
-  test('keeps an event that fails for a retry, and drops one its delivery refuses', async () => {
+  test('keeps an event that fails for a retry, and clears one whose delivery completes', async () => {
     let failing = true;
     const delivered: string[] = [];
     const app = harness(async (event) => {
       if (failing && event.kind === 'merged') throw new Error('session unavailable');
       delivered.push(event.kind);
-      return event.kind !== 'conflict';
     });
     await app.watcher.observe('one', [mr('1'), mr('2')]);
     await expect(
@@ -357,7 +360,6 @@ describe('createLifecycleWatcher', () => {
     const delivered: string[] = [];
     const app = harness(async (event) => {
       delivered.push(event.id);
-      return true;
     });
     await app.watcher.observe('one', [mr('1')]);
     await Promise.all([
