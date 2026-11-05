@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.3.0...opencode-forgekeeper-2.4.0) (2026-11-05)
+
+
+### Features
+
+* **forgekeeper:** reopen a session's tab when it gets a review notification ([#112](https://github.com/pedropombeiro/opencode-plugins/issues/112)) ([3ef8a4b](https://github.com/pedropombeiro/opencode-plugins/commit/3ef8a4bcc901cc51359803c8325765249c87c4fb))
+
 ## [2.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.2.1...opencode-forgekeeper-2.3.0) (2026-10-27)
 
 
