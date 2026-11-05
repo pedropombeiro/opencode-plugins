@@ -493,10 +493,15 @@ The first look at a PR/MR records its newest comment as a baseline, so older com
 count as new. Announced comments are stored per session and PR/MR, so a restart replays
 nothing but still catches comments posted in the meantime.
 
-A failed send shows an error toast and is retried after 10 minutes. Failed Duo and human
-feedback deliveries leave their comment IDs unannounced, so a restart can retry them.
-Failed Copilot notifications stay pending in storage while the review still has feedback
-and the PR remains an open target. Legacy state-only Duo pending notifications are discarded.
+Feedback counts as announced once the inbox has it. If Forgekeeper can't record it, such as
+when its storage fails, it shows an error toast and tries again after 10 minutes. Duo and
+human feedback then keep their comment IDs unannounced, so a restart can retry them, and
+Copilot notifications stay pending in storage while the review still has feedback and the
+PR remains an open target. Legacy state-only Duo pending notifications are discarded.
+
+A session message that fails, such as when the comment text can't be read for a summary,
+shows an error toast. The update stays in the inbox, which retries the message every
+minute. Acknowledging the update ends those retries, and the update doesn't come back.
 
 Every checkout's server plugin instance shares the plugin's storage, so each baseline and
 each pending notification has its own storage key. Instances never overwrite each other's

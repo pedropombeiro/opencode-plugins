@@ -744,7 +744,10 @@ export async function setupStatus(
     if (current.length === 0) return [];
     const description = title(current);
     for (const request of current) {
-      await inbox.add({
+      // Once the inbox has the update, the session counts as told: the inbox
+      // retries a failed session message itself, and an acknowledgement ends
+      // those retries, so the update never comes back.
+      const { delivery } = await inbox.record({
         id: JSON.stringify([
           sessionID,
           request.url,
@@ -763,9 +766,29 @@ export async function setupStatus(
         ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
         at: (deps.now ?? Date.now)(),
       });
+      void tracked(delivery.catch((error) => deliveryFailed(sessionID, error)));
     }
     return current;
   }
+
+  // An update the inbox has, but couldn't post to its session. The inbox
+  // retries it with the other pending updates. One that a pause holds back
+  // waits for monitoring to resume, which isn't a failure.
+  const deliveryFailed = async (sessionID: string, error: unknown) => {
+    if (
+      await inbox.list().then(
+        (state) => state.paused,
+        () => false,
+      )
+    )
+      return;
+    const reason = error instanceof Error ? error.message : String(error);
+    notice({
+      sessionID,
+      message: `Could not post an update to the session: ${reason}. It stays in /forge-feedback, and is retried every minute.`,
+      variant: 'error',
+    });
+  };
 
   const readFeedback =
     deps.feedback ??
@@ -985,21 +1008,27 @@ export async function setupStatus(
     event: LifecycleEvent,
     records: readonly LifecycleRecord[],
   ): Promise<boolean> {
-    if (closing) throw new Error('The plugin stopped');
-    let session;
-    try {
-      session = await ctx.session.get({ sessionID: record.sessionID });
-    } catch (error) {
-      if (missingSession(error)) return false;
-      throw error;
-    }
-    if (!session || session.time?.archived !== undefined) return false;
-    // That checkout's instance delivers it.
-    if (session.location.directory !== directory)
-      throw new Error('The session moved to another checkout');
-    if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
-    const targets = (await host.state(record.sessionID)).targets;
-    if (!includesRequest(targets, record.url)) return false;
+    // The session's targets, while it still takes the event: it exists here,
+    // isn't archived, and targets the PR/MR. Undefined drops the event.
+    const targetsNow = async () => {
+      if (closing) throw new Error('The plugin stopped');
+      let session;
+      try {
+        session = await ctx.session.get({ sessionID: record.sessionID });
+      } catch (error) {
+        if (missingSession(error)) return undefined;
+        throw error;
+      }
+      if (!session || session.time?.archived !== undefined) return undefined;
+      // That checkout's instance delivers it.
+      if (session.location.directory !== directory)
+        throw new Error('The session moved to another checkout');
+      if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
+      const targets = (await host.state(record.sessionID)).targets;
+      return includesRequest(targets, record.url) ? targets : undefined;
+    };
+    const targets = await targetsNow();
+    if (!targets) return false;
     // A conflict that's already over isn't news, nor is a failed pipeline that
     // passed on a retry or that another pipeline replaced.
     if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
@@ -1021,15 +1050,20 @@ export async function setupStatus(
         entry.url !== record.url &&
         includesRequest(targets, entry.url),
     );
-    const proposals =
-      event.kind === 'merged' && children.length
-        ? await proposeRetargets({
-            parent: record,
-            children,
-            policy: stricter(event.policy, settings.lifecycleExecution.parentMerged),
-            fetch: fresh,
-          })
-        : [];
+    let proposals: string[] = [];
+    if (event.kind === 'merged' && children.length) {
+      const lines = await proposeRetargets({
+        parent: record,
+        children,
+        policy: stricter(event.policy, settings.lifecycleExecution.parentMerged),
+        fetch: fresh,
+      });
+      // Reading the dependents can take a while. The session may have dropped
+      // the PR/MR, or some of the dependents, meanwhile.
+      const latest = await targetsNow();
+      if (!latest) return false;
+      proposals = lines.filter((_, index) => includesRequest(latest, children[index].url));
+    }
     const ci = event.kind === 'ci-failed' ? record.ci : undefined;
     const failures = ci && splitFailures(ci, event.jobs ?? []);
     const details = ci && failures ? failureDetails(ci, failures) : proposals;
@@ -1071,9 +1105,8 @@ export async function setupStatus(
       entry.sessionID === item.sessionID &&
       entry.url === item.url &&
       entry.pipeline === item.pipeline;
-    await inbox.add(item, samePipeline).catch(async (error) => {
-      if (!(await inbox.list()).items.some((entry) => entry.id === item.id)) throw error;
-    });
+    const { delivery } = await inbox.record(item, samePipeline);
+    void tracked(delivery.catch((error) => deliveryFailed(record.sessionID, error)));
     notice({
       sessionID: record.sessionID,
       title,

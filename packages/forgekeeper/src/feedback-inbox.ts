@@ -157,27 +157,36 @@ export function createFeedbackInbox(options: {
     if (failure) throw failure.error;
     return run(read);
   };
+  // Stores an update, unless one with its ID exists, and starts delivering
+  // it. Resolves once it's stored, with its delivery, which the inbox retries
+  // on its own if it fails. `supersedes` names the updates it replaces, such
+  // as an earlier one about the same pipeline.
+  const record = async (
+    item: FeedbackItem,
+    supersedes: (entry: FeedbackItem) => boolean = () => false,
+  ) => {
+    let added = item;
+    await change((previous) => {
+      const existing = previous.items.find((entry) => entry.id === item.id);
+      added = existing ?? item;
+      return {
+        ...previous,
+        items: [
+          added,
+          ...previous.items.filter(
+            (entry) => entry.id !== item.id && (existing !== undefined || !supersedes(entry)),
+          ),
+        ].slice(0, 500),
+      };
+    }, true);
+    return { delivery: notify([added]) };
+  };
   return {
     list: () => run(read),
-    // Adds an update, unless one with its ID exists. `supersedes` names the
-    // updates it replaces, such as an earlier one about the same pipeline.
-    add: async (item: FeedbackItem, supersedes: (entry: FeedbackItem) => boolean = () => false) => {
-      let added = item;
-      await change((previous) => {
-        const existing = previous.items.find((entry) => entry.id === item.id);
-        added = existing ?? item;
-        return {
-          ...previous,
-          items: [
-            added,
-            ...previous.items.filter(
-              (entry) => entry.id !== item.id && (existing !== undefined || !supersedes(entry)),
-            ),
-          ].slice(0, 500),
-        };
-      }, true);
-      return notify([added]);
-    },
+    record,
+    // Like `record`, but resolves once the update is delivered too.
+    add: async (item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) =>
+      (await record(item, supersedes)).delivery,
     notifyPending: async () => notify((await run(read)).items),
     acknowledge: (id: string) =>
       change((state) => ({ ...state, items: state.items.filter((item) => item.id !== id) })),

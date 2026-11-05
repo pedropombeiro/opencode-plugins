@@ -16,11 +16,11 @@ import { kinds, traits, type ForgeCatalog } from './forges';
 import { footerSegments } from './format';
 import type { RemoteProject } from './git';
 import type { TitleLookups } from './lookups';
-import { FETCH_INTERVAL, SETTLE_TIME } from './human-review-watch';
+import { FETCH_INTERVAL, RETRY_DELAY, SETTLE_TIME } from './human-review-watch';
 import { formatTime } from './feedback-inbox';
 import { setupServer } from './server';
 import type { Snapshot } from './store';
-import { flush } from './testing';
+import { deferred, flush } from './testing';
 
 type Tool = {
   name: string;
@@ -1897,6 +1897,35 @@ describe('PR/MR status lifecycle', () => {
     await reloaded.cleanup();
   });
 
+  test('never brings back an acknowledged update whose session message failed', async () => {
+    let fail = true;
+    const { app, reader } = await watchedFeedback({
+      ...summaryMode,
+      details: async (request, ids) => {
+        if (fail) throw new Error('rate limit');
+        return summaryMode.details(request, ids);
+      },
+    });
+    await app.refresh();
+    await settle();
+    const [item] = (await app.feedback()).items;
+    expect(item.notifiedAt).toBeUndefined();
+    // The inbox has it, and retries the message itself, so the review watcher
+    // counts the comments as announced.
+    expect(announcedIn(app.storage)).toEqual(['7']);
+    expect(app.notices()).toContainEqual(
+      expect.objectContaining({ sessionID: 'one', variant: 'error' }),
+    );
+    await app.acknowledgeFeedback(item.id);
+    fail = false;
+    reader.advance(RETRY_DELAY + FETCH_INTERVAL);
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    expect(app.synthetic).toEqual([]);
+    await app.cleanup();
+  });
+
   test('summarizes an update on request in inbox mode, including updates stored without comment IDs', async () => {
     const requested: string[][] = [];
     const { app, reader } = await watchedFeedback({
@@ -2185,6 +2214,45 @@ describe('PR/MR status lifecycle', () => {
       },
     ]);
     await app.cleanup();
+  });
+
+  test('leaves out targets that the session drops while it reads their dependents', async () => {
+    for (const dropped of [projectA, child]) {
+      const forge = new StatusForge();
+      forge.set('group/a', '1');
+      forge.set('group/a', '2', { targetBranch: 'branch-1' });
+      const { app } = await watchedTargets([projectA, child], {
+        status: forge,
+        pluginOptions: {
+          lifecycleExecution: { parentMerged: { mode: 'prepare', actions: ['retarget'] } },
+        },
+      });
+      // The proposal's read of the dependent, after the lookup's own.
+      const reading = deferred();
+      const release = deferred();
+      const lookup = forge.findByNumber.bind(forge);
+      let reads = 0;
+      forge.findByNumber = async (projects, number) => {
+        if (number === '2' && ++reads === 2) {
+          reading.resolve();
+          await release.promise;
+        }
+        return lookup(projects, number);
+      };
+      forge.set('group/a', '1', { state: 'merged' });
+      void app.refresh();
+      await reading.promise;
+      await app.set({ targets: [dropped], operation: 'remove' });
+      release.resolve();
+      await settle();
+      const items = (await app.feedback()).items;
+      if (dropped === projectA) expect(items).toEqual([]);
+      else {
+        expect(items).toMatchObject([{ kind: 'merged', url: projectA }]);
+        expect(items[0].details).toBeUndefined();
+      }
+      await app.cleanup();
+    }
   });
 
   test('only describes the dependents by default', async () => {
@@ -2874,8 +2942,8 @@ describe('PR/MR status lifecycle', () => {
     expect(announcedIn(app.storage)).toEqual(['7']);
   });
 
-  test('keeps feedback pending when cleanup prevents its passive session notification', async () => {
-    const { app } = await watchedFeedback({
+  test('leaves a passive session message that cleanup prevented to the next instance', async () => {
+    const { app, reader } = await watchedFeedback({
       holdInbox: true,
       pluginOptions: { delivery: { reviews: 'passive' } },
     });
@@ -2886,8 +2954,22 @@ describe('PR/MR status lifecycle', () => {
     await settle();
     app.releaseInbox();
     await stopping;
-    expect((await app.feedback()).items).toHaveLength(1);
-    expect(announcedIn(app.storage)).toEqual([]);
+    const [item] = (await app.feedback()).items;
+    expect(item.notifiedAt).toBeUndefined();
+    expect(app.passive).toEqual([]);
+    // The inbox has it, so the review watcher doesn't announce it again.
+    expect(announcedIn(app.storage)).toEqual(['7']);
+    const reloaded = await harness({
+      storage: app.storage,
+      status: new StatusForge(),
+      feedback: reader.read,
+      now: reader.now,
+      pluginOptions: { delivery: { reviews: 'passive' } },
+    });
+    await settle();
+    expect(reloaded.passive).toHaveLength(1);
+    expect((await reloaded.feedback()).items[0].notifiedAt).toBeDefined();
+    await reloaded.cleanup();
   });
 
   // Runs a lookup in which the targets' automated reviews finish, and arms

@@ -186,6 +186,42 @@ describe('feedback inbox', () => {
     expect(state?.items.find((item) => item.id === 'slow')?.notifiedAt).toBe(7);
   });
 
+  test('records an update even when its delivery fails, and retries only what is still pending', async () => {
+    let state: InboxState | undefined;
+    let fail = true;
+    const sent: string[] = [];
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+      notify: async (item) => {
+        if (fail) throw new Error('unavailable');
+        sent.push(item.id);
+      },
+    });
+    const update = (id: string): FeedbackItem => ({
+      id,
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: id,
+      links: [],
+      delivery: 'summary',
+      at: 0,
+    });
+    for (const id of ['kept', 'dismissed']) {
+      const { delivery } = await inbox.record(update(id));
+      await expect(delivery).rejects.toThrow('unavailable');
+    }
+    expect(state?.items.map((item) => item.id)).toEqual(['dismissed', 'kept']);
+    await inbox.acknowledge('dismissed');
+    fail = false;
+    await inbox.notifyPending();
+    expect(sent).toEqual(['kept']);
+    // Recording waits for no delivery, but nothing records while paused.
+    await inbox.pause(true);
+    await expect(inbox.record(update('late'))).rejects.toThrow('paused');
+  });
+
   test('skips an update acknowledged or paused before its delivery starts', async () => {
     let state: InboxState | undefined = {
       paused: false,
