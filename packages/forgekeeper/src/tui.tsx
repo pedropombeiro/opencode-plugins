@@ -19,6 +19,7 @@ import {
 import { yesNo, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import { automatedReview } from './automated-review-watch';
+import { showNotice } from './notice';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
 import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
@@ -562,16 +563,13 @@ export default {
         const { directory, key, snapshot } = event.data as EventData<'status'>;
         client.receive(directory, key, snapshot);
       }),
-      // Notices about a session go to the CLIs that have shown it.
-      rpc.events.on('notice', (event) => {
-        const notice = event.data as EventData<'notice'>;
-        if (notice.sessionID && !client.hasShown(notice.sessionID)) return;
-        context.ui.toast.show({
-          ...(notice.title ? { title: notice.title } : {}),
-          message: notice.message,
-          variant: notice.variant,
-        });
-      }),
+      rpc.events.on('notice', (event) =>
+        showNotice(event.data as EventData<'notice'>, {
+          hasShown: client.hasShown,
+          openTab: (sessionID) => context.ui.tabs.open(sessionID),
+          toast: context.ui.toast.show,
+        }),
+      ),
     ];
 
     return () => {
