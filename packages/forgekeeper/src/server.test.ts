@@ -1158,6 +1158,7 @@ describe('PR/MR status lifecycle', () => {
     await settle();
     expect(app.synthetic).toEqual([]);
     expect(announcedIn(app.storage)).toEqual([]);
+    expect(app.notices()).toMatchObject([{ sessionID: 'one', variant: 'error' }]);
     expect(JSON.stringify(app.notices())).toContain('database locked');
     await app.cleanup();
   });

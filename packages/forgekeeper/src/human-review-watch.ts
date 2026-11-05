@@ -149,7 +149,7 @@ export interface FeedbackWatcherOptions {
   // Rejects when the session couldn't be told.
   send: (sessionID: string, request: ReviewRequest, comments: ReviewComment[]) => Promise<void>;
   onFetchError?: (error: unknown) => void;
-  onSendError?: (error: unknown) => void;
+  onSendError?: (error: unknown, sessionID: string) => void;
   now?: () => number;
 }
 
@@ -214,7 +214,7 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
       remember(key, { announced: ids }, now());
     } catch (error) {
       retryAt.set(key, now() + RETRY_DELAY);
-      options.onSendError?.(error);
+      options.onSendError?.(error, sessionID);
     } finally {
       for (const id of ids) reserved.delete(`${key} ${id}`);
     }
