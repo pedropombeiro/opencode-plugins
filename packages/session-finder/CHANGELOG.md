@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-session-finder-1.0.0...opencode-session-finder-1.1.0) (2026-11-05)
+
+
+### Features
+
+* **session-finder:** open search results at once and fill them in ([#111](https://github.com/pedropombeiro/opencode-plugins/issues/111)) ([8dc792c](https://github.com/pedropombeiro/opencode-plugins/commit/8dc792ce01491a24720b699ac9d52b1792441fd3))
+
 ## [1.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-session-finder-0.1.0...opencode-session-finder-1.0.0) (2026-10-27)
 
 
