@@ -71,6 +71,6 @@ jobs:
         run: mise run build ${{ matrix.package }}
 
       - if: matrix.enabled == 'true'
-        name: Publish
-        run: npm publish --access public --tag ${{ github.ref_name == 'main' && 'latest' || 'opencode-v1' }}
+        name: Stage
+        run: npm stage publish --access public --provenance --tag ${{ github.ref_name == 'main' && 'latest' || 'opencode-v1' }}
         working-directory: packages/${{ matrix.package }}
