@@ -226,7 +226,9 @@ For each explicit target that is an open PR/MR, the server tells the agent about
 A target that merges or closes gets no more notifications, and a notification waiting for a
 retry is dropped.
 Each notification is a queued synthetic message, followed by a toast in the CLIs that have
-shown the session. The message resumes the session unless `resumeSession` is `false`.
+shown the session. With session tabs on, those CLIs also reopen the session's tab if you
+closed it, without leaving the session you're in. The message resumes the session unless
+`resumeSession` is `false`.
 Messages include the full URL of each PR/MR. PRs/MRs from the title or the branch don't get
 notifications.
 
@@ -386,6 +388,7 @@ notifications resume the session. Set `reviewStatus` to `false` to keep only tit
   and a PR/MR's source branch.
 - `src/status-client.ts` holds the CLI's leases, snapshots, and per-directory settings.
   `src/tui.tsx` connects it to the RPC and renders the footer, dialog, commands, and notices.
+  `src/notice.ts` decides which notices a CLI shows and which tabs it reopens.
 - `src/forge.ts` defines the forge-neutral types, the `Forge` adapter interface, and
   `ForgeTraits` with its optional `automatedReview` and `feedback` capabilities.
 - `src/gitlab-feedback.ts` and `src/github-feedback.ts` read each forge's comments for its
