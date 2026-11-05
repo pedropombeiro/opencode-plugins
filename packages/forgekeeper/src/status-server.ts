@@ -262,10 +262,11 @@ export async function setupStatus(
         },
         onFetchError: (error) =>
           reportOnce('feedback-fetch', 'Could not check PR/MR review feedback', error),
-        onSendError: (error) => {
+        onSendError: (error, sessionID) => {
           const reason = error instanceof Error ? error.message : String(error);
           notice({
-            message: `Could not tell the session about review feedback: ${reason}`,
+            sessionID,
+            message: `Could not tell the session about review feedback: ${reason}. Retrying in 10 minutes.`,
             variant: 'error',
           });
         },
