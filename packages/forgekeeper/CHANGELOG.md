@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.4.0...opencode-forgekeeper-2.4.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **forgekeeper:** show a failed review feedback send only for its session ([#120](https://github.com/pedropombeiro/opencode-plugins/issues/120)) ([c934da5](https://github.com/pedropombeiro/opencode-plugins/commit/c934da54c5927ce7c72c7f955fb062abfe5e88ff))
+
 ## [2.4.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.3.0...opencode-forgekeeper-2.4.0) (2026-11-05)
 
 
