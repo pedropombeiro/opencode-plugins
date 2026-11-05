@@ -53,9 +53,10 @@
     },
     "packages/session-finder": {
       "name": "opencode-session-finder",
-      "version": "0.1.0",
+      "version": "1.0.0",
       "peerDependencies": {
         "@opencode/plugin": "^2.2.0",
+        "solid-js": ">=1.9.0",
       },
     },
     "packages/terminal-progress": {

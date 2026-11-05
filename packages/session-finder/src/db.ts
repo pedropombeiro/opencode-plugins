@@ -24,6 +24,7 @@ export interface SearchOptions {
   currentSessionID?: string;
   includeCurrent?: boolean;
   cwd?: string;
+  titles?: boolean;
 }
 
 export interface Match {
@@ -94,6 +95,7 @@ interface Hit {
 }
 
 interface Filters {
+  titles: boolean;
   sessionFilter: boolean;
   since?: number;
   until?: number;
@@ -121,6 +123,7 @@ export function searchSessions(options: SearchOptions): Result {
   try {
     const table = sessionTable(db);
     const filters: Filters = {
+      titles: options.titles ?? false,
       sessionFilter: Boolean(options.sessionID || options.directory || options.currentProject),
       since: options.since ? parseDate(options.since) : undefined,
       until: options.until ? parseDate(options.until) : undefined,
@@ -131,7 +134,13 @@ export function searchSessions(options: SearchOptions): Result {
 
     const searches: Attempt[] = [];
     let results: Session[] = [];
-    for (const [words, sources] of attempts(query, options.words ?? false, include, options)) {
+    const plan = attempts(
+      query,
+      options.words ?? false,
+      include,
+      filters.titles ? { fallback: false } : options,
+    );
+    for (const [words, sources] of plan) {
       results = search(db, sessions, query, words, sources, filters);
       searches.push({
         mode: words ? 'words' : 'phrase',
@@ -328,7 +337,8 @@ function search(
     else hits.set(sessionID, [hit]);
   };
 
-  for (const row of candidateMessages(db, sessions, terms, include, filters)) {
+  const messages = filters.titles ? [] : candidateMessages(db, sessions, terms, include, filters);
+  for (const row of messages) {
     for (const [source, text] of extract(row.type, row.data, include)) {
       for (const term of terms) {
         for (const match of text.matchAll(new RegExp(escapeRegExp(term), 'gi'))) {

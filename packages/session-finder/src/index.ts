@@ -61,6 +61,7 @@ export default {
             excerpts: 1,
             currentSessionID: request.sessionID,
             cwd: request.directory ?? ctx.location.directory,
+            titles: request.titles ?? false,
           },
           signal,
         );

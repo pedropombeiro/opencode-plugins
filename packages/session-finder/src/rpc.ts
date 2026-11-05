@@ -29,6 +29,7 @@ const searchSchema = {
     sessionID: { type: 'string' },
     directory: { type: 'string' },
     limit: { type: 'integer', minimum: 1 },
+    titles: { type: 'boolean' },
   },
   required: ['query'],
   additionalProperties: false,
@@ -61,4 +62,5 @@ export interface SearchRequest {
   sessionID?: string;
   directory?: string;
   limit?: number;
+  titles?: boolean;
 }
