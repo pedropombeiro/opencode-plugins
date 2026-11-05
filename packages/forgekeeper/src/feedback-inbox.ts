@@ -1,3 +1,5 @@
+import type { AutomationStatus } from './review-automation';
+
 export interface FeedbackItem {
   id: string;
   sessionID: string;
@@ -23,6 +25,8 @@ export interface FeedbackItem {
   // When Forgekeeper recorded the update.
   at: number;
   notifiedAt?: number;
+  automation?: AutomationStatus;
+  automationAllowed?: boolean;
 }
 
 export interface InboxState {
@@ -110,6 +114,7 @@ export function createFeedbackInbox(options: {
   // Whether automatic delivery is on for the item's kind of update now. One
   // that isn't waits, undelivered, until it's on again.
   enabled?: (item: FeedbackItem) => boolean;
+  select?: (item: FeedbackItem) => Promise<boolean>;
   now?: () => number;
 }) {
   let queue = Promise.resolve();
@@ -144,7 +149,9 @@ export function createFeedbackInbox(options: {
       // The update as it is now: still pending, undelivered, and not paused.
       const state = await run(read);
       const item = state.items.find((entry) => entry.id === id);
-      if (!options.notify || state.paused || !item) return;
+      if (state.paused || !item) return;
+      if (await options.select?.(item)) return;
+      if (!options.notify) return;
       if (item.notifiedAt !== undefined || !item.delivery) return;
       if (options.enabled && !options.enabled(item)) return;
       await options.notify(item);
@@ -163,7 +170,6 @@ export function createFeedbackInbox(options: {
   const notify = async (items: readonly FeedbackItem[]) => {
     let failure: { error: unknown } | undefined;
     for (const item of items) {
-      if (item.notifiedAt !== undefined || !item.delivery) continue;
       await deliver(item.id).catch((error) => (failure ??= { error }));
     }
     if (failure) throw failure.error;
@@ -199,6 +205,11 @@ export function createFeedbackInbox(options: {
     notifyPending: async () => notify((await run(read)).items),
     acknowledge: (id: string) =>
       change((state) => ({ ...state, items: state.items.filter((item) => item.id !== id) })),
+    automation: (id: string, automation: AutomationStatus) =>
+      change((state) => ({
+        ...state,
+        items: state.items.map((item) => (item.id === id ? { ...item, automation } : item)),
+      })),
     // Removes the updates that no longer need attention, such as ones whose
     // comments were resolved. Writes, and reports a change, only when one goes.
     prune: (stale: (item: FeedbackItem) => boolean) =>

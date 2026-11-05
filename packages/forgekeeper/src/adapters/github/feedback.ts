@@ -253,7 +253,7 @@ interface DetailNode {
   originalLine?: number | null;
   diffHunk?: string | null;
   replyTo?: { body: string; author: { login: string } | null } | null;
-  author?: { login: string } | null;
+  author?: { id?: string; login: string } | null;
 }
 
 // `gh` passes only string and number variables, so the IDs are written into
@@ -262,10 +262,10 @@ const detailsQuery = (ids: string[]) =>
   query<{ nodes?: Array<DetailNode | null> | null }>(`query {
   nodes(ids: ${JSON.stringify(ids)}) {
     __typename
-    ... on IssueComment { id url body author { login } }
-    ... on PullRequestReview { id url body author { login } }
+    ... on IssueComment { id url body author { login ... on User { id } ... on Bot { id } } }
+    ... on PullRequestReview { id url body author { login ... on User { id } ... on Bot { id } } }
     ... on PullRequestReviewComment {
-      id url body path line originalLine diffHunk author { login }
+      id url body path line originalLine diffHunk author { login ... on User { id } ... on Bot { id } }
       replyTo { body author { login } }
     }
   }
@@ -301,6 +301,7 @@ export async function fetchDetails(
         id: node.id,
         url: node.url,
         username: node.author.login,
+        ...(node.author.id ? { authorID: node.author.id } : {}),
         body: node.body,
         ...(node.path ? { path: node.path } : {}),
         ...(line !== undefined ? { line } : {}),
