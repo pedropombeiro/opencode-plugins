@@ -90,6 +90,15 @@ export const ForgeSessionRpc = {
       },
       output: inboxState,
     },
+    actOnFeedback: {
+      input: {
+        type: 'object',
+        properties: { id: { type: 'string' }, retry: { type: 'boolean' } },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: inboxState,
+    },
     // The session's explicit targets, or `{}` in automatic branch mode.
     target: {
       input: {
@@ -232,6 +241,7 @@ export const implement = (handlers: Handlers) => ({
     handlers.acknowledgeFeedback(input as Input<'acknowledgeFeedback'>),
   summarizeFeedback: (input: unknown) =>
     handlers.summarizeFeedback(input as Input<'summarizeFeedback'>),
+  actOnFeedback: (input: unknown) => handlers.actOnFeedback(input as Input<'actOnFeedback'>),
   pauseFeedback: (input: unknown) => handlers.pauseFeedback(input as Input<'pauseFeedback'>),
   target: (input: unknown) => handlers.target(input as Input<'target'>),
   watch: (input: unknown) => handlers.watch(input as Input<'watch'>),

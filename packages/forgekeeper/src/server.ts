@@ -12,6 +12,9 @@ import {
   UNAVAILABLE_TEXT,
   type SummaryRequest,
 } from './review-summary';
+import { PREPARE_PREFIX } from './review-preparation';
+import { storedPreparation } from './review-automation-host';
+import { createReviewClaims } from './review-claim';
 import { ForgeSessionRpc, implement } from './rpc';
 import { setupStatus, type Status, type StatusDependencies } from './status-server';
 import { summaryPrefix } from './summary-delivery';
@@ -177,6 +180,10 @@ export async function setupServer(
       summarizeFeedback: async ({ id }) => {
         if (!watcher) throw new Error('PR/MR status is disabled');
         return watcher.summarize(id);
+      },
+      actOnFeedback: async ({ id, retry }) => {
+        if (!watcher) throw new Error('PR/MR status is disabled');
+        return watcher.act(id, retry);
       },
       pauseFeedback: async ({ paused }) => {
         if (!watcher) return { items: [], paused: false };
@@ -382,8 +389,35 @@ export async function setupServer(
   // failures propagate, so the request never runs with the session's tools.
   // A failure in the guidance must not block the request, so it's skipped.
   await ctx.session.hook('context', async (event) => {
+    if (!watcher) {
+      const input = turnInput(await ctx.session.context({ sessionID: event.sessionID }));
+      let preparing = input?.id.startsWith(PREPARE_PREFIX);
+      if (!input) {
+        const claims = status?.reviewClaims ?? createReviewClaims();
+        try {
+          preparing = !!(await storedPreparation(ctx, claims, event.sessionID));
+        } finally {
+          if (!status?.reviewClaims) claims.close();
+        }
+      }
+      if (preparing)
+        throw new Error(
+          'Review preparation is disabled. Enable Forgekeeper status before resuming this task.',
+        );
+    }
     if (watcher) {
-      if (await watcher.prepareSummary(event)) return;
+      // A preparation turn that can't be confirmed, such as when the
+      // session's context can't be read, still gets a summary's
+      // restrictions when one applies; otherwise its request fails.
+      let preparing = false;
+      let failure: { error: unknown } | undefined;
+      try {
+        preparing = await watcher.prepareAutomation(event);
+      } catch (error) {
+        failure = { error };
+      }
+      if (!preparing && (await watcher.prepareSummary(event))) return;
+      if (failure) throw failure.error;
     } else if (await orphanedStep(event)) {
       orphaned.add(event.sessionID);
       restrictRequest(event, summarySystem(false), UNAVAILABLE_TEXT);
@@ -441,6 +475,7 @@ export async function setupServer(
         'session.moved',
         'session.execution.succeeded',
         'session.execution.failed',
+        'session.execution.interrupted',
         'vcs.branch.updated',
       ],
       signal: controller.signal,
@@ -455,6 +490,18 @@ export async function setupServer(
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
       if (type === 'session.execution.succeeded' || type === 'session.execution.failed')
         watcher?.turnEnded();
+      // A shutdown doesn't end the turn: the resumed execution continues it.
+      const reason = (event.data as { reason?: string } | undefined)?.reason;
+      if (
+        sessionID &&
+        type.startsWith('session.execution.') &&
+        !(type === 'session.execution.interrupted' && reason === 'shutdown')
+      )
+        watcher?.executionEnded(
+          sessionID,
+          type === 'session.execution.succeeded' ? 'succeeded' : 'failed',
+          (event as { created?: number }).created ?? Date.now(),
+        );
       if (type === 'vcs.branch.updated') {
         const location = (event as { location?: { directory?: string } }).location;
         if (!location?.directory || location.directory === ctx.location.directory)

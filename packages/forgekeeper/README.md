@@ -64,7 +64,8 @@ For example, this footer tracks four MRs, with one conflict and two already merg
 | `/forge-open` | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`. |
 | `/forge-feedback` | Browse pending review feedback and PR/MR updates. |
 
-Status normally refreshes every 2 minutes, or every 30 seconds during automated reviews.
+Status normally refreshes every 2 minutes, or every 30 seconds during automated reviews and
+while new review feedback settles.
 Explicit PR/MR targets take precedence over title references and branch discovery. Issue
 targets have no PR/MR status.
 
@@ -100,16 +101,26 @@ Each delivery option accepts:
 - `summary`: start a restricted summary turn after active work finishes. Review updates
   without comments use a passive notice instead.
 
-Human and GitLab Duo feedback wait for a five-minute quiet period. Monitoring records an
-initial baseline rather than announcing existing feedback. Pending updates survive reloads
-and clear when acknowledged or no longer relevant; merge updates remain until acknowledged.
+Human and GitLab Duo feedback wait for a four-minute quiet period, with status polling every
+30 seconds meanwhile, so an update arrives within about 5 minutes of the last comment. That's
+before a typical 5-minute prompt cache expires. Monitoring records an initial baseline rather
+than announcing existing feedback. Pending updates survive reloads and clear when acknowledged
+or no longer relevant; merge updates remain until acknowledged.
 
 Forgekeeper reports failed jobs but doesn't retry or fix them. For tracked stacks, it can
 also propose retargeting dependents after a parent merges, but never retargets or rebases itself.
 
+Optionally, `automation.rules` lets exact reviewers on exact projects, such as GitLab Duo, start
+a coding turn that prepares fixes for their feedback. It runs only on PRs/MRs you wrote, in the
+one session that targets them, with the checkout on the source branch. A rule can require models
+you trust with code changes. The turn uses the session's instructions and permissions, and
+leaves changes uncommitted. In `/forge-feedback`, **Act on feedback** (Ctrl+A) starts the same
+turn on request, and **Retry feedback work** (Ctrl+T) retries one after you inspect it.
+
 See [review detection and summaries](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications),
-[monitoring eligibility](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#which-sessions-the-server-watches), and
-[stacked PRs/MRs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#stacked-prsmrs) for details.
+[monitoring eligibility](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#which-sessions-the-server-watches),
+[stacked PRs/MRs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#stacked-prsmrs), and
+[preparing fixes](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#prepare-fixes-from-review-feedback) for details.
 
 ## Options
 
@@ -130,6 +141,8 @@ Only specify values you want to change. The terminal part has no separate option
 | `delivery.reviews` | `"inbox"` | Review delivery: `inbox`, `passive`, or `summary`. |
 | `delivery.lifecycle` | `"inbox"` | Conflict, job-failure, and merge delivery. |
 | `lifecycleExecution.parentMerged` | `{ "mode": "notify" }` | Optionally prepare retarget proposals for tracked dependents. |
+| `automation.rules` | No rules | Reviewers whose feedback starts a coding turn that prepares fixes, optionally limited to allowed models. |
+| `automation.modelGroups` | No groups | Named lists of `provider/model` IDs that rules reference in `allowedModelGroup`. |
 
 See the [configuration reference](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#options) for validation behavior and
 [review-bot configuration](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications) for account matching.
@@ -137,7 +150,11 @@ See the [configuration reference](https://github.com/pedropombeiro/opencode-plug
 ## Security and privacy
 
 Monitoring reads forge data through your authenticated CLI. It doesn't modify the forge,
-edit files, commit, push, reply to comments, or resolve discussions.
+edit files, commit, push, reply to comments, or resolve discussions. Only an
+[automation rule](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#prepare-fixes-from-review-feedback)
+or **Act on feedback** starts a coding turn that edits files, with the session's permissions.
+That turn sends reviewer text to the model as untrusted data, keeps it in the session's
+history, and leaves changes uncommitted.
 
 Optional review summaries send review text to the session's model, isolated from conversation
 history and ordinary tools. On GitLab, a restricted tool can read notes directly linked by

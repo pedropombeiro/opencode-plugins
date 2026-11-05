@@ -23,7 +23,13 @@ function harness({
   human = false,
   pending = () => false,
   owns = () => true,
-}: { human?: boolean; pending?: () => boolean; owns?: (key: string) => boolean } = {}) {
+  settling = () => false,
+}: {
+  human?: boolean;
+  pending?: () => boolean;
+  owns?: (key: string) => boolean;
+  settling?: () => boolean;
+} = {}) {
   let clock = 0;
   const timers = new Map<number, { at: number; callback: () => void }>();
   let nextTimer = 0;
@@ -53,6 +59,7 @@ function harness({
           human: {
             check: (sessionID: string, request: ReviewRequest) =>
               void checked.push(`${sessionID} ${request.iid}`),
+            settling,
           },
         }
       : {}),
@@ -285,6 +292,30 @@ describe('createStatusService', () => {
     expect(app.checked).toEqual(['ses_1 1']);
     app.service.watch('cli', ['ses_1']);
     expect(app.service.polling('ses_1')).toBe(false);
+  });
+
+  test('polls faster while new feedback settles, unless feedback is paused', async () => {
+    let settling = false;
+    const app = harness({ human: true, settling: () => settling });
+    app.lookups.set('ses_1', targets(mr()));
+    app.service.watch('cli', ['ses_1'], 'ses_1');
+    await app.advance(0);
+    const loads = () => app.loads.length;
+    const before = loads();
+    await app.advance(30);
+    expect(loads()).toBe(before);
+
+    settling = true;
+    await app.advance(70);
+    expect(loads()).toBe(before + 1);
+    await app.advance(30);
+    expect(loads()).toBe(before + 2);
+
+    app.service.pauseFeedback(true);
+    await app.advance(30);
+    expect(loads()).toBe(before + 3);
+    await app.advance(30);
+    expect(loads()).toBe(before + 3);
   });
 
   test('keeps polling while a notification waits for a retry', async () => {

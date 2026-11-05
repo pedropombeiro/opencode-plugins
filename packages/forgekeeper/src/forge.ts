@@ -74,6 +74,8 @@ interface Common {
   sourceProject?: string;
   sourceBranch?: string;
   headSha?: string;
+  // The author's account ID, in the form the forge's `viewerID` reports.
+  authorID?: string;
   updatedAt?: string;
   pipeline?: Pipeline;
   unresolvedThreads: number;
@@ -225,6 +227,14 @@ export type FeedbackTarget = Pick<ReviewRequest, 'forge' | 'url'>;
 
 // Reads a request's review comments, for announcing new human feedback.
 export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
+  // The signed-in account's ID on the host.
+  viewerID?(run: Exec, directory: string, host: string): Promise<string | undefined>;
+  reviewerID?(
+    run: Exec,
+    directory: string,
+    host: string,
+    username: string,
+  ): Promise<string | undefined>;
   subscribe?(
     run: Exec,
     directory: string,
@@ -271,6 +281,7 @@ export interface CommentDetail {
   id: string;
   url: string;
   username: string;
+  authorID?: string;
   body: string;
   path?: string;
   line?: number;

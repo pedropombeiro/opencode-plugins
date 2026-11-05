@@ -8,6 +8,14 @@ import { createSummaryDelivery, type SummaryDependencies } from './summary-deliv
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
 import { createLifecycleNotifications } from './lifecycle-notifications';
 import { createReviewMonitoring } from './review-monitoring';
+import {
+  automationReviewers,
+  createReviewAutomation,
+  modelKey,
+  modelRefusal,
+} from './review-automation';
+import { createAutomationHost, type AutomationDependencies } from './review-automation-host';
+import { PREPARATION_INSTRUCTIONS } from './review-preparation';
 import type { FeedbackSnapshot, ReviewRequest } from './forge';
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
@@ -23,7 +31,7 @@ import { classifyTargets, includesRequest, targetOutput, type Target } from './t
 // noticed promptly.
 const REVIEW_POLL_SECONDS = 30;
 
-export interface StatusDependencies extends SummaryDependencies {
+export interface StatusDependencies extends SummaryDependencies, AutomationDependencies {
   // Forges and commands for status lookups and feedback, which share one
   // concurrency limit.
   forges: ForgeCatalog;
@@ -110,6 +118,7 @@ export async function setupStatus(
   const foreign = new Set<string>();
   let invalidate: (sessionID: string) => void = () => {};
   const inbox = createFeedbackInbox({
+    select: (item) => automation.selectAutomatic(item),
     read: async () =>
       (await ctx.storage.get(`feedback-inbox/${encodeURIComponent(directory)}`)) as
         | InboxState
@@ -273,6 +282,23 @@ export async function setupStatus(
     report: (error) => reportOnce('summary', 'Could not restore review summary turns', error),
   });
 
+  const reviewRules = settings.automation.rules.filter((rule) => rule.on === 'review');
+  const automationController = new AbortController();
+  const automationHost = createAutomationHost(ctx, deps, {
+    rules: reviewRules,
+    closing: () => closing,
+    inbox,
+    deliverable,
+    readFeedback: (request, cwd) => readFeedback(request, cwd),
+    scan: scanAll,
+    missingSession,
+    redeliver: () => void notifyPending(),
+    report: (error) =>
+      reportOnce('review-automation', 'Could not coordinate review automation', error),
+    signal: automationController.signal,
+  });
+  const automation = createReviewAutomation(automationHost.host);
+
   async function currentReviews(
     sessionID: string,
     requests: ReviewRequest[],
@@ -309,6 +335,9 @@ export async function setupStatus(
   };
 
   const record = async (item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) => {
+    const ref = parseUrl(item.url);
+    if (!item.kind && ref && automationReviewers(reviewRules, ref).length)
+      item = { ...item, automationAllowed: true };
     const { delivery } = await inbox.record(item, supersedes);
     void tracked(delivery.catch((error) => deliveryFailed(item.sessionID, error)));
   };
@@ -463,6 +492,7 @@ export async function setupStatus(
     .then(async (state) => {
       if (closing) return;
       service.pauseFeedback(state.paused);
+      automation.restore(await automationHost.restorable());
       await notifyPending();
       // Events found before a reload or a failure, such as a merge, which
       // ends polling, still go.
@@ -488,6 +518,42 @@ export async function setupStatus(
     service,
     inbox,
     discovery,
+    // Acts on an update on request, or retries one that already ran.
+    async act(id: string, retry = false): Promise<InboxState> {
+      const item = (await inbox.list()).items.find((item) => item.id === id);
+      if (!item) throw new Error('The update is no longer in the feedback inbox');
+      await automation.act(item, retry);
+      return inbox.list();
+    },
+    // Adds the task instructions to a preparation turn's model requests, and
+    // returns whether the request is one. It's checked before summaries, so
+    // a summary still queued can't take over a compacted preparation turn. A
+    // turn whose checks fail before its first request ends without running.
+    // Each request's model must be one the turn's findings allow, so
+    // switching to another model mid-turn fails the turn.
+    async prepareAutomation(
+      event: Parameters<typeof summaries.prepare>[0] & {
+        readonly model: { providerID: string; id: string };
+      },
+    ): Promise<boolean> {
+      const record = await automationHost.preparationFor(event.sessionID);
+      if (!record) return false;
+      const model = modelKey(event.model);
+      if (record.startedAt === undefined) {
+        try {
+          await automationHost.authorizeStart(record, model);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await automation.abandon(record, reason).catch(() => {});
+          throw error;
+        }
+      } else {
+        const refusal = modelRefusal(record.models, model, 'inspect');
+        if (refusal) throw new Error(refusal);
+      }
+      event.system.push({ type: 'text', text: PREPARATION_INSTRUCTIONS });
+      return true;
+    },
     prepareSummary: summaries.prepare,
     // Starts a summary turn for an update on request, in any delivery mode.
     summarize: (id: string): Promise<InboxState> =>
@@ -505,7 +571,13 @@ export async function setupStatus(
     // Whether the session's current step is Forgekeeper's, whose tools and
     // permissions are refused. Tools come from a model response, so a session
     // whose latest request was Forgekeeper's counts too.
-    summarizing: summaries.summarizing,
+    // A preparation turn isn't one, even when a queued summary is tracked and
+    // a compaction removed the turn's prompt. When that can't be told, the
+    // summary's restrictions apply.
+    summarizing: async (sessionID: string): Promise<boolean> =>
+      (await automationHost.preparationFor(sessionID).then(Boolean, () => false))
+        ? false
+        : summaries.summarizing(sessionID),
     // Reads a linked note for the summary of the session's latest model
     // request, and returns a receipt. The note's text goes to that summary's
     // record, and from there only into its next request, so it never enters
@@ -600,6 +672,17 @@ export async function setupStatus(
       }
       void discovery.refresh();
     },
+    // Records how a session's turn ended for its running review attempts.
+    executionEnded(sessionID: string, outcome: 'succeeded' | 'failed', at: number) {
+      if (closing) return;
+      void tracked(
+        automation
+          .turnEnded(sessionID, outcome, at)
+          .catch((error) =>
+            reportOnce('review-automation', 'Could not coordinate review automation', error),
+          ),
+      );
+    },
     // Sessions without targets follow the checked-out branch.
     async branchChanged() {
       for (const key of service.keys()) {
@@ -617,6 +700,7 @@ export async function setupStatus(
     // so the replacement instance may send it again.
     async dispose() {
       closing = true;
+      automationController.abort();
       subscriptions.dispose();
       for (const timer of feedbackEvents.values()) clearTimeout(timer);
       feedbackEvents.clear();
@@ -626,6 +710,8 @@ export async function setupStatus(
       clearInterval(notificationTimer);
       discovery.stop();
       await Promise.all([service.dispose(DRAIN_TIME), drain(deliveries, DRAIN_TIME)]);
+      await drain(new Set(automation.tasks()), DRAIN_TIME);
+      automationHost.close();
       closed = true;
       await writes;
     },

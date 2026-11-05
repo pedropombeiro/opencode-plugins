@@ -39,6 +39,65 @@ describe('feedback inbox', () => {
     expect(feedbackFooter(paused, 'other')).toBeUndefined();
   });
 
+  test('selects automation only after persistence and suppresses summary delivery', async () => {
+    let stored: InboxState | undefined;
+    const steps: string[] = [];
+    const inbox = createFeedbackInbox({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+        steps.push('stored');
+      },
+      changed: () => {},
+      select: async (item) => {
+        expect(stored?.items.some((entry) => entry.id === item.id)).toBe(true);
+        steps.push('automation');
+        return true;
+      },
+      notify: async () => {
+        steps.push('summary');
+      },
+    });
+    await recordAndDeliver(inbox, {
+      id: 'one',
+      sessionID: 's',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: 'Feedback',
+      links: [],
+      at: 1,
+      delivery: 'summary',
+    });
+    expect(steps).toEqual(['stored', 'automation']);
+  });
+
+  test('selects automation with inbox-only delivery and does not select while paused', async () => {
+    let stored: InboxState | undefined;
+    let selections = 0;
+    const inbox = createFeedbackInbox({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      changed: () => {},
+      select: async () => {
+        selections++;
+        return true;
+      },
+    });
+    await recordAndDeliver(inbox, {
+      id: 'one',
+      sessionID: 's',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: 'Feedback',
+      links: [],
+      at: 1,
+    });
+    expect(selections).toBe(1);
+    await inbox.pause(true);
+    await inbox.notifyPending();
+    expect(selections).toBe(1);
+  });
+
   test('offers comment links before the PR/MR, labeled by their anchor', () => {
     const url = 'https://gitlab.com/g/p/-/merge_requests/1';
     const options = linkOptions({

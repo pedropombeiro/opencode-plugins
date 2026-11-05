@@ -53,7 +53,7 @@ export interface StoreOptions {
   // Receives errors thrown by `onLoad`, which would otherwise be swallowed.
   onLoadError?: (error: unknown) => void;
   // Lookups that match poll at `activeInterval` instead of `interval`.
-  active?: (lookup: Lookup | undefined) => boolean;
+  active?: (lookup: Lookup | undefined, key: string) => boolean;
   activeInterval?: number;
   now?: () => number;
   setTimer?: (callback: () => void, delay: number) => unknown;
@@ -115,16 +115,16 @@ export function createStatusStore(options: StoreOptions) {
     value.timer = undefined;
   };
 
-  const baseInterval = (value: Entry) =>
-    options.active?.(value.snapshot.lookup) ? (options.activeInterval ?? interval) : interval;
-  const pollDelay = (value: Entry) =>
-    Math.min(baseInterval(value) * 2 ** value.failures, maxBackoff);
+  const baseInterval = (key: string, value: Entry) =>
+    options.active?.(value.snapshot.lookup, key) ? (options.activeInterval ?? interval) : interval;
+  const pollDelay = (key: string, value: Entry) =>
+    Math.min(baseInterval(key, value) * 2 ** value.failures, maxBackoff);
 
   // The last load, successful or not, so failed lookups also wait out their backoff.
   const lastAttempt = (value: Entry) =>
     Math.max(value.snapshot.fetchedAt ?? -Infinity, value.snapshot.error?.at ?? -Infinity);
 
-  const schedule = (key: string, value: Entry, delay = pollDelay(value)) => {
+  const schedule = (key: string, value: Entry, delay = pollDelay(key, value)) => {
     cancelTimer(value);
     if (disposed || value.refs === 0) return;
     const lookup = value.snapshot.lookup;
@@ -215,7 +215,7 @@ export function createStatusStore(options: StoreOptions) {
       // Showing a session again, such as on a tab switch, reuses cached data
       // until the next poll would have been due, and resumes that poll schedule.
       if (value.refs === 1 && !value.inflight) {
-        const remaining = lastAttempt(value) + pollDelay(value) - now();
+        const remaining = lastAttempt(value) + pollDelay(key, value) - now();
         if (value.stale || remaining <= 0) void refresh(key);
         else schedule(key, value, remaining);
       }
