@@ -571,7 +571,8 @@ it, so nothing that happened before Forgekeeper first saw the target is announce
 persist across restarts, so a change that happened while OpenCode wasn't running is
 announced at the next lookup. A
 mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
-push, keeps the last known state. A conflict that ends and starts again is a new update.
+push to it or to its target branch, keeps the last known state. A conflict that ends and
+starts again is a new update.
 Sessions are watched the same way as for review feedback, without visiting their tabs.
 
 Failed jobs don't wait for the pipeline to finish, which can take much longer than the

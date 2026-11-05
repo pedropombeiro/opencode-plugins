@@ -317,6 +317,15 @@ describe('GitLabForge.findByNumber', () => {
       conflicts: true,
       conflictsKnown: true,
     });
+    // After its target branch moves, a conflicting MR reads `conflicts: false`
+    // until GitLab rechecks it, though its detailed status still says CONFLICT.
+    expect(
+      await read({
+        mergeStatusEnum: 'CANNOT_BE_MERGED_RECHECK',
+        detailedMergeStatus: 'CONFLICT',
+        conflicts: false,
+      }),
+    ).toMatchObject({ conflicts: true, conflictsKnown: false });
     // A deleted fork has no source project.
     expect((await read({ sourceProject: null }))?.sourceProject).toBeUndefined();
   });

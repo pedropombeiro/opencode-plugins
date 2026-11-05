@@ -34,6 +34,7 @@ interface MergeRequestNode {
   conflicts: boolean;
   approved: boolean | null;
   approvedBy: { nodes: Array<{ id: string; bot?: boolean }> } | null;
+  mergeStatusEnum?: string | null;
   detailedMergeStatus: string | null;
   diffHeadSha: string | null;
   updatedAt: string | null;
@@ -89,9 +90,13 @@ type FailedJobPage = NonNullable<NonNullable<MergeRequestNode['headPipeline']>['
 
 // Merge statuses during which GitLab hasn't settled whether the MR conflicts.
 const RECHECKING = new Set(['CHECKING', 'UNCHECKED', 'PREPARING']);
+// GitLab's `conflicts` is true only in the CANNOT_BE_MERGED merge status. When
+// the target branch moves, a conflicting MR goes to this one, where `conflicts`
+// reads false and the detailed status still says CONFLICT, until a recheck.
+const CONFLICT_RECHECK = 'CANNOT_BE_MERGED_RECHECK';
 
 const MERGE_REQUEST_FIELDS = `
-  iid title webUrl state draft conflicts approved detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
+  iid title webUrl state draft conflicts approved mergeStatusEnum detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
   approvedBy(first: 100) { nodes { id bot } }
   sourceProject { fullPath }
   targetProject { fullPath }
@@ -442,10 +447,14 @@ export class GitLabForge implements Forge {
       url: node.webUrl,
       state: node.state.toLowerCase(),
       draft: node.draft,
-      conflicts: node.conflicts,
+      // A conflict that GitLab rechecks still counts, but as unknown, so the
+      // last known state stands until the recheck settles it.
+      conflicts: node.conflicts || node.mergeStatusEnum === CONFLICT_RECHECK,
       // While GitLab recalculates mergeability, `conflicts` may describe an
       // older commit.
-      conflictsKnown: !RECHECKING.has(node.detailedMergeStatus ?? ''),
+      conflictsKnown:
+        node.mergeStatusEnum !== CONFLICT_RECHECK &&
+        !RECHECKING.has(node.detailedMergeStatus ?? ''),
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
