@@ -272,6 +272,22 @@ describe('searchSessions', () => {
     expect(ids({ until: day(1) })).toEqual(['ses_a']);
   });
 
+  test('filters title matches by the session date', () => {
+    const { path } = fixture(
+      [
+        { id: 'ses_old', title: 'needle', created: T0 },
+        { id: 'ses_new', title: 'needle', created: T0 + 2 * DAY },
+      ],
+      [],
+    );
+    const day = (offset: number) => iso(T0 + offset * DAY).slice(0, 10);
+    const ids = (options: Omit<SearchOptions, 'database' | 'query'>) =>
+      run(path, { query: 'needle', ...options }).sessions.map((session) => session.id);
+    expect(ids({ since: day(1) })).toEqual(['ses_new']);
+    expect(ids({ until: day(1) })).toEqual(['ses_old']);
+    expect(ids({ since: day(1), titles: true })).toEqual(['ses_new']);
+  });
+
   test('excludes the current session and compares projects', () => {
     const { path } = fixture(
       [

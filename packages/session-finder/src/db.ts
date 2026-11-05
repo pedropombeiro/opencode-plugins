@@ -357,6 +357,8 @@ function search(
   }
 
   for (const session of sessions.values()) {
+    if (filters.since !== undefined && session.created_ms < filters.since) continue;
+    if (filters.until !== undefined && session.created_ms >= filters.until) continue;
     for (const term of terms) {
       if (session.title.toLowerCase().includes(term.toLowerCase())) {
         add(session.id, {
