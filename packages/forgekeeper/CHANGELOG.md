@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.4.1...opencode-forgekeeper-3.0.0) (2026-11-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forgekeeper:** Review notifications now go to the inbox by default. `resumeSession` and the former option names are removed. Configure `delivery.reviews` and `delivery.lifecycle` as `"passive"` or `"summary"` to post updates to sessions. See the [README's upgrade guide](README.md#upgrade-from-forgekeeper-2x) for the option mapping.
+
+### Features
+
+* **forgekeeper:** monitor reviews and MR changes in a feedback inbox ([#123](https://github.com/pedropombeiro/opencode-plugins/issues/123)) ([a3adebb](https://github.com/pedropombeiro/opencode-plugins/commit/a3adebbd42396cab15f89bfaf31691467a0ed19f))
+
 ## [2.4.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.4.0...opencode-forgekeeper-2.4.1) (2026-11-05)
 
 
