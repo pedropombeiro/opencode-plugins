@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.4.1...opencode-forgekeeper-3.0.0) (2026-11-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forgekeeper:** Review notifications no longer resume the session or ask the agent to address feedback. They go to the inbox only, by default. The `resumeSession` option is removed, and saved values have no effect. Set `reviewFeedbackDelivery` to `"passive"` or `"summary"` to post updates to the session.
+
+### Features
+
+* **forgekeeper:** monitor reviews and MR changes in a feedback inbox ([#123](https://github.com/pedropombeiro/opencode-plugins/issues/123)) ([a3adebb](https://github.com/pedropombeiro/opencode-plugins/commit/a3adebbd42396cab15f89bfaf31691467a0ed19f))
+
 ## [2.4.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.4.0...opencode-forgekeeper-2.4.1) (2026-11-05)
 
 
