@@ -516,6 +516,11 @@ export default {
           description: [
             context.data.session.get(item.sessionID)?.title ?? item.sessionID,
             feedbackTime(item),
+            ...(item.automation
+              ? [
+                  `${item.automation.state}${item.automation.reason ? `: ${item.automation.reason}` : ''}`,
+                ]
+              : []),
             ...(item.details?.length
               ? [
                   `${item.details[0]}${item.details.length > 1 ? ` (+${item.details.length - 1})` : ''}`,
@@ -525,6 +530,40 @@ export default {
           value: item.id,
         })),
         actions: [
+          {
+            bind: 'ctrl+a',
+            title: 'Act on feedback',
+            onTrigger: async (id) => {
+              try {
+                await rpc.actOnFeedback({ id }, { location: { directory } });
+                context.ui.dialog.clear();
+                void showFeedback();
+              } catch (error) {
+                context.ui.toast.show({ message: String(error), variant: 'error' });
+              }
+            },
+          },
+          {
+            bind: 'ctrl+t',
+            title: 'Retry feedback work',
+            onTrigger: async (id) => {
+              const confirmed = await context.ui.dialog.select({
+                title: 'Retry may repeat earlier changes. Inspect the session first.',
+                options: [
+                  { title: 'Cancel', value: 'cancel' },
+                  { title: 'Retry feedback work', value: 'retry' },
+                ],
+              });
+              if (confirmed !== 'retry') return;
+              try {
+                await rpc.actOnFeedback({ id, retry: true }, { location: { directory } });
+                context.ui.dialog.clear();
+                void showFeedback();
+              } catch (error) {
+                context.ui.toast.show({ message: String(error), variant: 'error' });
+              }
+            },
+          },
           {
             bind: 'ctrl+d',
             title: 'Acknowledge',
