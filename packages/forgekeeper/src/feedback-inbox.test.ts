@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createFeedbackInbox,
+  feedbackFooter,
   feedbackLinks,
   feedbackTime,
   formatTime,
@@ -15,6 +16,29 @@ const recordAndDeliver = async (
 ) => (await inbox.record(...args)).delivery;
 
 describe('feedback inbox', () => {
+  test("a session's footer counts only its own updates", () => {
+    const item = (id: string, sessionID: string): FeedbackItem => ({
+      id,
+      sessionID,
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      title: 'Review',
+      links: [],
+      at: 1,
+    });
+    const state: InboxState = {
+      items: [item('a', 'one'), item('b', 'one'), item('c', 'two')],
+      paused: false,
+    };
+    expect(feedbackFooter(state, 'one')).toBe('2 review updates');
+    expect(feedbackFooter(state, 'two')).toBe('1 review update');
+    expect(feedbackFooter(state, 'other')).toBeUndefined();
+    // A new session has no ID until its first message.
+    expect(feedbackFooter(state, undefined)).toBeUndefined();
+    const paused = { ...state, paused: true };
+    expect(feedbackFooter(paused, 'one')).toBe('2 review updates (paused)');
+    expect(feedbackFooter(paused, 'other')).toBeUndefined();
+  });
+
   test('offers comment links before the PR/MR, labeled by their anchor', () => {
     const url = 'https://gitlab.com/g/p/-/merge_requests/1';
     const options = linkOptions({

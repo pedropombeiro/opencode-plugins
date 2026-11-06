@@ -49,6 +49,18 @@ export const feedbackTime = (item: Pick<FeedbackItem, 'postedAt' | 'at'>) =>
     ? `Latest comment: ${formatTime(item.postedAt)}`
     : `Detected: ${formatTime(item.at)}`;
 
+// What a session's footer says about the inbox, or undefined to show nothing.
+// It counts only the session's own updates, so a new session, which has no ID
+// until its first message, shows nothing.
+export function feedbackFooter(
+  state: InboxState,
+  sessionID: string | undefined,
+): string | undefined {
+  const count = state.items.filter((item) => item.sessionID === sessionID).length;
+  if (!sessionID || count === 0) return undefined;
+  return `${count} review update${count === 1 ? '' : 's'}${state.paused ? ' (paused)' : ''}`;
+}
+
 export function feedbackLinks(item: Pick<FeedbackItem, 'url' | 'links'>): string[] {
   return [...new Set([item.url, ...item.links])].filter((url) => {
     try {
