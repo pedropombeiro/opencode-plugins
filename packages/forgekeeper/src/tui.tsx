@@ -23,7 +23,7 @@ import { showNotice } from './notice';
 import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
 import { createStatusClient, samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
-import { feedbackTime, linkOptions, type InboxState } from './feedback-inbox';
+import { feedbackFooter, feedbackTime, linkOptions, type InboxState } from './feedback-inbox';
 import type { Repository } from './git';
 import type { Lookup } from './store';
 
@@ -654,24 +654,17 @@ export default {
     });
 
     context.ui.slot({
-      append: 'home.footer.status',
-      render: () => (
-        <Show when={feedback().items.length > 0 || feedback().paused}>
-          <text fg={context.theme.text.muted} onMouseUp={() => void showFeedback()}>
-            {feedback().items.length} review updates{feedback().paused ? ' (paused)' : ''}
-          </text>
-        </Show>
-      ),
-    });
-    context.ui.slot({
       append: 'prompt.footer.status',
-      render: () => (
-        <Show when={feedback().items.length > 0 || feedback().paused}>
-          <text fg={context.theme.text.muted} onMouseUp={() => void showFeedback()}>
-            {feedback().items.length} review updates{feedback().paused ? ' (paused)' : ''}
-          </text>
-        </Show>
-      ),
+      render: (input) => {
+        const text = () => feedbackFooter(feedback(), input.sessionID);
+        return (
+          <Show when={text()}>
+            <text fg={context.theme.text.muted} onMouseUp={() => void showFeedback()}>
+              {text()}
+            </text>
+          </Show>
+        );
+      },
     });
 
     const stops = [

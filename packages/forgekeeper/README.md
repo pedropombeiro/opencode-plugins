@@ -411,9 +411,11 @@ the current checkout. Select an update to open its PR/MR or comment links, press
 to acknowledge it, press Ctrl+R to summarize it in its session in any delivery mode, or
 press Ctrl+S to pause or resume review monitoring. Acknowledgement
 only dismisses the local update; it does not reply to or resolve a remote discussion.
-The home and session footers show the pending count, and connected CLIs in the checkout
-show a toast even when the session's tab has never been visited. With session tabs on,
-those CLIs also reopen the session's tab, without leaving the session you're in.
+A session's footer shows how many of its own updates are pending. The home screen, where
+new sessions start, shows no count. `/forge-feedback` lists the whole checkout's updates,
+and connected CLIs in the checkout show a toast even when the session's tab has never been
+visited. With session tabs on, those CLIs also reopen the session's tab, without leaving
+the session you're in.
 
 An update leaves the inbox when you acknowledge it, or when it no longer needs attention:
 
