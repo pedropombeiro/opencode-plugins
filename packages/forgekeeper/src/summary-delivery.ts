@@ -1,10 +1,18 @@
 import type { Plugin } from '@opencode/plugin';
 import { createHash } from 'node:crypto';
 import type { Exec } from './exec';
-import { feedbackLinks, feedbackTime, type FeedbackItem, type InboxState } from './feedback-inbox';
+import {
+  feedbackLinks,
+  feedbackTime,
+  isLifecycle,
+  isReviewRequest,
+  type FeedbackItem,
+  type InboxState,
+} from './feedback-inbox';
 import type { CommentDetail, FeedbackTarget, LinkedNote } from './forge';
 import { parseUrl, traitsOf } from './forges';
 import { createKeyedQueue } from './keyed-queue';
+import { REPLIES_UNAVAILABLE } from './review-request-watch';
 import {
   addLinked,
   findingsText,
@@ -21,6 +29,8 @@ import {
   messageTag,
   NOTICE_KIND,
   noticeText,
+  REQUEST_SYSTEM,
+  requestText,
   taggedInput,
   superseded,
   restrictRequest,
@@ -48,7 +58,7 @@ interface SummaryRecord {
   at: number;
   request?: string;
   linked?: LinkedState;
-  system?: 'lifecycle';
+  system?: 'lifecycle' | 'review-request';
 }
 
 export interface SummaryDependencies {
@@ -165,20 +175,37 @@ export function createSummaryDelivery(
       (reader &&
         ((target: FeedbackTarget, ids: string[]) => reader(deps.exec, directory, target, ids)));
     const commentIDs = commentIDsOf(item);
-    const event = item.kind;
-    const review = mode === 'summary' && !event && request && details && commentIDs.length;
-    const summary = (mode === 'summary' && !!event) || !!review;
+    const event = isLifecycle(item) ? item.kind : undefined;
+    const asked = isReviewRequest(item);
+    const review =
+      mode === 'summary' && !event && !asked && request && details && commentIDs.length;
+    const summary = (mode === 'summary' && (!!event || asked)) || !!review;
     if (requested && !summary)
       throw new Error('This update has no comments that can be summarized');
     const messageID = `${summary ? SUMMARY_PREFIX : MESSAGE_PREFIX}${hash}`;
     const described = `${item.title} (${feedbackTime(item)})`;
-    const read = review ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2)) : [];
+    // A review request's replies are context, so it's summarized without
+    // them when they can't be read.
+    const replies = summary && asked ? commentIDs.slice(0, MAX_FINDINGS) : [];
+    const read = review
+      ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2))
+      : replies.length && request && details
+        ? await details(request, replies).catch(() => [])
+        : [];
     const findings =
       summary && event
         ? lifecycleText({ ...item, kind: event }, feedbackTime(item))
-        : review
-          ? findingsText(described, item.url, read)
-          : noticeText(described, links);
+        : summary && asked
+          ? requestText(
+              described,
+              item.url,
+              read,
+              replies.length,
+              !!item.details?.includes(REPLIES_UNAVAILABLE),
+            )
+          : review
+            ? findingsText(described, item.url, read)
+            : noticeText(described, links);
     const allowed = review
       ? (
           traitsOf(request).feedback?.linkedNotes?.(
@@ -202,6 +229,7 @@ export function createSummaryDelivery(
         ? { request: item.url, linked: { links: allowed, calls: 0, notes: [] } }
         : {}),
       ...(event ? { system: 'lifecycle' as const } : {}),
+      ...(asked && summary ? { system: 'review-request' as const } : {}),
     };
     await ctx.storage.set(summaryKey(item.sessionID, messageID), record as never);
     track(item.sessionID, messageID);
@@ -213,16 +241,20 @@ export function createSummaryDelivery(
         item.title,
         feedbackTime(item),
         ...links,
-        ...(event && item.details?.length ? [item.details.join('\n')] : []),
+        ...((event || asked) && item.details?.length ? [item.details.join('\n')] : []),
         summary
           ? event
             ? 'Forgekeeper summarizes this merge request change without tools.'
-            : allowed.length
-              ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
-              : 'Forgekeeper summarizes this review feedback without tools.'
+            : asked
+              ? 'Forgekeeper summarizes this review request without tools.'
+              : allowed.length
+                ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
+                : 'Forgekeeper summarizes this review feedback without tools.'
           : event
             ? 'Merge request update only. No action requested.'
-            : 'Review update only. No action requested.',
+            : asked
+              ? 'Review request only. No action requested.'
+              : 'Review update only. No action requested.',
         messageTag(messageID),
       ].join('\n\n'),
       description: item.title,
@@ -296,7 +328,9 @@ export function createSummaryDelivery(
         event,
         record !== 'failed' && record.system === 'lifecycle'
           ? LIFECYCLE_SYSTEM
-          : summarySystem(!!tool, !!linked),
+          : record !== 'failed' && record.system === 'review-request'
+            ? REQUEST_SYSTEM
+            : summarySystem(!!tool, !!linked),
         record === 'failed'
           ? UNAVAILABLE_TEXT
           : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n'),

@@ -9,7 +9,22 @@ import {
   type ReviewHistory,
 } from './automated-review-watch';
 import type { FeedbackItem } from './feedback-inbox';
-import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
+import type {
+  FeedbackSnapshot,
+  ReviewComment,
+  ReviewRequest,
+  ReviewRequestEvent,
+  ReviewRequestHistory,
+} from './forge';
+import {
+  authorReplies,
+  createReviewRequestWatcher,
+  isRequestRecordExpired,
+  repliesLine,
+  REPLIES_UNAVAILABLE,
+  type RequestRecord,
+  type RequestWindow,
+} from './review-request-watch';
 import { parseUrl, reference, traits, traitsOf } from './forges';
 import {
   applyFeedback,
@@ -27,6 +42,8 @@ const pendingPrefix = (sessionID: string) => `${PENDING_PREFIX}${encodeURICompon
 const pendingKey = (sessionID: string, url: string) =>
   `${pendingPrefix(sessionID)}${encodeURIComponent(url)}`;
 const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
+const REQUEST_PREFIX = 'status/review-requests/';
+const requestRecordKey = (key: string) => `${REQUEST_PREFIX}${encodeURIComponent(key)}`;
 const reviewHistoryKey = (sessionID: string, url: string) =>
   `status/reviews/${encodeURIComponent(sessionID)}/${encodeURIComponent(url)}`;
 
@@ -34,6 +51,7 @@ interface ReviewHost {
   current: (sessionID: string, requests: ReviewRequest[]) => Promise<ReviewRequest[]>;
   isTarget: (sessionID: string, url: string) => boolean;
   fetch: (request: ReviewRequest) => Promise<FeedbackSnapshot | undefined>;
+  reviewRequests: (request: ReviewRequest) => Promise<ReviewRequestHistory | undefined>;
   interval: (request: ReviewRequest) => number;
   accepted: (url: string, snapshot: FeedbackSnapshot | undefined) => void;
   scan: (prefix: string) => Promise<{ key: string; value: unknown }[]>;
@@ -233,19 +251,93 @@ export function createReviewMonitoring(
       : undefined;
   const publishedFeedback = settings.watch.automatedReviews ? feedbackWatcher(true) : undefined;
 
+  // Tells the session about a request for the viewer's review, with the
+  // author's replies since the previous request as context. The replies are
+  // optional, so a failure to read them doesn't hold the request back.
+  async function sendRequest(
+    sessionID: string,
+    request: ReviewRequest,
+    event: ReviewRequestEvent,
+    window: RequestWindow,
+  ) {
+    const [current] = await host.current(sessionID, [request]);
+    if (!current) return;
+    const fetched = await host.fetch(current).catch(() => undefined);
+    const snapshot = fetched?.complete ? fetched : undefined;
+    // The session may have stopped targeting the PR/MR, or been archived or
+    // moved, while the replies were read.
+    if (!(await host.current(sessionID, [current])).length) return;
+    const viewerID = window.viewerID ?? snapshot?.viewerID;
+    const authors = new Set(
+      [current.authorID, event.requester?.id].filter((id): id is string => !!id && id !== viewerID),
+    );
+    const context = authorReplies(snapshot, authors, window.after, viewerID);
+    const again = !!window.previous;
+    const who = event.requester ? `@${event.requester.username}` : 'Someone';
+    const title = `${who} requested your review${again ? ' again' : ''} on ${reference(current)}`;
+    const line = snapshot ? repliesLine(context, again) : REPLIES_UNAVAILABLE;
+    await host.record({
+      id: JSON.stringify([sessionID, current.url, 'review-request', event.id]),
+      kind: 'review-request',
+      sessionID,
+      url: current.url,
+      title,
+      links: [event.url, ...context.replies.map((comment) => comment.url)],
+      // Always set, so the request's own note isn't taken for a reply.
+      commentIDs: context.replies.map((comment) => comment.id),
+      postedAt: event.at,
+      ...(line ? { details: [line] } : {}),
+      ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
+      at: now(),
+    });
+    host.notice({
+      sessionID,
+      title,
+      message: 'New review request in /forge-feedback.',
+      variant: 'info',
+    });
+  }
+
+  const requests = settings.watch.reviewRequests
+    ? createReviewRequestWatcher({
+        record: async (key) =>
+          (await storage.get(requestRecordKey(key))) as RequestRecord | undefined,
+        persist: (key, record) =>
+          host.write(() => storage.set(requestRecordKey(key), record as never)),
+        fetch: (_sessionID, request) => host.reviewRequests(request),
+        current: (sessionID, request) => host.isTarget(sessionID, request.url),
+        send: sendRequest,
+        onFetchError: (error) => host.error(error),
+        onSendError: (error, sessionID) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          host.notice({
+            sessionID,
+            message: `Could not tell the session about a review request: ${reason}. Retrying in 10 minutes.`,
+            variant: 'error',
+          });
+        },
+        now,
+      })
+    : undefined;
+  const asksForReviews = (request: ReviewRequest) =>
+    !!requests && !!traitsOf(request).feedback?.reviewRequests;
+
   return {
     automated,
     feedback:
-      human || publishedFeedback
+      human || publishedFeedback || requests
         ? {
             watches: (request: ReviewRequest) =>
-              !!human || !!traitsOf(request).automatedReview?.publishedFeedback,
+              !!human ||
+              !!traitsOf(request).automatedReview?.publishedFeedback ||
+              asksForReviews(request),
             async check(sessionID: string, request: ReviewRequest) {
               await Promise.all([
                 human?.check(sessionID, request),
                 traitsOf(request).automatedReview?.publishedFeedback
                   ? publishedFeedback?.check(sessionID, request)
                   : undefined,
+                asksForReviews(request) ? requests?.check(sessionID, request) : undefined,
               ]);
             },
           }
@@ -253,12 +345,19 @@ export function createReviewMonitoring(
     invalidate(sessionID: string, request: ReviewRequest) {
       human?.invalidate(sessionID, request);
       publishedFeedback?.invalidate(sessionID, request);
+      requests?.invalidate(sessionID, request);
     },
-    forget: (sessionID: string) => automated?.forget(sessionID),
+    forget: (sessionID: string) => {
+      automated?.forget(sessionID);
+      requests?.forget(sessionID);
+    },
     async prune() {
       const at = now();
       for (const { key, value } of await host.scan(FEEDBACK_PREFIX)) {
         if (isExpired(value as FeedbackRecord, at)) await storage.remove(key);
+      }
+      for (const { key, value } of await host.scan(REQUEST_PREFIX)) {
+        if (isRequestRecordExpired(value as RequestRecord, at)) await storage.remove(key);
       }
     },
   };

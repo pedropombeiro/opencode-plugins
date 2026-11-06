@@ -13,7 +13,7 @@ interface NoteNode {
   system: boolean;
   position?: { newPath: string | null } | null;
   duoCreatedSession?: { id: string; status: string; workflowDefinition: string | null } | null;
-  discussion: { resolved: boolean } | null;
+  discussion: { id?: string; resolved: boolean } | null;
   author: { id: string; username: string; bot: boolean } | null;
 }
 
@@ -43,7 +43,7 @@ export const COMMENTS_QUERY = query<{
         nodes {
           id url createdAt updatedAt lastEditedAt system
           position { newPath }
-          discussion { resolved }
+          discussion { id resolved }
           author { id username bot }
         }
       }
@@ -83,6 +83,7 @@ export function toComment(node: NoteNode): ReviewComment | undefined {
     bot: node.author.bot,
     authorID: node.author.id,
     username: node.author.username,
+    ...(node.discussion?.id ? { discussionID: node.discussion.id } : {}),
     ...(node.author.bot && node.author.username.toLowerCase() === 'gitlabduo'
       ? {
           automated: {
@@ -161,6 +162,7 @@ interface DetailNode {
   } | null;
   author: { id?: string; username: string } | null;
   discussion?: {
+    resolved?: boolean;
     notes?: {
       nodes: Array<{ id: string; body: string; author: { username: string } | null }>;
     } | null;
@@ -212,7 +214,7 @@ export async function fetchDetails(
         (id, index) =>
           `n${index}: note(id: "gid://gitlab/Note/${id}") { id url body author { id username }
             position { diffRefs { baseSha headSha } newPath newLine oldPath oldLine }
-            discussion { notes(first: ${THREAD_NOTES}) { nodes { id body author { username } } } } }`,
+            discussion { resolved notes(first: ${THREAD_NOTES}) { nodes { id body author { username } } } } }`,
       )
       .join('\n');
     const data = await graphql(
@@ -242,6 +244,9 @@ export async function fetchDetails(
       username: node.author?.username ?? '',
       ...(node.author?.id ? { authorID: node.author.id } : {}),
       body: node.body,
+      ...(typeof node.discussion?.resolved === 'boolean'
+        ? { resolved: node.discussion.resolved }
+        : {}),
       ...(at ? { path: at.path, line: at.line } : {}),
       ...(text && at ? { code: { path: at.path, text } } : {}),
       ...(replies.length ? { replies } : {}),
