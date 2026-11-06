@@ -80,8 +80,12 @@ describe('toComment', () => {
     expect(toComment(node('5', { id: 'gid://gitlab/Note/abc' }))).toBeUndefined();
   });
 
-  test("reads the thread's resolution", () => {
+  test("reads the thread's resolution and ID", () => {
     expect(toComment(node('5', { discussion: { resolved: true } }))?.resolved).toBe(true);
+    expect(
+      toComment(node('5', { discussion: { id: 'gid://gitlab/Discussion/d1', resolved: false } }))
+        ?.discussionID,
+    ).toBe('gid://gitlab/Discussion/d1');
   });
 });
 
@@ -209,6 +213,7 @@ describe('fetchDetails', () => {
           oldLine: null,
         },
         discussion: {
+          resolved: true,
           notes: {
             nodes: [
               reply,
@@ -250,10 +255,12 @@ describe('fetchDetails', () => {
     expect(details).toHaveLength(32);
     expect(details[0]).toMatchObject({
       id: '2',
+      resolved: true,
       path: 'a.rb',
       line: 15,
       replies: [{ username: 'bob', body: 'Why?' }],
     });
+    expect(details[1].resolved).toBeUndefined();
     expect(details[0].code?.text.split('\n')).toHaveLength(21);
     expect(details[0].code?.text).toContain('>15: line 15');
     expect(details[0].code?.text).toContain(' 5: line 5');

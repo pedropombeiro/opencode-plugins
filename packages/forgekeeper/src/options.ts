@@ -27,6 +27,8 @@ export interface Watch {
   reviewBots: boolean;
   // Conflicts, failed jobs, and merges of the session's PRs/MRs.
   lifecycle: boolean;
+  // Requests for your review, including repeated ones.
+  reviewRequests: boolean;
 }
 
 // What an update does besides entering the inbox. `passive` queues a session
@@ -82,6 +84,7 @@ const DEFAULT_WATCH: Watch = {
   automatedReviews: true,
   reviewBots: true,
   lifecycle: true,
+  reviewRequests: true,
 };
 const DEFAULT_DELIVERY: Delivery = { reviews: 'inbox', lifecycle: 'inbox' };
 const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
@@ -361,6 +364,7 @@ export function statusOptions(options: unknown): StatusOptions {
       automatedReviews: watched('automatedReviews'),
       reviewBots: watched('reviewBots'),
       lifecycle: watched('lifecycle'),
+      reviewRequests: watched('reviewRequests'),
     },
     reviewBots: read.reviewBots(source.reviewBots),
     delivery: { reviews: delivered('reviews'), lifecycle: delivered('lifecycle') },

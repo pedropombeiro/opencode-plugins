@@ -558,6 +558,54 @@ The baseline also records comment IDs at its timestamp, so a new comment posted 
 second can still be announced. Baselines stored by older plugin versions retain their
 timestamp-only behavior until a new baseline is created.
 
+## Review requests
+
+When someone asks you to review one of a session's explicit MR targets, the request goes to
+the `/forge-feedback` inbox. This includes asking you again while you stay a reviewer, such
+as after the author pushes fixes. The update names who asked, when, and the MR, such as
+`@alice requested your review again on !45`. A request is informational: it doesn't start
+a review, act on feedback, or trigger [review automation](#prepare-fixes-from-review-feedback).
+
+Forgekeeper reads requests from GitLab's activity notes, such as "requested review from
+@you", so every request is a distinct event with a stable ID:
+
+- Requests for other reviewers, and requests you made yourself, such as adding yourself as
+  a reviewer, aren't announced.
+- The first read of an MR records a baseline, so requests made before monitoring started
+  never replay. A request made while OpenCode wasn't running is announced at the next read.
+- Announced request IDs are stored per session and MR, so polling, subscription reconnects,
+  and reloads announce each request once. Requests that piled up make one update, about the
+  newest.
+- Every session that targets the MR gets its own update. Sessions in the same checkout
+  share the history read.
+
+Forgekeeper reads the newest 1,000 activity notes, with your MR status checks and on live
+comment events. GitHub PRs don't get review request updates yet.
+
+### Author replies
+
+A request often follows the author's replies to your threads, such as a fix summary, and
+the author may resolve each thread right away. Such replies don't count as review feedback,
+which skips resolved threads, so the request carries them as context instead:
+
+- Replies the MR's author, or whoever asked for the review, wrote since the previous
+  request for your review, or since monitoring started without one. Resolved threads count.
+- Replies in threads you took part in come first. The update links at most 10 replies,
+  after the request itself, and its description counts them, such as "The author replied 2
+  times since the previous request: 1 in threads you took part in, 1 in resolved threads."
+- The inbox stores the replies' IDs and links, never their text. A failure to read them
+  doesn't hold the request back, and the update says the replies couldn't be read.
+
+Unlike review feedback, a request doesn't leave the inbox once its replies' threads are
+resolved. It stays until you acknowledge it, the MR merges or closes, or the session stops
+targeting it.
+
+Requests follow `delivery.reviews`. A summary turn reads the linked replies, with their
+threads' earlier comments and code as for [summary turns](#summary-turns), and marks each
+reply's thread as resolved or not. It treats the replies as untrusted, has no tools, and
+doesn't review the code. Set `watch.reviewRequests` to `false` to stop review request
+updates.
+
 ## Merge request updates
 
 Forgekeeper also watches each session's explicit PR/MR targets for three changes:
@@ -858,6 +906,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                           |
 | `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                    |
 | `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                   |
+| `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                       |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).              |
 | `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).          |
 | `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                                        |
@@ -992,7 +1041,9 @@ If you set options for `opencode-forgekeeper` 2.x, also see
   after failures, and discards lookups that started before a change. `src/format.ts`
   renders the footer and dialog.
 - `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
-  agent.
+  agent. `src/review-request-watch.ts` finds new requests for your review and selects the
+  author's replies for context. `src/adapters/gitlab/review-requests.ts` reads them from
+  GitLab's activity notes.
 - `src/review-monitoring.ts` configures the review watchers, stores their state, and records
   review updates in the inbox.
 - `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and

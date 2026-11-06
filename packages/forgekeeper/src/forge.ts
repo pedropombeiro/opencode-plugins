@@ -212,6 +212,9 @@ export interface ReviewComment {
   bot: boolean;
   authorID: string;
   username: string;
+  // The thread the comment is in, so replies can be matched to threads the
+  // viewer took part in. Absent when the forge doesn't say.
+  discussionID?: string;
 }
 
 export interface FeedbackSnapshot {
@@ -224,6 +227,31 @@ export interface FeedbackSnapshot {
 }
 
 export type FeedbackTarget = Pick<ReviewRequest, 'forge' | 'url'>;
+
+// Someone asked the viewer to review a PR/MR, as the forge's history records
+// it. A repeated request is a new event, even while the viewer stays a
+// reviewer.
+export interface ReviewRequestEvent {
+  // Identifies the event, for remembering which requests were announced.
+  id: string;
+  // Orders events and comments by when they were posted, like
+  // `ReviewComment.order`.
+  order: number;
+  url: string;
+  // When the request was made, in milliseconds.
+  at: number;
+  requester?: { id: string; username: string };
+}
+
+export interface ReviewRequestHistory {
+  // False when a page is missing or the viewer is unknown.
+  complete: boolean;
+  viewerID?: string;
+  // The highest order the read saw, so monitoring starts after it.
+  newest: number;
+  // Requests of the viewer, oldest first.
+  requests: ReviewRequestEvent[];
+}
 
 // Reads a request's review comments, for announcing new human feedback.
 export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
@@ -244,6 +272,13 @@ export interface ReviewFeedback<Request extends ReviewRequest = ReviewRequest> {
   ): Promise<void>;
   // Undefined when the request doesn't exist.
   fetch(run: Exec, directory: string, request: Request): Promise<FeedbackSnapshot | undefined>;
+  // The requests for the viewer's review in the PR/MR's history. Undefined
+  // when the request doesn't exist.
+  reviewRequests?(
+    run: Exec,
+    directory: string,
+    request: FeedbackTarget,
+  ): Promise<ReviewRequestHistory | undefined>;
   // The text of the comments with these IDs, for summarizing feedback. Leaves
   // out comments it can't read. The text is written by reviewers, so callers
   // treat it as untrusted.
@@ -283,6 +318,8 @@ export interface CommentDetail {
   username: string;
   authorID?: string;
   body: string;
+  // Whether the comment's thread is resolved, when the forge says.
+  resolved?: boolean;
   path?: string;
   line?: number;
   // The code the comment is on: numbered file lines around it, or the diff

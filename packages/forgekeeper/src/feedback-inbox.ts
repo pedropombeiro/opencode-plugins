@@ -11,8 +11,10 @@ export interface FeedbackItem {
   // When the newest of those comments was last written, in milliseconds.
   postedAt?: number;
   // Lifecycle events: the PR/MR started to conflict, its pipeline got a
-  // failed job, or it merged. Absent for review feedback.
-  kind?: 'conflict' | 'merged' | 'ci-failed';
+  // failed job, or it merged. `review-request`: someone asked for the
+  // viewer's review, and `commentIDs` are author replies for context. Absent
+  // for review feedback.
+  kind?: 'conflict' | 'merged' | 'ci-failed' | 'review-request';
   // The pipeline a `ci-failed` update is about, so it clears once another
   // pipeline replaces it or it no longer fails.
   pipeline?: string;
@@ -46,12 +48,22 @@ export const formatTime = (at: number) =>
     timeZoneName: 'short',
   }).format(at);
 
+// Whether the update is about a change to the PR/MR itself, which follows
+// the lifecycle delivery mode.
+export const isLifecycle = (item: Pick<FeedbackItem, 'kind'>) =>
+  item.kind === 'conflict' || item.kind === 'merged' || item.kind === 'ci-failed';
+
+export const isReviewRequest = (item: Pick<FeedbackItem, 'kind'>) => item.kind === 'review-request';
+
 // When an update's feedback happened: its newest comment, or for updates
-// without comments, such as Copilot reviews, when Forgekeeper recorded it.
-export const feedbackTime = (item: Pick<FeedbackItem, 'postedAt' | 'at'>) =>
-  item.postedAt !== undefined
-    ? `Latest comment: ${formatTime(item.postedAt)}`
-    : `Detected: ${formatTime(item.at)}`;
+// without comments, such as Copilot reviews, when Forgekeeper recorded it. A
+// review request shows when it was made.
+export const feedbackTime = (item: Pick<FeedbackItem, 'postedAt' | 'at' | 'kind'>) =>
+  isReviewRequest(item)
+    ? `Requested: ${formatTime(item.postedAt ?? item.at)}`
+    : item.postedAt !== undefined
+      ? `Latest comment: ${formatTime(item.postedAt)}`
+      : `Detected: ${formatTime(item.at)}`;
 
 // What a session's footer says about the inbox, or undefined to show nothing.
 // It counts only the session's own updates, so a new session, which has no ID

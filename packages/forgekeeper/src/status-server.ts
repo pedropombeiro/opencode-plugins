@@ -2,7 +2,12 @@ import type { Plugin } from '@opencode/plugin';
 import { automatedReview } from './automated-review-watch';
 import { createRequestCache } from './request-cache';
 import { createFeedbackSubscriptions, RECONCILE_INTERVAL } from './feedback-subscriptions';
-import { createFeedbackInbox, type FeedbackItem, type InboxState } from './feedback-inbox';
+import {
+  createFeedbackInbox,
+  isLifecycle,
+  type FeedbackItem,
+  type InboxState,
+} from './feedback-inbox';
 import { closedFeedback, resolvedFeedback, settledFeedback } from './feedback-cleanup';
 import { createSummaryDelivery, type SummaryDependencies } from './summary-delivery';
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
@@ -16,9 +21,10 @@ import {
 } from './review-automation';
 import { createAutomationHost, type AutomationDependencies } from './review-automation-host';
 import { PREPARATION_INSTRUCTIONS } from './review-preparation';
-import type { FeedbackSnapshot, ReviewRequest } from './forge';
+import type { FeedbackSnapshot, ReviewRequest, ReviewRequestHistory } from './forge';
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
+import { REQUEST_INTERVAL } from './review-request-watch';
 import { locate } from './locate';
 import type { StatusOptions } from './options';
 import type { Notice } from './rpc';
@@ -37,6 +43,12 @@ export interface StatusDependencies extends SummaryDependencies, AutomationDepen
   forges: ForgeCatalog;
   // Reads a PR/MR's review comments. Defaults to its forge's feedback reader.
   feedback?: (request: ReviewRequest, directory: string) => Promise<FeedbackSnapshot | undefined>;
+  // Reads the requests for your review in a PR/MR's history. Defaults to its
+  // forge's reader.
+  reviewRequests?: (
+    request: ReviewRequest,
+    directory: string,
+  ) => Promise<ReviewRequestHistory | undefined>;
 }
 
 // How long cleanup waits for running review checks before giving up. They
@@ -105,6 +117,11 @@ export async function setupStatus(
     classify: (snapshot) =>
       !snapshot ? 'unavailable' : snapshot.complete ? 'usable' : 'incomplete',
   });
+  const requestCache = createRequestCache<ReviewRequestHistory | undefined>({
+    now: deps.now,
+    ttl: (history) => (history?.complete ? REQUEST_INTERVAL : 0),
+    classify: (history) => (!history ? 'unavailable' : history.complete ? 'usable' : 'incomplete'),
+  });
   // Cleanup runs in two steps. `closing` is set first: no new fetch or
   // delivery starts, so a check that finishes later, such as a feedback
   // fetch, can't tell a session anything. Deliveries that already started
@@ -137,7 +154,8 @@ export async function setupStatus(
       : {
           notify: async (item) => void (await summaries.deliver(item)),
           enabled: (item) =>
-            (item.kind ? settings.delivery.lifecycle : settings.delivery.reviews) !== 'inbox',
+            (isLifecycle(item) ? settings.delivery.lifecycle : settings.delivery.reviews) !==
+            'inbox',
         }),
   });
 
@@ -346,6 +364,10 @@ export async function setupStatus(
     deps.feedback ??
     (async (request: ReviewRequest, cwd: string) =>
       traitsOf(request).feedback?.fetch(deps.exec, cwd, request));
+  const readRequests =
+    deps.reviewRequests ??
+    (async (request: ReviewRequest, cwd: string) =>
+      traitsOf(request).feedback?.reviewRequests?.(deps.exec, cwd, request));
 
   const feedbackEvents = new Map<string, ReturnType<typeof setTimeout>>();
   const subscriptions = createFeedbackSubscriptions({
@@ -359,7 +381,10 @@ export async function setupStatus(
           feedbackEvents.delete(url);
           if (closing) return;
           const ref = parseUrl(url);
-          if (ref) feedbackCache.invalidate(requestKey(ref));
+          if (ref) {
+            feedbackCache.invalidate(requestKey(ref));
+            requestCache.invalidate(requestKey(ref));
+          }
           service.checkFeedback(url, reviews.invalidate);
         }, 1000),
       );
@@ -378,6 +403,13 @@ export async function setupStatus(
         return ref
           ? feedbackCache.get(requestKey(ref), () => readFeedback(request, directory))
           : readFeedback(request, directory);
+      },
+      reviewRequests: async (request) => {
+        if (closing) return undefined;
+        const ref = parseUrl(request.url);
+        return ref
+          ? requestCache.get(requestKey(ref), () => readRequests(request, directory))
+          : readRequests(request, directory);
       },
       interval: (request) =>
         subscriptions.connected(request.url) ? RECONCILE_INTERVAL : FETCH_INTERVAL,
@@ -635,6 +667,7 @@ export async function setupStatus(
         if (!ref) continue;
         statusCache.invalidate(requestKey(ref));
         feedbackCache.invalidate(requestKey(ref));
+        requestCache.invalidate(requestKey(ref));
       }
       return service.refresh(sessionID);
     },
@@ -664,6 +697,7 @@ export async function setupStatus(
     turnEnded() {
       statusCache.clear();
       feedbackCache.clear();
+      requestCache.clear();
       for (const key of service.keys()) {
         const lookup = service.get(key).lookup;
         if (lookup?.kind === 'found')
@@ -706,6 +740,7 @@ export async function setupStatus(
       feedbackEvents.clear();
       statusCache.clear();
       feedbackCache.clear();
+      requestCache.clear();
       clearInterval(discoveryTimer);
       clearInterval(notificationTimer);
       discovery.stop();
