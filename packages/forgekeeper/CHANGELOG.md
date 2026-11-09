@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.0.0...opencode-forgekeeper-3.0.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **forgekeeper:** avoid an extra first request and cache miss in new sessions ([#132](https://github.com/pedropombeiro/opencode-plugins/issues/132)) ([997aaba](https://github.com/pedropombeiro/opencode-plugins/commit/997aabada7faa26a1db8f6e50a2d204a244b801a))
+* **forgekeeper:** count only a session's own updates in its footer ([#129](https://github.com/pedropombeiro/opencode-plugins/issues/129)) ([61f27e7](https://github.com/pedropombeiro/opencode-plugins/commit/61f27e7dda7077d8f26178e8cc581844b29065fd))
+
 ## [3.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-2.4.1...opencode-forgekeeper-3.0.0) (2026-11-05)
 
 
