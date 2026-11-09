@@ -344,18 +344,17 @@ export async function setupServer(
     }
   });
 
-  async function writeInstructions(sessionID: string): Promise<string[]> {
-    if (closing) return [];
+  async function writeInstructions(sessionID: string): Promise<void> {
+    if (closing) return;
     const state = await stateFor(sessionID);
     const value = `Current session target: ${describeTargets(state.targets)}.`;
     const entries = await ctx.session.instructions.entry.list({ sessionID });
-    if (entries.some((entry) => entry.key === TARGET_KEY && entry.value === value)) return [];
-    if (closing) return [];
+    if (entries.some((entry) => entry.key === TARGET_KEY && entry.value === value)) return;
+    if (closing) return;
     await ctx.session.instructions.entry.put({ sessionID, key: TARGET_KEY, value });
-    return [value];
   }
 
-  function instruct(sessionID: string): Promise<string[]> {
+  function instruct(sessionID: string): Promise<void> {
     return instructing.run(sessionID, () => writeInstructions(sessionID));
   }
 
@@ -392,15 +391,31 @@ export async function setupServer(
     } else orphaned.delete(event.sessionID);
     if (event.tools) delete event.tools[LINKED_NOTE_TOOL];
     try {
-      const session = await ctx.session.get({ sessionID: event.sessionID });
-      if (session.parentID || session.location.directory !== ctx.location.directory) return;
+      if (!(await ownsSession(event.sessionID))) return;
       event.system.push({ type: 'text', text: GUIDANCE.join('\n') });
-      const written = await instruct(event.sessionID);
-      if (written.length) event.system.push({ type: 'text', text: written.join('\n') });
+      await instruct(event.sessionID);
     } catch {
       // The request goes ahead without the guidance.
     }
   });
+
+  // OpenCode reads instruction entries before a step's request reaches the
+  // context hook, and announces later changes in another step. Writing the
+  // entry when a prompt is admitted makes it part of the first step's
+  // instructions. The context hook still writes it for sessions without one,
+  // such as those that started with a synthetic message.
+  await ctx.session.hook('prompt', async (event) => {
+    try {
+      if (await ownsSession(event.sessionID)) await instruct(event.sessionID);
+    } catch {
+      // The prompt is admitted anyway, and the context hook writes the entry.
+    }
+  });
+
+  async function ownsSession(sessionID: string): Promise<boolean> {
+    const session = await ctx.session.get({ sessionID });
+    return !session.parentID && session.location.directory === ctx.location.directory;
+  }
 
   // Backstops for a summary turn whose request still reached tools, such as
   // after a hook ordering change. Each refuses the action outright. The
