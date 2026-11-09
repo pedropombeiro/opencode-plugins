@@ -7,7 +7,7 @@ Session titles include the references you're working on. The prompt footer shows
 attention, and optional summaries bring review feedback back into the relevant conversation.
 A session can track several PRs/MRs across repositories.
 
-![OpenCode session list with issue and MR references, and a footer summarizing four MRs with one conflict and two merged.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/multiple-mr-status.png)
+![OpenCode session list with issue and MR references, and a footer summarizing four MRs with one conflict and two merged.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/session-environment.png)
 
 ## Installation
 
