@@ -202,6 +202,8 @@ With several PR/MR targets, the footer shows counts instead of one PR/MR's statu
 `5 MRs · 🤖 2 reviewing · 1 CI failed · 1 conflict · 1 merged`. Clicking it opens the
 status dialog, which lists each PR/MR.
 
+![Compact Forgekeeper footer tracking four MRs, with one conflict and two merged.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/conflict-status-footer.png)
+
 The footer shows checks or the pipeline, unresolved threads, conflicts, approval, and a
 running automated review, from GitLab Duo or GitHub Copilot. GitHub also shows a requested
 change. Unknown mergeability stays unknown rather than appearing conflict-free.

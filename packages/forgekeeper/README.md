@@ -52,6 +52,10 @@ The footer shows CI, unresolved threads, conflicts, approvals, and running autom
 Several targets show aggregate counts. Click the PR/MR number or pipeline to open it in the
 browser, or another indicator to open the status dialog.
 
+For example, this footer tracks four MRs, with one conflict and two already merged:
+
+![Compact Forgekeeper footer reading four MRs, one conflict, and two merged.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/conflict-status-footer.png)
+
 ![Forgekeeper status dialog within an OpenCode session, showing pipeline results, unresolved threads, conflicts, and review requirements.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/review-and-ci-status.png)
 
 | Command | Action |
