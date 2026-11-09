@@ -5,6 +5,8 @@ It prefixes the session title with their references, shows the PR/MR status in t
 footer, and surfaces new review feedback in a persistent inbox. It supports GitLab and GitHub. The status
 and review notifications are optional; see [Keep only session titles](#keep-only-session-titles).
 
+![Forgekeeper footer tracking four merge requests, with one conflict and two merged.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/multiple-mr-status.png)
+
 Requires OpenCode 2.2 or later. It replaces
 [`opencode-forge-session-title`](https://www.npmjs.com/package/opencode-forge-session-title); see
 [Migrating from opencode-forge-session-title](#migrating-from-opencode-forge-session-title).
@@ -198,6 +200,10 @@ status dialog, which lists each PR/MR.
 The footer shows checks or the pipeline, unresolved threads, conflicts, approval, and a
 running automated review, from GitLab Duo or GitHub Copilot. GitHub also shows a requested
 change. Unknown mergeability stays unknown rather than appearing conflict-free.
+
+The status dialog separates pipeline results, unresolved threads, and review requirements:
+
+![Forgekeeper status dialog showing a passed pipeline, one unresolved thread, no conflicts, and approval requirements not yet satisfied despite a GitLab Duo approval.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/review-and-ci-status.png)
 
 The footer shows `approved` only when GitLab reports that approval requirements are met,
 at least one person approved, and every human reviewer approved. Bot approvals, such as

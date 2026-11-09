@@ -13,6 +13,8 @@ The cache indicator and `/cache` details show where you stand. Tips and expiry m
 decide what to do next, such as compacting while the cache is warm or using a cheaper model when
 the context must be written again.
 
+![Cache Coach expiry notice estimating the cost of rewriting a large context and suggesting cheaper compaction.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/cache-expiry-notice.png)
+
 Requires OpenCode 2.2 or later.
 
 ## Installation
@@ -36,6 +38,8 @@ messages out of model requests.
 ## Cache indicator
 
 The prompt footer shows the cache state of the session on screen:
+
+![Animated Cache Coach footer showing the cache countdown and state indicators.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/cache-countdown.gif)
 
 | Footer                                 | Meaning                                                                  |
 | -------------------------------------- | ------------------------------------------------------------------------ |
@@ -80,6 +84,11 @@ it's the last thing you see when you come back:
 A compaction after the cache expires writes the whole context again, so compacting on a cheaper
 model saves most of that cost. Set `compactionModel` to name the model. Without it, the message
 only says that a cheaper model costs less.
+
+This recording shows the expiry advice and footer as the user switches to GPT-6.1 Sol and
+starts compaction. The plugin suggests the change; it doesn't switch models or compact automatically.
+
+![Animated expiry notice and footer during a user-initiated model switch and compaction.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/compaction.gif)
 
 The message appears once each time the session goes idle, in top-level sessions whose last request
 the TUI saw finish, and only when the next message writes at least `minTokens` and costs at least
