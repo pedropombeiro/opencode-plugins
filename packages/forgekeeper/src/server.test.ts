@@ -221,6 +221,7 @@ async function harness(options: Options = {}) {
   };
   const entryWrites: string[] = [];
   let hook!: Hook;
+  let promptHook: (event: { sessionID: string }) => Promise<void> = async () => {};
   let renames = 0;
   let handlers: Record<string, (input: unknown) => Promise<unknown>> = {};
   const emitted: Array<{ name: string; data: unknown }> = [];
@@ -340,8 +341,9 @@ async function harness(options: Options = {}) {
         sessions.get(sessionID)!.title = title;
         renames++;
       },
-      hook: async (_name: string, callback: Hook) => {
-        hook = callback;
+      hook: async (name: string, callback: Hook) => {
+        if (name === 'prompt') promptHook = callback as unknown as typeof promptHook;
+        else hook = callback;
       },
       synthetic: async (input: (typeof passive)[number]) => {
         if (input.resume !== false) {
@@ -483,6 +485,8 @@ async function harness(options: Options = {}) {
     toolOptions: () => tool.options,
     entries: (sessionID = 'one') => Object.fromEntries(entriesOf(sessionID)),
     entryWrites,
+    // A user prompt's admission, before any step of its turn.
+    admit: (sessionID = 'one') => promptHook({ sessionID }),
     context: async (sessionID = 'one') => {
       const event = { sessionID, system: [] as { type: string; text: string }[] };
       await hook(event);
@@ -579,9 +583,62 @@ describe('session targets', () => {
     await app.cleanup();
   });
 
+  test('writes the instruction entry when the first prompt is admitted', async () => {
+    const app = await harness();
+    await app.admit();
+    expect(app.entries()['forgekeeper-session-target']).toBe(
+      'Current session target: checked-out branch (automatic).',
+    );
+    expect(app.entryWrites).toEqual(['put forgekeeper-session-target']);
+    const first = await app.system();
+    expect(first).toContain('call set_session_target');
+    expect(first).not.toContain('Current session target');
+    expect(await app.system()).toBe(first);
+    await app.admit();
+    expect(app.entryWrites).toEqual(['put forgekeeper-session-target']);
+    await app.cleanup();
+  });
+
+  test('skips the prompt-time entry for child sessions and other directories', async () => {
+    const sessions = defaultSessions();
+    sessions.set('child', {
+      title: 'Child',
+      location: { directory: '/repo' },
+      parentID: 'one',
+    });
+    sessions.set('elsewhere', {
+      title: 'Elsewhere',
+      location: { directory: '/other' },
+      parentID: undefined,
+    });
+    const app = await harness({ sessions });
+    await app.admit('child');
+    await app.admit('elsewhere');
+    expect(app.entryWrites).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('admits the prompt when the session read fails', async () => {
+    const app = await harness();
+    app.failNextRead(new Error('unavailable'));
+    await app.admit();
+    expect(app.entryWrites).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('writes a missing entry from the context hook without adding system text', async () => {
+    const app = await harness();
+    const first = await app.system();
+    expect(app.entries()['forgekeeper-session-target']).toContain('checked-out branch (automatic)');
+    expect(first).not.toContain('Current session target');
+    expect(await app.system()).toBe(first);
+    expect(app.entryWrites).toEqual(['put forgekeeper-session-target']);
+    await app.cleanup();
+  });
+
   test('updates the instruction entry without changing the steady-state system prompt', async () => {
     const app = await harness();
-    expect(await app.system()).toContain('Current session target: checked-out branch (automatic).');
+    await app.admit();
     const stable = await app.system();
     expect(stable).not.toContain('Current session target');
     await app.set({ target: mr });
