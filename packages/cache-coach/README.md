@@ -1,12 +1,17 @@
 # opencode-cache-coach
 
-An [OpenCode](https://opencode.ai) plugin that shows whether a session's prompt cache is still warm,
-and suggests a cheaper approach when a costly pattern shows up.
+An [OpenCode](https://opencode.ai) plugin that coaches you on making better use of your tokens.
+It connects token usage and estimated costs to practical choices: when to compact, which model to
+compact on, and how to avoid carrying oversized tool results through the rest of a session.
 
-Providers charge much less for the part of a request that matches the previous one. On Anthropic
-models, a cache read costs 0.1× the input price or less, and a cache write costs 1.25×. The cache
-expires a few minutes after the last request, and it belongs to one model. This plugin makes both
-visible, so you can avoid paying to write a large context again.
+Your conversation and tool results become input to later requests. Prompt caching makes reusing
+that context cheaper, but switching models, letting the cache expire, or crossing a higher-price
+context threshold can make the next request more expensive. Cache Coach explains these trade-offs
+as you work, with cost comparisons and suggestions based on your session and model prices.
+
+The cache indicator and `/cache` details show where you stand. Tips and expiry messages help you
+decide what to do next, such as compacting while the cache is warm or using a cheaper model when
+the context must be written again.
 
 Requires OpenCode 2.2 or later.
 
