@@ -18,6 +18,9 @@
     },
     "packages/session-finder": {
       "component": "opencode-session-finder"
+    },
+    "packages/cache-coach": {
+      "component": "opencode-cache-coach"
     }
   },
   "include-v-in-tag": false,

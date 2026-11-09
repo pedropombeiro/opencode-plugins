@@ -16,6 +16,7 @@ The plugins target OpenCode 2. The last OpenCode 1 versions live on the
 | [atuin-history](packages/atuin-history/) | Records agent shell commands in Atuin shell history | [![npm](https://img.shields.io/npm/v/opencode-atuin-history)](https://www.npmjs.com/package/opencode-atuin-history) |
 | [tmux-indicator](packages/tmux-indicator/) | Sets a tmux window option when the agent is waiting for input | [![npm](https://img.shields.io/npm/v/opencode-tmux-indicator)](https://www.npmjs.com/package/opencode-tmux-indicator) |
 | [session-finder](packages/session-finder/) | Searches previous sessions from the command palette, and gives the agent tools to search and open them | [![npm](https://img.shields.io/npm/v/opencode-session-finder)](https://www.npmjs.com/package/opencode-session-finder) |
+| [cache-coach](packages/cache-coach/) | Shows whether the prompt cache is still warm, and suggests cheaper habits when a costly pattern shows up | [![npm](https://img.shields.io/npm/v/opencode-cache-coach)](https://www.npmjs.com/package/opencode-cache-coach) |
 
 ## Development
 

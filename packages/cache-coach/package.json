@@ -1,0 +1,43 @@
+{
+  "name": "opencode-cache-coach",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that shows whether a session's prompt cache is still warm and suggests cheaper habits when a costly pattern shows up",
+  "author": {
+    "name": "Pedro Pombeiro",
+    "email": "pedropombeiro@users.noreply.github.com"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "default": "./dist/index.js"
+    },
+    "./tui": {
+      "default": "./dist/tui.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
+    "directory": "packages/cache-coach"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "prompt-cache",
+    "cost",
+    "tokens"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode/plugin": "^2.2.0",
+    "@opentui/core": ">=0.7.0",
+    "@opentui/solid": ">=0.7.0",
+    "solid-js": ">=1.9.0"
+  }
+}
