@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.2.0...opencode-cache-coach-0.2.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **plugins:** make published documentation links accessible on npm ([2a8f2c2](https://github.com/pedropombeiro/opencode-plugins/commit/2a8f2c24cd15f4d849ef96e473cce87a2f57d19d))
+
 ## [0.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.1.0...opencode-cache-coach-0.2.0) (2026-11-09)
 
 
