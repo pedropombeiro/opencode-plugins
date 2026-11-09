@@ -7,7 +7,10 @@ It prefixes the session title with their references, shows the PR/MR status in t
 footer, and surfaces new review feedback in a persistent inbox. It supports GitLab and GitHub. The status
 and review notifications are optional; see [Keep only session titles](#keep-only-session-titles).
 
-![OpenCode session environment with issue and MR references, and a footer tracking four merge requests.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/session-environment.png)
+![OpenCode session environment with issue and MR references, a review notification, and a footer tracking four merge requests.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/session-review-notification.png)
+
+This capture shows optional session delivery. Current releases default to the feedback inbox;
+notification wording has changed since this capture.
 
 Requires OpenCode 2.2 or later. It replaces
 [`opencode-forge-session-title`](https://www.npmjs.com/package/opencode-forge-session-title); see
