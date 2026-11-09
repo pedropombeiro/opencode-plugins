@@ -15,7 +15,8 @@ the context must be written again.
 
 ![Cache Coach expiry notice estimating the cost of rewriting a large context and suggesting cheaper compaction.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/cache-expiry-notice.png)
 
-Requires OpenCode 2.2 or later.
+Requires OpenCode 2.2 or later. See the [source repository](https://github.com/pedropombeiro/opencode-plugins/tree/main/packages/cache-coach)
+for local builds and the [MIT license](https://github.com/pedropombeiro/opencode-plugins/blob/main/LICENSE).
 
 ## Installation
 

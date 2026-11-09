@@ -43,8 +43,8 @@ Without an explicit target, naming follows the checked-out branch and its open P
 agent to return to branch-based naming when you want that behavior again. Default branches
 get no branch-based prefix. Child sessions aren't renamed.
 
-See the reference for [target rules](docs/reference.md#session-targets) and
-[branch-based naming](docs/reference.md#branch-based-naming).
+See the reference for [target rules](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#session-targets) and
+[branch-based naming](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#branch-based-naming).
 
 ## PR/MR status
 
@@ -107,9 +107,9 @@ and clear when acknowledged or no longer relevant; merge updates remain until ac
 Forgekeeper reports failed jobs but doesn't retry or fix them. For tracked stacks, it can
 also propose retargeting dependents after a parent merges, but never retargets or rebases itself.
 
-See [review detection and summaries](docs/reference.md#review-notifications),
-[monitoring eligibility](docs/reference.md#which-sessions-the-server-watches), and
-[stacked PRs/MRs](docs/reference.md#stacked-prsmrs) for details.
+See [review detection and summaries](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications),
+[monitoring eligibility](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#which-sessions-the-server-watches), and
+[stacked PRs/MRs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#stacked-prsmrs) for details.
 
 ## Options
 
@@ -131,8 +131,8 @@ Only specify values you want to change. The terminal part has no separate option
 | `delivery.lifecycle` | `"inbox"` | Conflict, job-failure, and merge delivery. |
 | `lifecycleExecution.parentMerged` | `{ "mode": "notify" }` | Optionally prepare retarget proposals for tracked dependents. |
 
-See the [configuration reference](docs/reference.md#options) for validation behavior and
-[review-bot configuration](docs/reference.md#review-notifications) for account matching.
+See the [configuration reference](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#options) for validation behavior and
+[review-bot configuration](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications) for account matching.
 
 ## Security and privacy
 
@@ -148,16 +148,16 @@ The inbox stores identifiers, links, and timestamps locally, not comment bodies 
 Summary records temporarily retain review text in plugin storage. This is not OS-level
 isolation, and the implementation has not received AppSec approval.
 
-See the [security boundary](docs/reference.md#monitoring-security-boundary) and
-[summary restrictions](docs/reference.md#summary-turns) for limits and retention details.
+See the [security boundary](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#monitoring-security-boundary) and
+[summary restrictions](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#summary-turns) for limits and retention details.
 
 ## Upgrading
 
 - **From 2.x:** option names changed, and feedback now defaults to the inbox rather than
-  resuming a session. Follow the [2.x upgrade guide](docs/reference.md#upgrade-from-forgekeeper-2x).
+  resuming a session. Follow the [2.x upgrade guide](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#upgrade-from-forgekeeper-2x).
 - **From `opencode-forge-session-title` or Forgekeeper 1.x:** replace the package entry.
   Stored targets don't carry over. Follow the
-  [migration guide](docs/reference.md#migrating-from-opencode-forge-session-title).
+  [migration guide](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#migrating-from-opencode-forge-session-title).
 
 ## Development
 
@@ -170,9 +170,9 @@ mise run lint
 mise run build forgekeeper
 ```
 
-The reference includes the [RPC API](docs/reference.md#rpc) and
-[code layout](docs/reference.md#code-layout).
+The reference includes the [RPC API](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#rpc) and
+[code layout](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#code-layout).
 
 ## License
 
-[MIT](../../LICENSE)
+[MIT](https://github.com/pedropombeiro/opencode-plugins/blob/main/LICENSE)
