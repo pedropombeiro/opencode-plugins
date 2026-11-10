@@ -875,7 +875,10 @@ the batch with the reason, and keeps its normal delivery, when any of these chec
   commit to check out before a retry.
 
 Forgekeeper checks the pipeline and checkout again before the turn's first model request.
-Jobs that failed after the prompt was written don't stop the turn. The prompt's job list is
+A job that fails after the prompt is submitted, but before that request, still joins the
+batch: the request waits until no job has newly failed for four minutes, or the pipeline
+finishes, and the session shows as busy meanwhile. Jobs that failed after the prompt was
+written don't stop the turn. The prompt's job list is
 a snapshot, and it can be partial, such as past the first 10 failed jobs on GitLab, so the
 agent starts by listing the pipeline's current failed jobs.
 

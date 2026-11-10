@@ -7,6 +7,7 @@ import {
 } from './review-automation-host';
 import type { AutomationRecord } from './review-automation';
 import { createReviewClaims } from './review-claim';
+import { INVESTIGATION_QUIET_TIME } from './job-investigation';
 import { preparationMessageID } from './review-preparation';
 
 type Message = Awaited<ReturnType<Plugin.Context['session']['context']>>[number];
@@ -322,7 +323,15 @@ describe('failed-job checks', () => {
   const failure = { ...item, id: 'f1', kind: 'ci-failed' as const, pipeline: 'p1' };
   const review = { ...item, id: 'r1' };
 
-  function jobHost(overrides: { agent?: string; viewer?: string; checkout?: string } = {}) {
+  function jobHost(
+    overrides: {
+      agent?: string;
+      viewer?: string;
+      checkout?: string;
+      now?: () => number;
+      sleep?: (ms: number) => Promise<void>;
+    } = {},
+  ) {
     const request = {
       forge: 'gitlab',
       url,
@@ -353,6 +362,7 @@ describe('failed-job checks', () => {
         }),
       },
       viewerID: async () => overrides.viewer ?? 'author',
+      ...(overrides.now ? { now: overrides.now } : {}),
     } as unknown as AutomationDependencies;
     const ctx = {
       location: { directory: '/repo' },
@@ -377,14 +387,15 @@ describe('failed-job checks', () => {
         },
         deliverable: async () => true,
         readFeedback: async () => undefined,
-        scan: async () => [],
+        scan: async () => [{ key: 'sessions/one', value: { targets: [{ url }] } }],
         missingSession: () => false,
         redeliver: () => {},
         report: () => {},
         signal: new AbortController().signal,
+        ...(overrides.sleep ? { sleep: overrides.sleep } : {}),
       },
     );
-    return { host: automation.host, request, close: () => claims.close() };
+    return { host: automation.host, automation, claims, request, close: () => claims.close() };
   }
 
   test('automatic investigations cover your own PRs/MRs and ones you review', async () => {
@@ -420,6 +431,67 @@ describe('failed-job checks', () => {
       'A newer pipeline replaced the failing one',
     );
     expect(await f.host.pipelineDone({ ...failure, pipeline: 'p0' })).toBe(true);
+    f.close();
+  });
+
+  test('holds the first model request until a late failure goes quiet', async () => {
+    let clock = 1_000_000;
+    let replaced = false;
+    let f3At = 0;
+    const jobBatch = 'b'.repeat(64);
+    const running: AutomationRecord = {
+      batch: jobBatch,
+      item: { ...failure, at: clock - INVESTIGATION_QUIET_TIME },
+      messageID: preparationMessageID(jobBatch, 1),
+      state: 'running',
+      attempt: 1,
+      at: clock,
+      manual: true,
+    };
+    const f = jobHost({
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+        // A job fails while the request waits, replacing the update.
+        if (replaced) return;
+        replaced = true;
+        const stored = (await f.claims.records.read(jobBatch))!;
+        f3At = clock;
+        await f.claims.records.save(
+          { ...stored, item: { ...failure, id: 'f3', at: clock } },
+          stored,
+        );
+      },
+    });
+    // The update the prompt was written for is already quiet, but a later
+    // failure arrives just before the first model request.
+    await f.claims.records.save({ ...running, item: { ...failure, id: 'f2', at: clock } });
+    await f.automation.authorizeStart(running, 'gitlab/any');
+    const started = (await f.claims.records.read(jobBatch))!;
+    expect(started.item.id).toBe('f3');
+    expect(started.startedAt! - f3At).toBeGreaterThanOrEqual(INVESTIGATION_QUIET_TIME);
+    f.close();
+  });
+
+  test('a finished pipeline lets the first model request start right away', async () => {
+    let clock = 1_000_000;
+    const sleeps: number[] = [];
+    const jobBatch = 'c'.repeat(64);
+    const running: AutomationRecord = {
+      batch: jobBatch,
+      item: { ...failure, at: clock },
+      messageID: preparationMessageID(jobBatch, 1),
+      state: 'running',
+      attempt: 1,
+      at: clock,
+      manual: true,
+    };
+    const f = jobHost({ now: () => clock, sleep: async (ms) => void sleeps.push((clock += ms)) });
+    f.request.pipeline = { ...f.request.pipeline, status: 'FAILED' };
+    await f.claims.records.save(running);
+    await f.automation.authorizeStart(running, 'gitlab/any');
+    expect(sleeps).toEqual([]);
+    expect((await f.claims.records.read(jobBatch))!.startedAt).toBe(clock);
     f.close();
   });
 

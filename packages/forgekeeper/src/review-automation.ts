@@ -663,10 +663,12 @@ export function createReviewAutomation(host: AutomationHost) {
       return queue.run(batch, async () => {
         let existing = await host.read(batch);
         if (!existing && !allowed) return false;
-        // A later failure in a queued pipeline batch replaces its update,
-        // which restarts the batch's quiet time.
+        // A later failure in a pipeline batch whose turn hasn't reached its
+        // first model request replaces its update, which restarts the
+        // batch's quiet time. That request waits for it to pass.
         if (
-          existing?.state === 'queued' &&
+          (existing?.state === 'queued' ||
+            (existing?.state === 'running' && existing.startedAt === undefined)) &&
           isJobFailure(item) &&
           existing.item.sessionID === item.sessionID &&
           existing.item.id !== item.id &&

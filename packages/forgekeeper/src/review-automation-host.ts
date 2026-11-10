@@ -14,6 +14,7 @@ import {
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import {
   INVESTIGATION_INSTRUCTIONS,
+  INVESTIGATION_QUIET_TIME,
   investigatesJobs,
   investigationModels,
   isJobFailure,
@@ -26,6 +27,7 @@ import {
   Ineligible,
   modelKey,
   modelRefusal,
+  RECHECK_INTERVAL,
   restrictedReviewers,
   type ReviewFinding,
   type AutomationHost,
@@ -67,6 +69,8 @@ interface AutomationEnvironment {
   report: (error: unknown) => void;
   // Aborts when the plugin stops, which ends waits and sleeps.
   signal: AbortSignal;
+  // Replaces the timer-based sleep, for tests.
+  sleep?: (ms: number) => Promise<void>;
 }
 
 type Context = Plugin.Context;
@@ -424,18 +428,30 @@ export function createAutomationHost(
       throw new Error('Review automation was canceled before the coding turn');
   }
 
-  const sleep = (ms: number) =>
-    new Promise<void>((resolve) => {
-      if (env.signal.aborted) return resolve();
-      const finish = () => {
-        clearTimeout(timer);
-        env.signal.removeEventListener('abort', finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, ms);
-      timer.unref?.();
-      env.signal.addEventListener('abort', finish, { once: true });
-    });
+  async function pipelineDone(item: FeedbackItem) {
+    const request = await currentRequest(deps, directory, item.url);
+    return (
+      !request ||
+      request.state !== 'opened' ||
+      request.pipeline?.id !== item.pipeline ||
+      !pipelineRunning(request.pipeline)
+    );
+  }
+
+  const sleep =
+    env.sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        if (env.signal.aborted) return resolve();
+        const finish = () => {
+          clearTimeout(timer);
+          env.signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, ms);
+        timer.unref?.();
+        env.signal.addEventListener('abort', finish, { once: true });
+      }));
 
   const host: AutomationHost = {
     rules: env.rules,
@@ -470,15 +486,7 @@ export function createAutomationHost(
     exists,
     findings,
     failures: (item) => readFailures(deps, directory, item),
-    async pipelineDone(item) {
-      const request = await currentRequest(deps, directory, item.url);
-      return (
-        !request ||
-        request.state !== 'opened' ||
-        request.pipeline?.id !== item.pipeline ||
-        !pipelineRunning(request.pipeline)
-      );
-    },
+    pipelineDone,
     model,
     validate,
     redeliver: env.redeliver,
@@ -531,21 +539,40 @@ export function createAutomationHost(
         throw new Error('Review automation ownership changed before the coding turn');
       const ref = parseUrl(record.item.url);
       if (isJobFailure(record.item)) {
-        if (!ref || (!record.manual && !investigatesJobs(env.rules, ref)))
-          throw new Error('The failed-job automation rule is no longer enabled');
-        await validate(record.item, !record.manual);
-        // The pipeline must still fail. Jobs that failed after the prompt
-        // was written don't stop the turn, which reads the pipeline itself.
-        await readFailures(deps, directory, record.item);
-        const models = investigationModels(env.rules, ref);
-        const refusal = modelRefusal(models, requested, 'retry');
-        if (refusal) throw new Error(refusal);
-        await assertPending(record.item);
-        const started: AutomationRecord = { ...record, startedAt: now() };
-        if (models) started.models = models;
-        if (!(await save(started, record)))
-          throw new Error('Failed-job automation changed before the investigation turn');
-        return;
+        // A job that fails before this first request replaces the batch's
+        // update, so the request waits out the quiet time again, unless
+        // the pipeline finishes. A failure during the checks changes the
+        // stored attempt, so they run again with it.
+        for (;;) {
+          if (env.closing()) throw new Error('The plugin stopped');
+          const current = await read(record.batch);
+          if (
+            current?.state !== 'running' ||
+            current.messageID !== record.messageID ||
+            current.startedAt !== undefined
+          )
+            throw new Error('Failed-job automation changed before the investigation turn');
+          if (
+            now() - current.item.at < INVESTIGATION_QUIET_TIME &&
+            !(await pipelineDone(current.item).catch(() => false))
+          ) {
+            await sleep(RECHECK_INTERVAL);
+            continue;
+          }
+          if (!ref || (!current.manual && !investigatesJobs(env.rules, ref)))
+            throw new Error('The failed-job automation rule is no longer enabled');
+          await validate(current.item, !current.manual);
+          // The pipeline must still fail. Jobs that failed after the prompt
+          // was written don't stop the turn, which reads the pipeline itself.
+          await readFailures(deps, directory, current.item);
+          const models = investigationModels(env.rules, ref);
+          const refusal = modelRefusal(models, requested, 'retry');
+          if (refusal) throw new Error(refusal);
+          await assertPending(current.item);
+          const started: AutomationRecord = { ...current, startedAt: now() };
+          if (models) started.models = models;
+          if (await save(started, current)) return;
+        }
       }
       const reviewers = record.manual ? undefined : ruleReviewers(record.item.url);
       if (!ref || reviewers?.length === 0)

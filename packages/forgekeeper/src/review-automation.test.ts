@@ -1000,6 +1000,30 @@ describe('failed-job automation', () => {
     expect(starts).toEqual(['f2']);
   });
 
+  test('a failure after admission, before the first model request, joins the batch', async () => {
+    const f = jobFixture();
+    const first = failure('f1', 1_000);
+    let second: FeedbackItem | undefined;
+    // The prompt is submitted, so the attempt runs, but its first model
+    // request hasn't started.
+    f.host.submit = async () => {
+      second = failure('f2', f.at());
+      f.setItems([second]);
+      expect(await f.automation.selectAutomatic(second)).toBe(true);
+    };
+    f.setItems([first]);
+    await f.automation.selectAutomatic(first);
+    await f.settled();
+    const record = f.records.get(automationBatch(first))!;
+    expect(record.item.id).toBe('f2');
+    // Once the first request starts, later failures no longer join.
+    f.records.set(record.batch, { ...record, state: 'running', startedAt: f.at() });
+    const third = failure('f3', f.at());
+    f.setItems([third]);
+    expect(await f.automation.selectAutomatic(third)).toBe(true);
+    expect(f.records.get(record.batch)!.item.id).toBe('f2');
+  });
+
   test('a failure during admission waits again instead of skipping the batch', async () => {
     const f = jobFixture();
     const start = f.host.start;
