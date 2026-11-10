@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.1.0...opencode-forgekeeper-3.2.0) (2026-11-10)
+
+
+### Features
+
+* **forgekeeper:** investigate failed jobs in the owning session ([#141](https://github.com/pedropombeiro/opencode-plugins/issues/141)) ([909daf1](https://github.com/pedropombeiro/opencode-plugins/commit/909daf122c00f0adc719f71ecfaa45ac2551395e))
+
 ## [3.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.0.2...opencode-forgekeeper-3.1.0) (2026-11-10)
 
 
