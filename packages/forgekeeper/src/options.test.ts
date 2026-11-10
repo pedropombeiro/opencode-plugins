@@ -92,11 +92,51 @@ describe('statusOptions', () => {
       reviewers: ['GitLabDuo'],
       action: 'prepare',
     };
-    for (const rule of [untriggered, { ...untriggered, on: 'job-failed' }]) {
+    for (const rule of [untriggered, { ...untriggered, on: 'pipeline' }]) {
       const options = statusOptions({ automation: { rules: [rule] } });
       expect(options.automation.rules).toEqual([]);
       expect(options.problems).toEqual([
-        'automation.rules[0] must set "on" to "review", the only supported trigger; using no rule',
+        'automation.rules[0] must set "on" to "review" or "job-failed"; using no rule',
+      ]);
+    }
+    expect(statusOptions({ reviewAutomation: { rules: [] } }).problems).toEqual([
+      "reviewAutomation isn't a Forgekeeper option; ignoring it",
+    ]);
+  });
+
+  test('job-failed rules investigate exact projects, with an optional model list', () => {
+    const job = { on: 'job-failed', host: 'GitLab.com', projects: ['gitlab-org/gitlab'] };
+    const options = statusOptions({
+      automation: {
+        modelGroups: { coding: ['gitlab/strong'] },
+        rules: [job, { ...job, action: 'investigate', allowedModelGroup: 'coding' }],
+      },
+    });
+    expect(options.problems).toEqual([]);
+    expect(options.automation.rules).toEqual([
+      {
+        on: 'job-failed',
+        host: 'gitlab.com',
+        projects: ['gitlab-org/gitlab'],
+        action: 'investigate',
+      },
+      {
+        on: 'job-failed',
+        host: 'gitlab.com',
+        projects: ['gitlab-org/gitlab'],
+        action: 'investigate',
+        allowedModels: ['gitlab/strong'],
+      },
+    ]);
+    for (const invalid of [
+      { ...job, action: 'prepare' },
+      { ...job, reviewers: ['GitLabDuo'] },
+      { ...job, projects: ['gitlab-org/*'] },
+    ]) {
+      const ignored = statusOptions({ automation: { rules: [invalid] } });
+      expect(ignored.automation.rules).toEqual([]);
+      expect(ignored.problems).toEqual([
+        'automation.rules[0] needs an exact host and project list, and action "investigate"; using no rule',
       ]);
     }
     expect(statusOptions({ reviewAutomation: { rules: [] } }).problems).toEqual([

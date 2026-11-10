@@ -315,3 +315,138 @@ describe('verified review findings', () => {
     expect(await reviewers(undefined)).toEqual(['1:-', '2:-', '3:-']);
   });
 });
+
+describe('failed-job checks', () => {
+  const url = 'https://gitlab.com/group/project/-/merge_requests/1';
+  const head = 'c0ffee'.repeat(7);
+  const failure = { ...item, id: 'f1', kind: 'ci-failed' as const, pipeline: 'p1' };
+  const review = { ...item, id: 'r1' };
+
+  function jobHost(overrides: { agent?: string; viewer?: string; checkout?: string } = {}) {
+    const request = {
+      forge: 'gitlab',
+      url,
+      state: 'opened',
+      sourceProject: 'group/project',
+      sourceBranch: 'feature',
+      headSha: head,
+      authorID: 'author',
+      reviewerIDs: ['reviewer'],
+      pipeline: {
+        id: 'p1',
+        status: 'RUNNING',
+        label: 'running',
+        failedJobs: [{ id: 'j1', name: 'rspec', stage: 'test' }],
+        failedJobsComplete: true,
+      },
+    };
+    const deps = {
+      forges: {
+        forHost: () => ({ findByNumber: async () => structuredClone(request) }),
+        repository: async () => ({
+          kind: 'repository',
+          repository: {
+            source: { host: 'gitlab.com', path: 'group/project' },
+            sourceBranch: 'feature',
+            head: overrides.checkout ?? head,
+          },
+        }),
+      },
+      viewerID: async () => overrides.viewer ?? 'author',
+    } as unknown as AutomationDependencies;
+    const ctx = {
+      location: { directory: '/repo' },
+      session: {
+        get: async () => ({
+          agent: overrides.agent ?? 'build',
+          time: {},
+          location: { directory: '/repo' },
+        }),
+      },
+    } as unknown as Plugin.Context;
+    const claims = createReviewClaims(':memory:');
+    const automation = createAutomationHost(
+      ctx,
+      { ...deps, reviewClaims: claims },
+      {
+        rules: [],
+        closing: () => false,
+        inbox: {
+          list: async () => ({ items: [failure, review], paused: false }),
+          automation: async () => {},
+        },
+        deliverable: async () => true,
+        readFeedback: async () => undefined,
+        scan: async () => [],
+        missingSession: () => false,
+        redeliver: () => {},
+        report: () => {},
+        signal: new AbortController().signal,
+      },
+    );
+    return { host: automation.host, request, close: () => claims.close() };
+  }
+
+  test('automatic investigations cover your own PRs/MRs and ones you review', async () => {
+    for (const viewer of ['author', 'reviewer']) {
+      const f = jobHost({ viewer });
+      await f.host.validate(failure, true);
+      f.close();
+    }
+    const outsider = jobHost({ viewer: 'outsider' });
+    await expect(outsider.host.validate(failure, true)).rejects.toThrow(
+      'You neither wrote nor review this PR/MR',
+    );
+    // A manual run works on any PR/MR.
+    await outsider.host.validate(failure, false);
+    outsider.close();
+    // Review preparation still needs your own PR/MR.
+    const reviewer = jobHost({ viewer: 'reviewer' });
+    await expect(reviewer.host.validate(review, true)).rejects.toThrow('You did not write');
+    reviewer.close();
+  });
+
+  test('skips a checkout that is not at the failing pipeline commit, naming it', async () => {
+    const f = jobHost({ checkout: 'beef'.repeat(10) });
+    await expect(f.host.validate(failure, true)).rejects.toThrow(
+      `isn't at the head commit that the failing pipeline tested, so the failure may already be fixed. To investigate anyway, check out ${head.slice(0, 12)}`,
+    );
+    f.close();
+  });
+
+  test('skips a pipeline that a newer one replaced', async () => {
+    const f = jobHost();
+    await expect(f.host.validate({ ...failure, pipeline: 'p0' }, true)).rejects.toThrow(
+      'A newer pipeline replaced the failing one',
+    );
+    expect(await f.host.pipelineDone({ ...failure, pipeline: 'p0' })).toBe(true);
+    f.close();
+  });
+
+  test('lets a plan agent investigate, but not prepare fixes', async () => {
+    const f = jobHost({ agent: 'plan' });
+    await f.host.validate(failure, true);
+    await expect(f.host.validate(review, true)).rejects.toThrow('coding agent');
+    f.close();
+  });
+
+  test('reads the failed jobs while the pipeline runs', async () => {
+    const f = jobHost();
+    expect(await f.host.failures(failure)).toEqual({
+      pipeline: { id: 'p1' },
+      jobs: [{ id: 'j1', name: 'rspec', stage: 'test' }],
+      unlisted: false,
+      complete: true,
+    });
+    // A pipeline with more failed jobs than the forge listed says so.
+    f.request.pipeline = { ...f.request.pipeline, failedJobsComplete: false };
+    expect((await f.host.failures(failure)).complete).toBe(false);
+    f.request.pipeline = { ...f.request.pipeline, failedJobsComplete: true };
+    expect(await f.host.pipelineDone(failure)).toBe(false);
+    // A retried job that passed leaves nothing to investigate.
+    f.request.pipeline = { ...f.request.pipeline, status: 'SUCCESS', failedJobs: [] };
+    expect(await f.host.pipelineDone(failure)).toBe(true);
+    await expect(f.host.failures(failure)).rejects.toThrow('no longer has failed jobs');
+    f.close();
+  });
+});

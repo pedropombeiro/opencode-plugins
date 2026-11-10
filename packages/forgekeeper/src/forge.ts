@@ -67,6 +67,9 @@ interface Common {
   awaitingReviewers: string[];
   // False when more reviewers exist than the adapter fetches.
   reviewersComplete: boolean;
+  // The account IDs of the PR/MR's reviewers, requested or done, in the form
+  // the forge's `viewerID` reports. Absent when the forge doesn't say.
+  reviewerIDs?: string[];
   targetProject: string;
   targetBranch: string;
   // Where the PR/MR's commits come from. Absent when the forge doesn't say,
