@@ -449,3 +449,22 @@ test("asks for Copilot's newest submitted review by its author login", async () 
   expect(queries[0]).toContain('author:"copilot-pull-request-reviewer[bot]"');
   expect(queries[0]).toContain('reviews(last:1');
 });
+
+test("lists requested reviewers' and past reviewers' account IDs once each", async () => {
+  const pr = await byNumber(async () => ({
+    repository: {
+      pullRequest: {
+        ...pull(),
+        reviewRequests: {
+          nodes: [
+            { requestedReviewer: { __typename: 'User', login: 'human', id: 'U_1' } },
+            { requestedReviewer: { __typename: 'Team', name: 'team' } },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+        latestReviews: { nodes: [{ author: { id: 'U_2' } }, { author: { id: 'U_1' } }, null] },
+      },
+    },
+  }));
+  expect(pr?.reviewerIDs).toEqual(['U_1', 'U_2']);
+});

@@ -71,6 +71,7 @@ interface MergeRequestNumber {
 }
 
 interface ReviewerNode {
+  id?: string | null;
   type: string;
   username?: string;
   bot?: boolean;
@@ -106,7 +107,7 @@ const MERGE_REQUEST_FIELDS = `
     id status path detailedStatus { label }
     jobs(statuses: [FAILED], retried: false, first: ${FIRST_FAILED_JOBS}) { ${FAILED_JOBS} }
   }
-  reviewers(first: 100) { nodes { type username bot mergeRequestInteraction { reviewState approved } } }
+  reviewers(first: 100) { nodes { id type username bot mergeRequestInteraction { reviewState approved } } }
   discussions(first: ${PAGE_SIZE}) { ${DISCUSSIONS} }
 `;
 
@@ -482,6 +483,7 @@ export class GitLabForge implements Forge {
       approvalRequirementsSatisfied: node.approved,
       awaitingReviewers,
       reviewersComplete: true,
+      reviewerIDs: (node.reviewers?.nodes ?? []).flatMap((reviewer) => reviewer.id ?? []),
       mergeStatus: node.detailedMergeStatus ?? undefined,
       targetProject: node.targetProject.fullPath,
       targetBranch: node.targetBranch,

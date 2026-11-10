@@ -107,7 +107,7 @@ before a typical 5-minute prompt cache expires. Monitoring records an initial ba
 than announcing existing feedback. Pending updates survive reloads and clear when acknowledged
 or no longer relevant; merge updates remain until acknowledged.
 
-Forgekeeper reports failed jobs but doesn't retry or fix them. For tracked stacks, it can
+Forgekeeper reports failed jobs but never retries or fixes them. For tracked stacks, it can
 also propose retargeting dependents after a parent merges, but never retargets or rebases itself.
 
 Optionally, `automation.rules` lets exact reviewers on exact projects, such as GitLab Duo, start
@@ -116,6 +116,12 @@ one session that targets them, with the checkout on the source branch. A rule ca
 you trust with code changes. The turn uses the session's instructions and permissions, and
 leaves changes uncommitted. In `/forge-feedback`, **Act on feedback** (Ctrl+A) starts the same
 turn on request, and **Retry feedback work** (Ctrl+T) retries one after you inspect it.
+
+A `job-failed` rule investigates failed jobs on exact projects instead. Once a pipeline's
+failures go quiet for four minutes, or the pipeline finishes, one turn reads the failed jobs'
+logs and reports each failure's cause and a recommended fix, without changing anything. It runs
+on PRs/MRs you wrote or review, with the checkout at the head commit the pipeline tested. See
+[Investigate failed jobs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#investigate-failed-jobs).
 
 See [review detection and summaries](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications),
 [monitoring eligibility](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#which-sessions-the-server-watches),
@@ -141,7 +147,7 @@ Only specify values you want to change. The terminal part has no separate option
 | `delivery.reviews` | `"inbox"` | Review delivery: `inbox`, `passive`, or `summary`. |
 | `delivery.lifecycle` | `"inbox"` | Conflict, job-failure, and merge delivery. |
 | `lifecycleExecution.parentMerged` | `{ "mode": "notify" }` | Optionally prepare retarget proposals for tracked dependents. |
-| `automation.rules` | No rules | Reviewers whose feedback starts a coding turn that prepares fixes, optionally limited to allowed models. |
+| `automation.rules` | No rules | Reviewers whose feedback starts a coding turn that prepares fixes, or projects whose failed jobs start an investigation, optionally limited to allowed models. |
 | `automation.modelGroups` | No groups | Named lists of `provider/model` IDs that rules reference in `allowedModelGroup`. |
 
 See the [configuration reference](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#options) for validation behavior and
@@ -154,7 +160,8 @@ edit files, commit, push, reply to comments, or resolve discussions. Only an
 [automation rule](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#prepare-fixes-from-review-feedback)
 or **Act on feedback** starts a coding turn that edits files, with the session's permissions.
 That turn sends reviewer text to the model as untrusted data, keeps it in the session's
-history, and leaves changes uncommitted.
+history, and leaves changes uncommitted. A failed-job investigation sends job names and
+links the same way, and the agent reads job logs with the session's tools.
 
 Optional review summaries send review text to the session's model, isolated from conversation
 history and ordinary tools. On GitLab, a restricted tool can read notes directly linked by

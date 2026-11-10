@@ -422,6 +422,23 @@ describe('GitLabForge.findByNumber', () => {
     });
   });
 
+  test("lists every reviewer's account ID, whether or not they reviewed", async () => {
+    const graphql: GraphQL = async () => ({
+      p0: {
+        mergeRequest: node({
+          reviewers: {
+            nodes: [
+              { ...human('alice', true), id: 'gid://gitlab/User/1' },
+              { ...human('david', false), id: 'gid://gitlab/User/2' },
+            ],
+          },
+        }),
+      },
+    });
+    const mr = await new GitLabForge(graphql).findByNumber(projects, '1');
+    expect(mr?.reviewerIDs).toEqual(['gid://gitlab/User/1', 'gid://gitlab/User/2']);
+  });
+
   test("waits for human reviewers who haven't approved", async () => {
     const graphql: GraphQL = async () => ({
       p0: {

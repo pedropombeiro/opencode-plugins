@@ -3,24 +3,41 @@
 // coding turn ended.
 import type { Plugin } from '@opencode/plugin';
 import type { FeedbackItem, InboxState } from './feedback-inbox';
-import type { FeedbackSnapshot, ReviewRef, ReviewRequest } from './forge';
+import {
+  pipelineFails,
+  pipelineRunning,
+  unlistedFailure,
+  type FeedbackSnapshot,
+  type ReviewRef,
+  type ReviewRequest,
+} from './forge';
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
-import type { ReviewAutomationRule } from './options';
+import {
+  INVESTIGATION_INSTRUCTIONS,
+  INVESTIGATION_QUIET_TIME,
+  investigatesJobs,
+  investigationModels,
+  isJobFailure,
+  sameUpdate,
+} from './job-investigation';
+import type { AutomationRule } from './options';
 import {
   allowedModelsFor,
   automationReviewers,
   Ineligible,
   modelKey,
   modelRefusal,
+  RECHECK_INTERVAL,
   restrictedReviewers,
   type ReviewFinding,
   type AutomationHost,
   type AutomationRecord,
   type AutomationStatus,
   type ExecutionOutcome,
+  type PipelineFailures,
 } from './review-automation';
 import { createReviewClaims, type ExecutionClaim } from './review-claim';
-import { findingsDigest, preparationBatch } from './review-preparation';
+import { findingsDigest, PREPARATION_INSTRUCTIONS, preparationBatch } from './review-preparation';
 import { isForgekeeperInput, turnInput } from './review-summary';
 import { commentIDsOf, feedbackTarget, type SummaryDependencies } from './summary-delivery';
 import { includesRequest, type Target } from './target';
@@ -35,7 +52,7 @@ export interface AutomationDependencies extends SummaryDependencies {
 }
 
 interface AutomationEnvironment {
-  rules: readonly ReviewAutomationRule[];
+  rules: readonly AutomationRule[];
   closing: () => boolean;
   inbox: {
     list: () => Promise<InboxState>;
@@ -52,6 +69,8 @@ interface AutomationEnvironment {
   report: (error: unknown) => void;
   // Aborts when the plugin stops, which ends waits and sleeps.
   signal: AbortSignal;
+  // Replaces the timer-based sleep, for tests.
+  sleep?: (ms: number) => Promise<void>;
 }
 
 type Context = Plugin.Context;
@@ -193,29 +212,61 @@ export async function readVerifiedFindings(
   });
 }
 
-// Checks that the PR/MR is open and the checkout is its source branch, at its
-// head commit when the forge reports one. With `ownOnly`, the PR/MR must also
-// be the signed-in user's.
-async function assertMatchingCheckout(
+// The PR/MR as the forge reports it now, or undefined when it can't be found.
+async function currentRequest(
   deps: AutomationDependencies,
   directory: string,
   url: string,
-  ownOnly: boolean,
-) {
+): Promise<ReviewRequest | undefined> {
   const ref = parseUrl(url);
   const forge = ref && deps.forges.forHost(ref.host, directory);
-  const request =
-    forge && ref && (await forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid));
-  if (!request || request.state !== 'opened') throw new Ineligible('The PR/MR is no longer open');
-  if (ownOnly) {
+  return forge && ref
+    ? forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid)
+    : undefined;
+}
+
+// Why the update's pipeline can't be investigated anymore, or undefined
+// while it's the PR/MR's head pipeline. Either forge ties that pipeline to the
+// head commit: GitLab's head pipeline is the head commit's, even when it tests
+// a merge commit, such as a merged results pipeline, and GitHub's checks run
+// on the head commit itself.
+function pipelineMismatch(request: ReviewRequest, item: FeedbackItem): string | undefined {
+  if (!request.pipeline?.id || request.pipeline.id !== item.pipeline)
+    return `A newer ${traitsOf(request).ci} replaced the failing one, so the failure may already be fixed.`;
+  if (!request.headSha) return "The forge didn't report the PR/MR's head commit.";
+}
+
+// Checks that the PR/MR is open and the checkout is its source branch, at its
+// head commit when the forge reports one. A failed-job update's pipeline
+// must also be the head commit's. Automatic runs need the PR/MR to be the
+// signed-in user's own, or for failed jobs, one they review.
+async function assertMatchingCheckout(
+  deps: AutomationDependencies,
+  directory: string,
+  item: FeedbackItem,
+  automatic: boolean,
+) {
+  const ref = parseUrl(item.url);
+  const request = ref && (await currentRequest(deps, directory, item.url));
+  if (!ref || !request || request.state !== 'opened')
+    throw new Ineligible('The PR/MR is no longer open');
+  const jobs = isJobFailure(item);
+  if (automatic) {
     const viewer = await (deps.viewerID
       ? deps.viewerID(ref)
       : traitsOf(request).feedback?.viewerID?.(deps.exec, directory, ref.host));
     if (!viewer) throw new Error('Could not read the signed-in account');
-    if (request.authorID !== viewer)
+    const reviewing = jobs && !!request.reviewerIDs?.includes(viewer);
+    if (request.authorID !== viewer && !reviewing)
       throw new Ineligible(
-        'You did not write this PR/MR, so automatic action is skipped. Use Act on feedback to act anyway.',
+        jobs
+          ? 'You neither wrote nor review this PR/MR, so automatic investigation is skipped. Use Act on feedback to investigate anyway.'
+          : 'You did not write this PR/MR, so automatic action is skipped. Use Act on feedback to act anyway.',
       );
+  }
+  if (jobs) {
+    const mismatch = pipelineMismatch(request, item);
+    if (mismatch) throw new Ineligible(mismatch);
   }
   const checkout = await deps.forges.repository(directory);
   if (
@@ -224,10 +275,38 @@ async function assertMatchingCheckout(
     !request.sourceBranch ||
     checkout.repository.source.host !== ref.host ||
     checkout.repository.source.path !== request.sourceProject ||
-    checkout.repository.sourceBranch !== request.sourceBranch ||
-    (request.headSha && checkout.repository.head !== request.headSha)
+    checkout.repository.sourceBranch !== request.sourceBranch
   )
     throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+  if (request.headSha && checkout.repository.head !== request.headSha)
+    throw new Ineligible(
+      jobs
+        ? `The checkout isn't at the head commit that the failing ${traitsOf(request).ci} tested, so the failure may already be fixed. To investigate anyway, check out ${request.headSha.slice(0, 12)}, then use Retry feedback work.`
+        : 'The checkout does not match the PR/MR source project and branch',
+    );
+}
+
+// The failed jobs of the update's pipeline, while it's still the PR/MR's
+// head pipeline and fails.
+async function readFailures(
+  deps: AutomationDependencies,
+  directory: string,
+  item: FeedbackItem,
+): Promise<PipelineFailures> {
+  const request = await currentRequest(deps, directory, item.url);
+  if (!request || request.state !== 'opened') throw new Ineligible('The PR/MR is no longer open');
+  const mismatch = pipelineMismatch(request, item);
+  if (mismatch) throw new Ineligible(mismatch);
+  const pipeline = request.pipeline!;
+  const unlisted = unlistedFailure(pipeline);
+  if (!pipelineFails(pipeline))
+    throw new Ineligible(`The ${traitsOf(request).ci} no longer has failed jobs.`);
+  return {
+    pipeline: { id: pipeline.id!, ...(pipeline.url ? { url: pipeline.url } : {}) },
+    jobs: pipeline.failedJobs ?? [],
+    unlisted,
+    complete: pipeline.failedJobsComplete !== false,
+  };
 }
 
 // How the turn that the claim's prompt started ended. While the prompt is in
@@ -332,8 +411,9 @@ export function createAutomationHost(
       throw new Ineligible('The session no longer targets this PR/MR here');
     const session = await ctx.session.get({ sessionID: item.sessionID });
     if (session.parentID) throw new Ineligible('Subagents cannot own review automation');
-    await assertMatchingCheckout(deps, directory, item.url, automatic);
-    if (session.agent === 'plan')
+    await assertMatchingCheckout(deps, directory, item, automatic);
+    // An investigation changes nothing, so a read-only agent may run it.
+    if (session.agent === 'plan' && !isJobFailure(item))
       throw new Ineligible('Switch the owning session to a coding agent before acting on feedback');
   }
 
@@ -342,24 +422,42 @@ export function createAutomationHost(
     if (
       env.closing() ||
       state.paused ||
-      !state.items.some((entry) => entry.id === item.id) ||
+      !state.items.some((entry) => sameUpdate(entry, item)) ||
       !(await env.deliverable(item))
     )
       throw new Error('Review automation was canceled before the coding turn');
   }
 
-  const sleep = (ms: number) =>
-    new Promise<void>((resolve) => {
-      if (env.signal.aborted) return resolve();
-      const finish = () => {
-        clearTimeout(timer);
-        env.signal.removeEventListener('abort', finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, ms);
-      timer.unref?.();
-      env.signal.addEventListener('abort', finish, { once: true });
-    });
+  async function assertSoleOwner(item: FeedbackItem) {
+    const sessions = await associations(item.url);
+    if (sessions.length !== 1 || sessions[0] !== item.sessionID)
+      throw new Error('Review automation ownership changed before the coding turn');
+  }
+
+  async function pipelineDone(item: FeedbackItem) {
+    const request = await currentRequest(deps, directory, item.url);
+    return (
+      !request ||
+      request.state !== 'opened' ||
+      request.pipeline?.id !== item.pipeline ||
+      !pipelineRunning(request.pipeline)
+    );
+  }
+
+  const sleep =
+    env.sleep ??
+    ((ms: number) =>
+      new Promise<void>((resolve) => {
+        if (env.signal.aborted) return resolve();
+        const finish = () => {
+          clearTimeout(timer);
+          env.signal.removeEventListener('abort', finish);
+          resolve();
+        };
+        const timer = setTimeout(finish, ms);
+        timer.unref?.();
+        env.signal.addEventListener('abort', finish, { once: true });
+      }));
 
   const host: AutomationHost = {
     rules: env.rules,
@@ -384,14 +482,17 @@ export function createAutomationHost(
         ...(record.messageID ? { messageID: record.messageID } : {}),
         ...(record.manual ? { manual: record.manual } : {}),
       };
-      const current = (await env.inbox.list()).items.find((entry) => entry.id === item.id);
-      if (sameStatus(current?.automation, status)) return;
-      await env.inbox.automation(item.id, status);
+      // A failed-job batch's status goes to the update that replaced its own.
+      const current = (await env.inbox.list()).items.find((entry) => sameUpdate(entry, item));
+      if (!current || sameStatus(current.automation, status)) return;
+      await env.inbox.automation(current.id, status);
     },
     inbox: env.inbox.list,
     associations,
     exists,
     findings,
+    failures: (item) => readFailures(deps, directory, item),
+    pipelineDone,
     model,
     validate,
     redeliver: env.redeliver,
@@ -403,7 +504,10 @@ export function createAutomationHost(
         sessionID: record.item.sessionID,
         id: record.messageID,
         text,
-        metadata: { forgekeeper: 'review-prepare', batch: record.batch },
+        metadata: {
+          forgekeeper: isJobFailure(record.item) ? 'job-investigate' : 'review-prepare',
+          batch: record.batch,
+        },
         delivery: 'queue',
         resume: true,
       });
@@ -425,6 +529,10 @@ export function createAutomationHost(
     // without its instructions.
     preparationFor: (sessionID: string) => storedPreparation(ctx, claims, sessionID),
 
+    // The task instructions for the attempt's turn.
+    instructions: (record: AutomationRecord) =>
+      isJobFailure(record.item) ? INVESTIGATION_INSTRUCTIONS : PREPARATION_INSTRUCTIONS,
+
     // Checks, before the turn's first model request, that the attempt may
     // still run, that its prompt holds the current authorized findings, and
     // that the request's model may act on them. Records the start and the
@@ -432,10 +540,46 @@ export function createAutomationHost(
     async authorizeStart(record: AutomationRecord, requested: string) {
       if (record.state !== 'running') throw new Error('Review automation is no longer running');
       await assertPending(record.item);
-      const sessions = await associations(record.item.url);
-      if (sessions.length !== 1 || sessions[0] !== record.item.sessionID)
-        throw new Error('Review automation ownership changed before the coding turn');
+      await assertSoleOwner(record.item);
       const ref = parseUrl(record.item.url);
+      if (isJobFailure(record.item)) {
+        // A job that fails before this first request replaces the batch's
+        // update, so the request waits out the quiet time again, unless
+        // the pipeline finishes. A failure during the checks changes the
+        // stored attempt, so they run again with it.
+        for (;;) {
+          if (env.closing()) throw new Error('The plugin stopped');
+          const current = await read(record.batch);
+          if (
+            current?.state !== 'running' ||
+            current.messageID !== record.messageID ||
+            current.startedAt !== undefined
+          )
+            throw new Error('Failed-job automation changed before the investigation turn');
+          if (
+            now() - current.item.at < INVESTIGATION_QUIET_TIME &&
+            !(await pipelineDone(current.item).catch(() => false))
+          ) {
+            await sleep(RECHECK_INTERVAL);
+            continue;
+          }
+          if (!ref || (!current.manual && !investigatesJobs(env.rules, ref)))
+            throw new Error('The failed-job automation rule is no longer enabled');
+          await validate(current.item, !current.manual);
+          // The pipeline must still fail. Jobs that failed after the prompt
+          // was written don't stop the turn, which reads the pipeline itself.
+          await readFailures(deps, directory, current.item);
+          const models = investigationModels(env.rules, ref);
+          const refusal = modelRefusal(models, requested, 'retry');
+          if (refusal) throw new Error(refusal);
+          await assertPending(current.item);
+          // Another session may have targeted the PR/MR during the wait.
+          await assertSoleOwner(current.item);
+          const started: AutomationRecord = { ...current, startedAt: now() };
+          if (models) started.models = models;
+          if (await save(started, current)) return;
+        }
+      }
       const reviewers = record.manual ? undefined : ruleReviewers(record.item.url);
       if (!ref || reviewers?.length === 0)
         throw new Error('The review automation rule is no longer enabled');

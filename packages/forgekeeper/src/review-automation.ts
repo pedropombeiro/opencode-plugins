@@ -3,9 +3,19 @@
 // stored, so a reload resumes or reconciles it instead of starting it again.
 import { createHash } from 'node:crypto';
 import type { FeedbackItem, InboxState } from './feedback-inbox';
-import type { CommentDetail, ReviewRef } from './forge';
+import type { CommentDetail, FailedJob, ReviewRef } from './forge';
+import {
+  failuresDigest,
+  INVESTIGATION_QUIET_TIME,
+  investigatesJobs,
+  investigationModels,
+  investigationPrompt,
+  isJobFailure,
+  pipelineBatch,
+  sameUpdate,
+} from './job-investigation';
 import { createKeyedQueue } from './keyed-queue';
-import type { ReviewAutomationRule } from './options';
+import type { AutomationRule, ReviewAutomationRule } from './options';
 import type { ExecutionClaim } from './review-claim';
 import { findingsDigest, preparationMessageID, preparationPrompt } from './review-preparation';
 
@@ -68,39 +78,39 @@ const TRANSITIONS: Record<AutomationState, readonly AutomationState[]> = {
 export const RECHECK_INTERVAL = 30_000;
 export const ADMISSION_CHECKS = 3;
 
+// A review update's batch is its comments. A failed-job update's batch is its
+// pipeline, so later failures in the pipeline join the same batch.
 export const automationBatch = (item: FeedbackItem) =>
-  createHash('sha256')
-    .update(
-      JSON.stringify([
-        item.url,
-        [...(item.commentIDs ?? item.links)].sort(),
-        item.postedAt ?? item.at,
-      ]),
-    )
-    .digest('hex');
+  isJobFailure(item)
+    ? pipelineBatch(item)
+    : createHash('sha256')
+        .update(
+          JSON.stringify([
+            item.url,
+            [...(item.commentIDs ?? item.links)].sort(),
+            item.postedAt ?? item.at,
+          ]),
+        )
+        .digest('hex');
 
-const ruleMatches = (rule: ReviewAutomationRule, ref: ReviewRef) =>
-  rule.host === ref.host && rule.projects.includes(ref.project);
+// The review rules that cover the PR/MR's project.
+const reviewRules = (rules: readonly AutomationRule[], ref: ReviewRef) =>
+  rules.filter(
+    (rule): rule is ReviewAutomationRule =>
+      rule.on === 'review' && rule.host === ref.host && rule.projects.includes(ref.project),
+  );
 
-export function automationReviewers(
-  rules: readonly ReviewAutomationRule[],
-  ref: ReviewRef,
-): string[] {
-  return [
-    ...new Set(rules.filter((rule) => ruleMatches(rule, ref)).flatMap((rule) => rule.reviewers)),
-  ];
+export function automationReviewers(rules: readonly AutomationRule[], ref: ReviewRef): string[] {
+  return [...new Set(reviewRules(rules, ref).flatMap((rule) => rule.reviewers))];
 }
 
 // The reviewers whose feedback only some models may act on. A manual action
 // tags their findings, so it honors the same restrictions.
-export function restrictedReviewers(
-  rules: readonly ReviewAutomationRule[],
-  ref: ReviewRef,
-): string[] {
+export function restrictedReviewers(rules: readonly AutomationRule[], ref: ReviewRef): string[] {
   return [
     ...new Set(
-      rules
-        .filter((rule) => ruleMatches(rule, ref) && rule.allowedModels)
+      reviewRules(rules, ref)
+        .filter((rule) => rule.allowedModels)
         .flatMap((rule) => rule.reviewers),
     ),
   ];
@@ -116,15 +126,13 @@ export const modelKey = (model: { providerID: string; id: string }) =>
 // reviewer's findings need a rule for the project and that reviewer that
 // allows the model, so the batch needs a model every such reviewer allows.
 export function allowedModelsFor(
-  rules: readonly ReviewAutomationRule[],
+  rules: readonly AutomationRule[],
   ref: ReviewRef,
   findings: readonly ReviewFinding[],
 ): string[] | undefined {
   let allowed: string[] | undefined;
   for (const reviewer of new Set(findings.flatMap((finding) => finding.reviewer ?? []))) {
-    const governing = rules.filter(
-      (rule) => ruleMatches(rule, ref) && rule.reviewers.includes(reviewer),
-    );
+    const governing = reviewRules(rules, ref).filter((rule) => rule.reviewers.includes(reviewer));
     if (!governing.length || governing.some((rule) => !rule.allowedModels)) continue;
     const models = new Set(governing.flatMap((rule) => rule.allowedModels!));
     allowed = allowed ? allowed.filter((model) => models.has(model)) : [...models];
@@ -156,8 +164,18 @@ export function modelRefusal(
   return `Review automation needs one of these models: ${allowed.join(', ')}. This session uses ${model ?? 'a model Forgekeeper could not read'}. ${REMEDIES[remedy]}`;
 }
 
+// A pipeline's failed jobs, as the forge reports them now.
+export interface PipelineFailures {
+  pipeline: { id: string; url?: string };
+  jobs: FailedJob[];
+  // Whether the pipeline failed without a job Forgekeeper could read.
+  unlisted: boolean;
+  // False when the pipeline has more failed jobs than `jobs` lists.
+  complete: boolean;
+}
+
 export interface AutomationHost {
-  rules: readonly ReviewAutomationRule[];
+  rules: readonly AutomationRule[];
   ref: (url: string) => ReviewRef | undefined;
   read: (batch: string) => Promise<AutomationRecord | undefined>;
   list: () => Promise<AutomationRecord[]>;
@@ -178,10 +196,17 @@ export interface AutomationHost {
     reviewers: string[] | undefined,
     tagged?: readonly string[],
   ) => Promise<ReviewFinding[]>;
+  // The failed jobs of a failed-job update's pipeline. Rejects with
+  // `Ineligible` once it's no longer the PR/MR's head pipeline or fails.
+  failures: (item: FeedbackItem) => Promise<PipelineFailures>;
+  // Whether a failed-job update's pipeline finished or was replaced, so its
+  // batch needn't wait for more failures.
+  pipelineDone: (item: FeedbackItem) => Promise<boolean>;
   // The model the session's next turn uses, as `provider/model`.
   model: (sessionID: string) => Promise<string | undefined>;
   // Rejects with `Ineligible` when the batch can't run here. Automatic runs
-  // also need the PR/MR to be the signed-in user's own.
+  // also need the PR/MR to be the signed-in user's own, or for failed jobs,
+  // one they review.
   validate: (item: FeedbackItem, automatic: boolean) => Promise<void>;
   // Delivers the item as if automation hadn't selected it, such as with a summary.
   redeliver: (item: FeedbackItem) => void;
@@ -220,7 +245,8 @@ const handlesDelivery = (record: AutomationRecord | undefined) =>
   record.startedAt !== undefined;
 
 interface PreparedExecution {
-  findings: CommentDetail[];
+  // Identifies the data the prompt holds; see `findingsDigest`.
+  digest: string;
   text: string;
 }
 
@@ -234,6 +260,13 @@ export function createReviewAutomation(host: AutomationHost) {
     return ref ? automationReviewers(host.rules, ref) : [];
   };
 
+  // Whether a rule lets the update start a turn on its own.
+  const ruleCovers = (item: FeedbackItem) => {
+    if (!isJobFailure(item)) return !item.kind && ruleReviewers(item).length > 0;
+    const ref = host.ref(item.url);
+    return !!ref && investigatesJobs(host.rules, ref);
+  };
+
   // An automatic run reads only the rules' reviewers' findings. A manual one
   // reads everyone's, tagging the reviewers whose rules restrict models.
   const readFindings = (item: FeedbackItem, manual: boolean) => {
@@ -243,10 +276,15 @@ export function createReviewAutomation(host: AutomationHost) {
     return host.findings(item, undefined, tagged.length ? tagged : undefined);
   };
 
-  // Rejects with `Ineligible` when the session's model may not act on the findings.
-  async function assertAllowedModel(item: FeedbackItem, findings: readonly ReviewFinding[]) {
+  // Rejects with `Ineligible` when the session's model may not act on the
+  // findings, or investigate the update's failed jobs.
+  async function assertAllowedModel(item: FeedbackItem, findings: readonly ReviewFinding[] = []) {
     const ref = host.ref(item.url);
-    const allowed = ref && allowedModelsFor(host.rules, ref, findings);
+    const allowed =
+      ref &&
+      (isJobFailure(item)
+        ? investigationModels(host.rules, ref)
+        : allowedModelsFor(host.rules, ref, findings));
     if (!allowed) return;
     const refusal = modelRefusal(allowed, await host.model(item.sessionID), 'act');
     if (refusal) throw new Ineligible(refusal);
@@ -345,7 +383,7 @@ export function createReviewAutomation(host: AutomationHost) {
     if (host.closing()) throw new Error('The plugin stopped');
     const state = await host.inbox();
     if (state.paused) throw new Error('Feedback monitoring is paused');
-    if (!state.items.some((entry) => entry.id === item.id))
+    if (!state.items.some((entry) => sameUpdate(entry, item)))
       throw new Error('The update was acknowledged or is no longer in the inbox');
   }
 
@@ -389,26 +427,58 @@ export function createReviewAutomation(host: AutomationHost) {
     await assertPendingInboxItem(record.item);
     const conflict = await ownershipConflictReason(record.item);
     if (conflict) return { skip: conflict };
-    if (!record.manual && !ruleReviewers(record.item).length)
+    if (!record.manual && !ruleCovers(record.item))
       return { skip: 'No automation rule matches this project now.' };
-    const findings = await readFindings(record.item, !!record.manual);
-    if (!findings.length)
-      return { skip: 'No current unresolved findings from authorized reviewers.' };
-    await assertAllowedModel(record.item, findings);
-    const text = preparationPrompt(record.item.url, findings);
+    let prepared: PreparedExecution;
+    if (isJobFailure(record.item)) {
+      const failures = await host.failures(record.item);
+      await assertAllowedModel(record.item);
+      prepared = {
+        digest: failuresDigest(failures.jobs),
+        text: investigationPrompt(record.item.url, failures),
+      };
+    } else {
+      const findings = await readFindings(record.item, !!record.manual);
+      if (!findings.length)
+        return { skip: 'No current unresolved findings from authorized reviewers.' };
+      await assertAllowedModel(record.item, findings);
+      prepared = {
+        digest: findingsDigest(findings),
+        text: preparationPrompt(record.item.url, findings),
+      };
+    }
     await host.validate(record.item, !record.manual);
     await assertPendingInboxItem(record.item);
-    return { findings, text };
+    return prepared;
+  }
+
+  // Waits until a failed-job batch's pipeline has had no new failure for the
+  // quiet time, or finished. Later failures replace the batch's update, so
+  // this returns the attempt as stored then, or undefined once it isn't
+  // queued anymore.
+  async function awaitQuietPipeline(
+    record: AutomationRecord,
+  ): Promise<AutomationRecord | undefined> {
+    for (let check = 0; ; check++) {
+      if (check > 0) await host.sleep(RECHECK_INTERVAL);
+      if (host.closing()) return undefined;
+      const current = await host.read(record.batch);
+      if (current?.state !== 'queued' || current.messageID !== record.messageID) return undefined;
+      if (now() - current.item.at >= INVESTIGATION_QUIET_TIME) return current;
+      // A failed read only means waiting out the quiet time.
+      if (await host.pipelineDone(current.item).catch(() => false)) return current;
+    }
   }
 
   // Checks the claimed attempt once more, marks it running, and submits its
   // turn. Returns the running record once the prompt may have been admitted,
-  // or undefined when the attempt ended first.
+  // undefined when the attempt ended first, or `replaced` when a later
+  // failure replaced a failed-job batch's update, so it waits again.
   async function submitExecution(
     record: AutomationRecord,
     prepared: PreparedExecution,
     admitting: () => void,
-  ): Promise<AutomationRecord | undefined> {
+  ): Promise<AutomationRecord | 'replaced' | undefined> {
     if (!(await isQueuedAttempt(record))) return undefined;
     const conflict = await ownershipConflictReason(record.item);
     if (conflict) {
@@ -422,13 +492,23 @@ export function createReviewAutomation(host: AutomationHost) {
     await reconcileClaim(record.item.url).catch(() => undefined);
     const current = await host.read(record.batch);
     if (current?.state !== 'queued' || current.messageID !== record.messageID) return undefined;
+    if (current.item.id !== record.item.id) return 'replaced';
     const running: AutomationRecord = {
       ...current,
       state: 'running',
       at: now(),
-      digest: findingsDigest(prepared.findings),
+      digest: prepared.digest,
     };
     if (!(await host.start(running, current))) {
+      // The stored attempt changed, rather than another execution holding
+      // the PR/MR: a later failure replaced its update.
+      const latest = await host.read(record.batch);
+      if (
+        latest?.state === 'queued' &&
+        latest.messageID === record.messageID &&
+        latest.item.id !== current.item.id
+      )
+        return 'replaced';
       await settleUnclaimed(
         record,
         'skipped',
@@ -475,8 +555,10 @@ export function createReviewAutomation(host: AutomationHost) {
       record,
       outcome,
       outcome === 'failed'
-        ? 'The coding turn failed or was interrupted.'
-        : 'The coding turn finished. See the session for changes, checks, and skipped findings.',
+        ? `The ${isJobFailure(record.item) ? 'investigation' : 'coding'} turn failed or was interrupted.`
+        : isJobFailure(record.item)
+          ? 'The investigation finished. See the session for its causes and recommended fixes.'
+          : 'The coding turn finished. See the session for changes, checks, and skipped findings.',
       { release: true },
     );
     return 'over';
@@ -503,18 +585,34 @@ export function createReviewAutomation(host: AutomationHost) {
     }
   }
 
-  async function execute(record: AutomationRecord) {
+  async function execute(queued: AutomationRecord) {
     let admitted = false;
+    let record = queued;
     try {
-      await host.wait(record.item.sessionID);
-      if (!(await isQueuedAttempt(record))) return;
-      const prepared = await prepareExecution(record);
-      if ('skip' in prepared) {
-        await settleUnclaimed(record, 'skipped', prepared.skip);
+      // A later failure that replaces a failed-job batch's update before the
+      // turn starts restarts its quiet time, even while the session is busy.
+      for (;;) {
+        if (isJobFailure(record.item)) {
+          const quiet = await awaitQuietPipeline(record);
+          if (!quiet) return;
+          record = quiet;
+        }
+        await host.wait(record.item.sessionID);
+        const current = await host.read(record.batch);
+        if (current?.state !== 'queued' || current.messageID !== record.messageID) return;
+        const replaced = current.item.id !== record.item.id;
+        record = current;
+        if (replaced) continue;
+        const prepared = await prepareExecution(record);
+        if ('skip' in prepared) {
+          await settleUnclaimed(record, 'skipped', prepared.skip);
+          return;
+        }
+        const running = await submitExecution(record, prepared, () => (admitted = true));
+        if (running === 'replaced') continue;
+        if (running) await monitorExecution(running);
         return;
       }
-      const running = await submitExecution(record, prepared, () => (admitted = true));
-      if (running) await monitorExecution(running);
     } catch (error) {
       if (host.closing()) return;
       const reason = `${message(error)}${admitted ? ' Inspect the session before retrying.' : ''}`;
@@ -556,10 +654,29 @@ export function createReviewAutomation(host: AutomationHost) {
     // rules. Returns whether automation handles its delivery. Rejects, so the
     // inbox retries, while session ownership can't be established.
     async selectAutomatic(item: FeedbackItem): Promise<boolean> {
-      if (item.kind || !item.automationAllowed || !ruleReviewers(item).length) return false;
+      const allowed = !!item.automationAllowed && ruleCovers(item);
+      // A failed-job update can replace one of a batch that already exists,
+      // such as a manual investigation on a project without a rule, so its
+      // batch is looked up before the rule decides about a new one.
+      if (!allowed && !isJobFailure(item)) return false;
       const batch = automationBatch(item);
       return queue.run(batch, async () => {
-        const existing = await host.read(batch);
+        let existing = await host.read(batch);
+        if (!existing && !allowed) return false;
+        // A later failure in a pipeline batch whose turn hasn't reached its
+        // first model request replaces its update, which restarts the
+        // batch's quiet time. That request waits for it to pass.
+        if (
+          (existing?.state === 'queued' ||
+            (existing?.state === 'running' && existing.startedAt === undefined)) &&
+          isJobFailure(item) &&
+          existing.item.sessionID === item.sessionID &&
+          existing.item.id !== item.id &&
+          item.at >= existing.item.at
+        ) {
+          const updated = { ...existing, item };
+          if (await host.save(updated, existing)) existing = updated;
+        }
         if (existing) {
           await host.status(item, existing);
           if (existing.item.sessionID === item.sessionID) resume(existing);
@@ -572,6 +689,21 @@ export function createReviewAutomation(host: AutomationHost) {
         if (conflict) {
           await startAttempt(item, undefined, { manual: false, skip: conflict });
           return false;
+        }
+        if (isJobFailure(item)) {
+          // Checked before queuing, like review batches below. The failed
+          // jobs are read once the pipeline goes quiet.
+          try {
+            await assertAllowedModel(item);
+            await host.validate(item, true);
+          } catch (error) {
+            if (!(error instanceof Ineligible)) throw error;
+            await startAttempt(item, undefined, { manual: false, skip: error.message });
+            return false;
+          }
+          const record = await startAttempt(item, undefined, { manual: false });
+          if (record) resume(record);
+          return true;
         }
         const findings = await readFindings(item, false);
         if (!findings.length) {
@@ -601,7 +733,8 @@ export function createReviewAutomation(host: AutomationHost) {
     // Acts on an update on request, without an automation rule. A batch that
     // already ran needs `retry`.
     async act(item: FeedbackItem, retry = false): Promise<void> {
-      if (item.kind) throw new Error('Act on feedback is available only for review updates');
+      if (item.kind && !isJobFailure(item))
+        throw new Error('Act on feedback is available only for review and failed-job updates');
       const batch = automationBatch(item);
       await queue.run(batch, async () => {
         let existing = await host.read(batch);

@@ -15,10 +15,10 @@ import {
   modelRefusal,
 } from './review-automation';
 import { createAutomationHost, type AutomationDependencies } from './review-automation-host';
-import { PREPARATION_INSTRUCTIONS } from './review-preparation';
 import type { FeedbackSnapshot, ReviewRequest } from './forge';
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
+import { investigatesJobs, isJobFailure } from './job-investigation';
 import { locate } from './locate';
 import type { StatusOptions } from './options';
 import type { Notice } from './rpc';
@@ -282,10 +282,10 @@ export async function setupStatus(
     report: (error) => reportOnce('summary', 'Could not restore review summary turns', error),
   });
 
-  const reviewRules = settings.automation.rules.filter((rule) => rule.on === 'review');
+  const automationRules = settings.automation.rules;
   const automationController = new AbortController();
   const automationHost = createAutomationHost(ctx, deps, {
-    rules: reviewRules,
+    rules: automationRules,
     closing: () => closing,
     inbox,
     deliverable,
@@ -336,7 +336,12 @@ export async function setupStatus(
 
   const record = async (item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) => {
     const ref = parseUrl(item.url);
-    if (!item.kind && ref && automationReviewers(reviewRules, ref).length)
+    if (
+      ref &&
+      (item.kind
+        ? isJobFailure(item) && investigatesJobs(automationRules, ref)
+        : automationReviewers(automationRules, ref).length)
+    )
       item = { ...item, automationAllowed: true };
     const { delivery } = await inbox.record(item, supersedes);
     void tracked(delivery.catch((error) => deliveryFailed(item.sessionID, error)));
@@ -551,7 +556,7 @@ export async function setupStatus(
         const refusal = modelRefusal(record.models, model, 'inspect');
         if (refusal) throw new Error(refusal);
       }
-      event.system.push({ type: 'text', text: PREPARATION_INSTRUCTIONS });
+      event.system.push({ type: 'text', text: automationHost.instructions(record) });
       return true;
     },
     prepareSummary: summaries.prepare,

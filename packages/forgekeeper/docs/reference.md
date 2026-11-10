@@ -613,7 +613,8 @@ Another pipeline that fails, such as after a push, is new too. At
 most 10 jobs are named, and more are counted. Records stored before Forgekeeper told job
 attempts apart only record the jobs, without an update. The update clears once the
 pipeline no longer has failed jobs, another pipeline replaces it, or the PR/MR closes.
-Forgekeeper only reports failed jobs: it doesn't retry or fix them.
+Forgekeeper never retries or fixes failed jobs. A rule can have it
+[investigate them](#investigate-failed-jobs) in the owning session.
 
 Each change waits in the target's record until it reaches the inbox, in the same storage
 write as the record. A merge stops polling, so waiting changes are retried every minute
@@ -668,7 +669,8 @@ the parent was squashed, since its commits stay on the dependent branch. Each ev
 the policy it happened under, and the stricter of that and the current policy applies, so
 enabling `prepare` never reads dependents again for earlier merges.
 
-Conflicts and failed jobs only notify, so `lifecycleExecution` has no policy for them. An
+`lifecycleExecution` has no policy for conflicts or failed jobs. To investigate failed jobs,
+add a [`job-failed` rule](#investigate-failed-jobs) to `automation.rules` instead. An
 invalid or unsupported policy, such as `"prepare"` without actions, falls back to
 `"notify"`, and Forgekeeper shows an error toast saying which options it ignored.
 
@@ -693,8 +695,9 @@ rules to `automation.rules` in Forgekeeper's plugin options:
 }
 ```
 
-Each rule names its trigger in `on`. `"review"`, for review feedback, is the only one so
-far, and Forgekeeper ignores a rule without it, with an error toast.
+Each rule names its trigger in `on`: `"review"` for review feedback, or `"job-failed"` to
+[investigate failed jobs](#investigate-failed-jobs). Forgekeeper ignores a rule without one,
+with an error toast.
 
 Hosts, projects, and reviewer usernames must be exact, without wildcards. Forgekeeper resolves
 usernames through the authenticated forge API and checks account IDs on the findings it reads.
@@ -817,6 +820,82 @@ turn checks it again, so switching to another model mid-turn fails the turn. Aft
 fails this way, inspect the session for changes, switch models, and use **Retry feedback
 work**.
 
+## Investigate failed jobs
+
+A `job-failed` rule has Forgekeeper start a turn in the owning session when a job fails in
+the head pipeline of a PR/MR on one of the rule's projects. The turn reads the failed jobs'
+logs, classifies each failure, and recommends fixes. It changes nothing:
+
+```json
+{
+  "automation": {
+    "rules": [
+      {
+        "on": "job-failed",
+        "host": "gitlab.com",
+        "projects": ["gitlab-org/gitlab"],
+        "action": "investigate"
+      }
+    ]
+  }
+}
+```
+
+`action` defaults to `"investigate"`, the only action so far. Hosts and projects must be
+exact. On busy projects such as `gitlab-org/gitlab`, many failures are flaky or already
+broken on the target branch, so each turn has a model cost. Add only the projects you want
+investigated. `allowedModels` and `allowedModelGroup` work as for
+[review rules](#allowed-models), and a project with several `job-failed` rules allows the
+models of any of them.
+
+Each pipeline gets at most one investigation. A pipeline's failed-job updates form one
+batch, and the turn starts once no job in the pipeline has newly failed for four minutes,
+or once the pipeline finishes, whichever comes first. A failure that arrives before the
+turn starts, even while the session is busy, replaces the update and restarts the wait, so
+the turn sees the failures together. After
+the turn starts, later failures in the same pipeline start no second turn and get no
+summary. A new
+pipeline, such as after a push, is a new batch. Use **Retry feedback work** to investigate
+a pipeline again.
+
+The same ownership, idle, and recovery rules as for
+[review preparation](#prepare-fixes-from-review-feedback) apply: exactly one session must
+target the PR/MR, the turn waits for that session to go idle, the PR/MR's execution claim
+is shared across worktrees, and a reload never replays uncertain work. Forgekeeper skips
+the batch with the reason, and keeps its normal delivery, when any of these checks fail:
+
+- **Author or reviewer:** automatic investigations run on PRs/MRs you wrote or review, as
+  the signed-in `glab` or `gh` account. On GitHub, a reviewer is someone with a pending
+  review request or a submitted review.
+- **Current pipeline:** the failing pipeline must still be the PR/MR's head pipeline, the
+  one for its head commit, and still have failed jobs. On GitLab, that includes merged
+  results pipelines, which test a merge of the head commit into the target branch.
+- **Checkout:** the session's checkout must be on the PR/MR's source branch, at that head
+  commit. A checkout that moved on may already fix the failure, so the reason names the
+  commit to check out before a retry.
+
+Forgekeeper checks the pipeline and checkout again before the turn's first model request.
+A job that fails after the prompt is submitted, but before that request, still joins the
+batch: the request waits until no job has newly failed for four minutes, or the pipeline
+finishes, and the session shows as busy meanwhile. Jobs that failed after the prompt was
+written don't stop the turn. The prompt's job list is
+a snapshot, and it can be partial, such as past the first 10 failed jobs on GitLab, so the
+agent starts by listing the pipeline's current failed jobs.
+
+The prompt lists the failed jobs, with their names, stages, IDs, and links, as untrusted
+data, separately from Forgekeeper's task instructions. Anyone who can push to the branch
+controls what a job prints, so the instructions tell the agent to treat job output as
+data too. The agent reads the logs with the session's tools, such as `glab ci trace`, and
+decides for each job whether it's flaky, already broken on the target branch, caused by
+the PR/MR, or an infrastructure problem. It must not edit files, commit, push, retry or
+cancel jobs, post comments, or change the PR/MR, though it can recommend a retry. These
+limits come from the instructions, and the session's permissions still apply. Since the
+turn changes nothing, it can run in a session that uses the `plan` agent.
+
+**Act on feedback** investigates a failed-job update on request, on any author's PR/MR,
+with the same checks apart from authorship. It works without a rule too, and later failures
+in the pipeline join that batch as they do for automatic ones.
+
 ## Options
 
 ### Monitoring security boundary
@@ -863,22 +942,22 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 }
 ```
 
-| Option                   | Default                       | Description                                                                                                                                 |
-| ------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`                 | `true`                        | Show the PR/MR status and monitor the session's PRs/MRs. Set to `false` to keep only session targets and titles.                            |
-| `hosts`                  | `["gitlab.com"]`              | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                                  |
-| `githubHosts`            | `["github.com"]`              | GitHub hosts, including GitHub Enterprise hosts.                                                                                            |
-| `pollSeconds`            | `120`                         | Normal polling interval. Automated reviews and settling feedback poll at 30 seconds or this value, if lower.                                |
-| `watch.humanReviews`     | `true`                        | Watch for new review feedback from people.                                                                                                  |
-| `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                           |
-| `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                    |
-| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                   |
-| `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).              |
-| `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).          |
-| `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                                        |
-| `lifecycleExecution`     | `"notify"`                    | What Forgekeeper works out when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                           |
-| `automation.rules`       | No rules                      | What starts an automatic coding turn, such as feedback from authorized reviewers. See [Prepare fixes](#prepare-fixes-from-review-feedback). |
-| `automation.modelGroups` | No groups                     | Named lists of `provider/model` IDs that rules reference in `allowedModelGroup`. See [Allowed models](#allowed-models).                     |
+| Option                   | Default                       | Description                                                                                                                                                                                          |
+| ------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                 | `true`                        | Show the PR/MR status and monitor the session's PRs/MRs. Set to `false` to keep only session targets and titles.                                                                                     |
+| `hosts`                  | `["gitlab.com"]`              | GitLab hosts whose remotes are recognized, besides hosts named `gitlab.*`.                                                                                                                           |
+| `githubHosts`            | `["github.com"]`              | GitHub hosts, including GitHub Enterprise hosts.                                                                                                                                                     |
+| `pollSeconds`            | `120`                         | Normal polling interval. Automated reviews and settling feedback poll at 30 seconds or this value, if lower.                                                                                         |
+| `watch.humanReviews`     | `true`                        | Watch for new review feedback from people.                                                                                                                                                           |
+| `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                                                                                    |
+| `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                                                                             |
+| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                            |
+| `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                       |
+| `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).                                                                   |
+| `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                                                                                                 |
+| `lifecycleExecution`     | `"notify"`                    | What Forgekeeper works out when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                                                                                    |
+| `automation.rules`       | No rules                      | What starts an automatic turn: feedback from authorized reviewers, or failed jobs. See [Prepare fixes](#prepare-fixes-from-review-feedback) and [Investigate failed jobs](#investigate-failed-jobs). |
+| `automation.modelGroups` | No groups                     | Named lists of `provider/model` IDs that rules reference in `allowedModelGroup`. See [Allowed models](#allowed-models).                                                                              |
 
 `watch` and `delivery` list only what you change, and sources added in later releases start
 on. For example, this summarizes review feedback and stops watching merge request changes:
@@ -1019,6 +1098,11 @@ If you set options for `opencode-forgekeeper` 2.x, also see
 - `src/adapters/gitlab/linked-notes.ts` finds and reads the notes review comments link to.
 - `src/summary-delivery.ts` stores and delivers summary turns, restricts their model requests,
   and handles linked-note access. `src/review-summary.ts` formats their content.
+- `src/review-automation.ts` selects batches for automation rules and runs each attempt.
+  `src/review-automation-host.ts` connects it to sessions and forges, and
+  `src/review-claim.ts` stores attempts and execution claims in SQLite.
+  `src/review-preparation.ts` and `src/job-investigation.ts` write the prompts and task
+  instructions for preparing review fixes and investigating failed jobs.
 - `src/keyed-queue.ts` serializes updates by session or record while allowing other keys to progress.
 
 Shared code never compares a forge against a specific name. It asks the forge's traits, or

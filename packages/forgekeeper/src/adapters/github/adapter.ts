@@ -54,8 +54,9 @@ interface Pull {
   author?: { id?: string } | null;
   reviewThreads: Connection<{ isResolved: boolean }>;
   reviewRequests: Connection<{
-    requestedReviewer?: { __typename?: string; login?: string; name?: string } | null;
+    requestedReviewer?: { __typename?: string; login?: string; name?: string; id?: string } | null;
   }>;
+  latestReviews?: { nodes?: Array<{ author?: { id?: string } | null } | null> | null } | null;
   copilotReviews?: {
     nodes?: Array<{ id: string; state: string; comments: { totalCount: number } } | null> | null;
   } | null;
@@ -70,7 +71,8 @@ const fields = `number title url state isDraft mergeable reviewDecision headRefO
   headRepository { nameWithOwner } baseRepository { nameWithOwner } baseRefName updatedAt
   author { ... on User { id } ... on Bot { id } }
   reviewThreads(first:100) { nodes { isResolved } pageInfo { hasNextPage endCursor } }
-  reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
+  reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { id login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
+  latestReviews(first:100) { nodes { author { ... on User { id } } } }
   copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
   commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
     nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } }
@@ -476,7 +478,7 @@ export class GitHubForge implements Forge {
           `query($owner:String!,$repo:String!,$number:Int!,$after:String!) {
             repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
               reviewRequests(first:100,after:$after) {
-                nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } }
+                nodes { requestedReviewer { __typename ... on User { id login } ... on Bot { login } ... on Team { name } } }
                 pageInfo { hasNextPage endCursor }
               }
             } }
@@ -515,6 +517,16 @@ export class GitHubForge implements Forge {
         return reviewer?.login ? [reviewer.login] : reviewer?.name ? [reviewer.name] : [];
       }),
       reviewersComplete: !reviewers.pageInfo?.hasNextPage,
+      reviewerIDs: [
+        ...new Set([
+          ...reviewers.nodes.flatMap((request) =>
+            request.requestedReviewer?.__typename === 'User'
+              ? (request.requestedReviewer.id ?? [])
+              : [],
+          ),
+          ...(node.latestReviews?.nodes ?? []).flatMap((review) => review?.author?.id ?? []),
+        ]),
+      ],
       targetProject: node.baseRepository.nameWithOwner,
       targetBranch: node.baseRefName,
       ...(node.headRepository ? { sourceProject: node.headRepository.nameWithOwner } : {}),

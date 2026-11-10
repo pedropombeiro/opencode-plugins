@@ -50,9 +50,9 @@ export interface LifecycleExecution {
   parentMerged: EventPolicy;
 }
 
-// What starts an automatic coding turn, and what it does. Each rule names its
-// trigger in `on`, so other triggers, such as failed jobs, can be added.
-export type AutomationRule = ReviewAutomationRule;
+// What starts an automatic turn, and what it does. Each rule names its
+// trigger in `on`: review feedback, or a failed job.
+export type AutomationRule = ReviewAutomationRule | JobAutomationRule;
 
 // Feedback from the listed reviewers starts a turn that prepares fixes. With
 // `allowedModels`, from the rule or its `allowedModelGroup`, only those
@@ -63,6 +63,17 @@ export interface ReviewAutomationRule {
   projects: string[];
   reviewers: string[];
   action: 'prepare';
+  allowedModels?: string[];
+}
+
+// A pipeline with failed jobs starts a turn that investigates them and
+// recommends fixes, without changing anything. `allowedModels` works as for
+// review rules.
+export interface JobAutomationRule {
+  on: 'job-failed';
+  host: string;
+  projects: string[];
+  action: 'investigate';
   allowedModels?: string[];
 }
 
@@ -90,15 +101,8 @@ const HOST = /^[a-z0-9.-]+(:\d+)?$/;
 const USERNAME = /^[a-z0-9_.[\]-]+$/;
 const MODEL = /^[^/\s]+\/\S+$/;
 const GROUP = /^[a-zA-Z0-9_-]+$/;
-const RULE_KEYS = [
-  'on',
-  'host',
-  'projects',
-  'reviewers',
-  'action',
-  'allowedModels',
-  'allowedModelGroup',
-];
+const RULE_KEYS = ['on', 'host', 'projects', 'action', 'allowedModels', 'allowedModelGroup'];
+const PROJECT = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
 const ACTIONS: Record<keyof LifecycleExecution, readonly ExecutionAction[]> = {
@@ -194,15 +198,41 @@ class Reader {
     const rules: AutomationRule[] = [];
     source.rules.forEach((rule: unknown, index: number) => {
       const path = `automation.rules[${index}]`;
-      if (!isObject(rule) || rule.on !== 'review') {
-        this.ignore(path, 'must set "on" to "review", the only supported trigger', 'no rule');
+      if (!isObject(rule) || (rule.on !== 'review' && rule.on !== 'job-failed')) {
+        this.ignore(path, 'must set "on" to "review" or "job-failed"', 'no rule');
+        return;
+      }
+      const exact =
+        typeof rule.host === 'string' &&
+        HOST.test(rule.host.toLowerCase()) &&
+        exactList(rule.projects, PROJECT);
+      if (rule.on === 'job-failed') {
+        if (
+          Object.keys(rule).some((key) => !RULE_KEYS.includes(key)) ||
+          !exact ||
+          (rule.action ?? 'investigate') !== 'investigate'
+        ) {
+          this.ignore(
+            path,
+            'needs an exact host and project list, and action "investigate"',
+            'no rule',
+          );
+          return;
+        }
+        const allowedModels = this.allowedModels(path, rule, groups);
+        if (allowedModels === null) return;
+        rules.push({
+          on: 'job-failed',
+          host: (rule.host as string).toLowerCase(),
+          projects: [...new Set(rule.projects as string[])],
+          action: 'investigate',
+          ...(allowedModels ? { allowedModels } : {}),
+        });
         return;
       }
       if (
-        Object.keys(rule).some((key) => !RULE_KEYS.includes(key)) ||
-        typeof rule.host !== 'string' ||
-        !HOST.test(rule.host.toLowerCase()) ||
-        !exactList(rule.projects, /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/) ||
+        Object.keys(rule).some((key) => ![...RULE_KEYS, 'reviewers'].includes(key)) ||
+        !exact ||
         !exactList(rule.reviewers, /^[a-zA-Z0-9_.[\]-]+$/) ||
         rule.action !== 'prepare'
       ) {
@@ -217,8 +247,8 @@ class Reader {
       if (allowedModels === null) return;
       rules.push({
         on: 'review',
-        host: rule.host.toLowerCase(),
-        projects: [...new Set(rule.projects)],
+        host: (rule.host as string).toLowerCase(),
+        projects: [...new Set(rule.projects as string[])],
         reviewers: [...new Set(rule.reviewers.map((name) => name.toLowerCase()))],
         action: 'prepare',
         ...(allowedModels ? { allowedModels } : {}),
