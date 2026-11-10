@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.0.2...opencode-forgekeeper-3.1.0) (2026-11-10)
+
+
+### Features
+
+* **forgekeeper:** prepare fixes for feedback from authorized reviewers ([#127](https://github.com/pedropombeiro/opencode-plugins/issues/127)) ([27843ff](https://github.com/pedropombeiro/opencode-plugins/commit/27843ff8df568535231c56b6d3d2fe591f286b6f))
+
+
+### Bug Fixes
+
+* **forgekeeper:** rebuild summary steps after a linked-note call ([#140](https://github.com/pedropombeiro/opencode-plugins/issues/140)) ([de0db62](https://github.com/pedropombeiro/opencode-plugins/commit/de0db62f8233d08ee6c95de56befb1b3be60aa9a))
+* **forgekeeper:** use the upstream branch when no push branch resolves ([#138](https://github.com/pedropombeiro/opencode-plugins/issues/138)) ([bfe0845](https://github.com/pedropombeiro/opencode-plugins/commit/bfe0845c62ebd3ffebacfa09fa1851d1a6f5d68e))
+
 ## [3.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.0.1...opencode-forgekeeper-3.0.2) (2026-11-09)
 
 
