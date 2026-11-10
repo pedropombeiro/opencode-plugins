@@ -362,11 +362,15 @@ export function restrictRequest(
   if (tool) event.tools[tool.name] = tool.value;
   event.system.splice(0, event.system.length, { type: 'text', text: system });
   event.options.maxTokens = SUMMARY_MAX_TOKENS;
-  // The hook's messages are instances of OpenCode's message class, which
-  // validates its fields. The plugin can't import it, so it reuses the
-  // constructor of a message in the request. Without one, the request fails
+  // The hook's messages are instances of OpenCode's message classes, one per
+  // role, which validate their fields. The plugin can't import them, so it
+  // reuses the constructor of a user message in the request; after a tool
+  // call, the last message is a tool result. Without one, the request fails
   // rather than keeping any of the session's messages.
-  const Message = (event.messages.at(-1) as { constructor?: unknown } | undefined)?.constructor as
+  const user = event.messages.findLast(
+    (message) => (message as { role?: unknown } | undefined)?.role === 'user',
+  );
+  const Message = (user as { constructor?: unknown } | undefined)?.constructor as
     | (new (input: unknown) => unknown)
     | undefined;
   if (!Message || Message === Object)

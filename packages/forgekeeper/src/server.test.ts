@@ -557,12 +557,23 @@ async function harness(options: Options = {}) {
   };
 }
 
-// Stands in for OpenCode's provider message class, which validates its fields.
+// Stand in for OpenCode's provider message classes, one per role, which
+// validate their fields.
 class ProviderMessage {
   readonly role: string;
   readonly content: Array<{ type: string; text: string }>;
   constructor(input: { role: string; content: Array<{ type: string; text: string }> }) {
-    if (!['system', 'user', 'assistant', 'tool'].includes(input.role)) throw new Error('role');
+    if (input.role !== 'user') throw new Error('Schema validation failed');
+    this.role = input.role;
+    this.content = input.content;
+  }
+}
+
+class ToolMessage {
+  readonly role: string;
+  readonly content: Array<{ type: string; text: string }>;
+  constructor(input: { role: string; content: Array<{ type: string; text: string }> }) {
+    if (input.role !== 'tool') throw new Error('Schema validation failed');
     this.role = input.role;
     this.content = input.content;
   }
@@ -1686,7 +1697,13 @@ describe('PR/MR status lifecycle', () => {
     await app.fetchLinked(supporting);
     expect(reads).toEqual([supporting]);
 
-    const second = await app.request();
+    // Like OpenCode, the step after a tool call ends with its result.
+    const second = await app.request('one', true, [
+      new ProviderMessage({ role: 'user', content: [{ type: 'text', text: 'earlier work' }] }),
+      new ToolMessage({ role: 'tool', content: [{ type: 'text', text: 'UNRELATED TOOL OUTPUT' }] }),
+    ]);
+    expect(second.messages[0]).toBeInstanceOf(ProviderMessage);
+    expect(JSON.stringify(second.messages)).not.toContain('UNRELATED TOOL OUTPUT');
     // Nothing is left to read, so the step has no tools, but keeps the rules
     // for the linked note it now holds.
     expect(second.tools).toEqual({});
