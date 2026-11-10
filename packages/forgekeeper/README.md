@@ -107,6 +107,10 @@ before a typical 5-minute prompt cache expires. Monitoring records an initial ba
 than announcing existing feedback. Pending updates survive reloads and clear when acknowledged
 or no longer relevant; merge updates remain until acknowledged.
 
+On GitLab, a request for your review, including a repeated one, also becomes an update. It
+links the author's replies since the previous request, including those in resolved threads. A
+request is informational and never starts review automation.
+
 Forgekeeper reports failed jobs but never retries or fixes them. For tracked stacks, it can
 also propose retargeting dependents after a parent merges, but never retargets or rebases itself.
 
@@ -124,6 +128,7 @@ on PRs/MRs you wrote or review, with the checkout at the head commit the pipelin
 [Investigate failed jobs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#investigate-failed-jobs).
 
 See [review detection and summaries](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications),
+[review requests](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-requests),
 [monitoring eligibility](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#which-sessions-the-server-watches),
 [stacked PRs/MRs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#stacked-prsmrs), and
 [preparing fixes](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#prepare-fixes-from-review-feedback) for details.
@@ -143,6 +148,7 @@ Only specify values you want to change. The terminal part has no separate option
 | `watch.automatedReviews` | `true` | Monitor GitLab Duo and GitHub Copilot review feedback. |
 | `watch.reviewBots` | `true` | Monitor configured review-bot accounts. |
 | `watch.lifecycle` | `true` | Monitor conflicts, failed jobs, and merges. |
+| `watch.reviewRequests` | `true` | Monitor requests for your review on GitLab MRs, including repeated ones. |
 | `reviewBots` | GitLab.com security reviewers | Exact bot usernames by host. Your list replaces the defaults. |
 | `delivery.reviews` | `"inbox"` | Review delivery: `inbox`, `passive`, or `summary`. |
 | `delivery.lifecycle` | `"inbox"` | Conflict, job-failure, and merge delivery. |

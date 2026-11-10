@@ -147,7 +147,13 @@ describe('statusOptions', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
       pollSeconds: 120,
-      watch: { humanReviews: true, automatedReviews: true, reviewBots: true, lifecycle: true },
+      watch: {
+        humanReviews: true,
+        automatedReviews: true,
+        reviewBots: true,
+        lifecycle: true,
+        reviewRequests: true,
+      },
       reviewBots: DEFAULT_REVIEW_BOTS,
       delivery: { reviews: 'inbox', lifecycle: 'inbox' },
       lifecycleExecution: { parentMerged: notify },
@@ -164,7 +170,7 @@ describe('statusOptions', () => {
       statusOptions({
         status: false,
         pollSeconds: 45,
-        watch: { humanReviews: false, lifecycle: false },
+        watch: { humanReviews: false, lifecycle: false, reviewRequests: false },
         delivery: { reviews: 'summary' },
         hosts: ['gitlab.example.com'],
         githubHosts: [],
@@ -172,7 +178,13 @@ describe('statusOptions', () => {
     ).toMatchObject({
       enabled: false,
       pollSeconds: 45,
-      watch: { humanReviews: false, automatedReviews: true, reviewBots: true, lifecycle: false },
+      watch: {
+        humanReviews: false,
+        automatedReviews: true,
+        reviewBots: true,
+        lifecycle: false,
+        reviewRequests: false,
+      },
       delivery: { reviews: 'summary', lifecycle: 'inbox' },
       problems: [],
     });
