@@ -94,7 +94,10 @@ export async function resolveRepository(
   let sourceBranch = branch;
   if (pushRemote && remotes.has(pushRemote)) {
     sourceRemote = pushRemote;
+    // `push.default=simple` names no push branch when the upstream branch
+    // has another name, so the branch pushes to its upstream on that remote.
     if (pushRef) sourceBranch = stripHeads(pushRef);
+    else if (upstreamRef && upstreamRemote === pushRemote) sourceBranch = stripHeads(upstreamRef);
   } else if (upstreamRemote && remotes.has(upstreamRemote)) {
     sourceRemote = upstreamRemote;
     if (upstreamRef) sourceBranch = stripHeads(upstreamRef);

@@ -99,6 +99,17 @@ describe('resolveRepository', () => {
     });
   });
 
+  test('uses the upstream branch when the push branch is unresolved', async () => {
+    const branch = async (refs: string) => {
+      const lookup = await resolveRepository(fakeGit({ ...base, [REFS]: refs }), '/repo', onGitLab);
+      return lookup.kind === 'repository' && lookup.repository.sourceBranch;
+    };
+    // Like `push.default=simple` with an upstream branch of another name.
+    expect(await branch('origin\0\0origin\0refs/heads/remote-feature')).toBe('remote-feature');
+    // An upstream on another remote isn't where the branch pushes.
+    expect(await branch('origin\0\0upstream\0refs/heads/remote-feature')).toBe('feature');
+  });
+
   test('falls back to origin and the local branch name without tracking', async () => {
     const lookup = await resolveRepository(
       fakeGit({ ...base, [REFS]: '\0\0\0' }),
