@@ -2,8 +2,10 @@ import type { FeedbackSnapshot, ReviewComment, ReviewRequest } from './forge';
 import { reference } from './forges';
 
 // Humans add and edit comments over a review, so new comments are announced
-// only after no human comment has changed for this long.
-export const SETTLE_TIME = 5 * 60_000;
+// only after no human comment has changed for this long. With the faster
+// polls while feedback settles, a batch starts within about 5 minutes of its
+// last comment, before a typical 5-minute prompt cache expires.
+export const SETTLE_TIME = 4 * 60_000;
 // Feedback is fetched at most this often per session and request, even when
 // the status polls faster, such as during an automated review.
 export const FETCH_INTERVAL = 60_000;
@@ -126,6 +128,13 @@ export function eligibleFeedback(
   return now - lastActivity >= SETTLE_TIME ? pending : [];
 }
 
+// Whether a snapshot has new comments that aren't announced yet.
+export const hasPendingFeedback = (
+  snapshot: FeedbackSnapshot,
+  seen: SeenComments,
+  counts?: Counts,
+) => humanFeedback(snapshot, counts).some((comment) => isNew(comment, seen));
+
 const authors = (comments: ReviewComment[]) => [
   ...new Set(comments.map((comment) => `@${comment.username}`)),
 ];
@@ -142,7 +151,7 @@ export function feedbackMessage(request: ReviewRequest, comments: ReviewComment[
   if (comments.length > MAX_LINKS) links.push(`- and ${comments.length - MAX_LINKS} more`);
   return [
     `New review feedback from ${list(authors(comments))} on ${reference(request)} (${request.url}).`,
-    'No review comment has changed for at least 5 minutes. New comments:',
+    `No review comment has changed for at least ${SETTLE_TIME / 60_000} minutes. New comments:`,
     ...links,
     'Fetch these comments and their discussion threads, then assess and address the feedback.',
   ].join('\n');
@@ -188,6 +197,8 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
   const retryAt = new Map<string, number>();
   const snapshots = new Map<string, FeedbackSnapshot>();
   const dirty = new Set<string>();
+  // Keys whose last snapshot had new comments that were still settling.
+  const settling = new Set<string>();
 
   // Merges the stored and local records. The higher baseline is the safer one.
   const seen = (key: string, shared: FeedbackRecord | undefined): SeenComments | undefined => {
@@ -218,6 +229,7 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
     const stored = await options.record(key);
     const at = now();
     const previous = seen(key, stored);
+    settling.delete(key);
     if (!previous) {
       const baseline = baselineOf(snapshot);
       const baselineIDs = snapshot.comments
@@ -225,12 +237,17 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
         .map((comment) => comment.id);
       return remember(key, { baseline, baselineIDs }, at);
     }
-    if (options.ready && !options.ready(snapshot, at, request)) return;
     if (at < (retryAt.get(key) ?? 0)) return;
+    const pending = hasPendingFeedback(snapshot, previous, options.counts);
+    if (options.ready && !options.ready(snapshot, at, request)) {
+      if (pending) settling.add(key);
+      return;
+    }
     const comments = eligibleFeedback(snapshot, previous, at, options.counts).filter(
       (comment) => !reserved.has(`${key} ${comment.id}`),
     );
     if (comments.length === 0) {
+      if (pending) settling.add(key);
       if (stored && at - stored.seenAt > TOUCH_INTERVAL) options.persist(key, {}, at);
       return;
     }
@@ -254,6 +271,11 @@ export function createFeedbackWatcher(options: FeedbackWatcherOptions) {
       fetchedAt.delete(key);
       snapshots.delete(key);
       dirty.add(key);
+    },
+    // Whether new comments on one of the session's requests are waiting for
+    // the quiet period, so its status should poll faster.
+    settling(sessionID: string, requests: readonly ReviewRequest[]): boolean {
+      return requests.some((request) => settling.has(feedbackKey(sessionID, request)));
     },
     // Fetches the request's comments, unless a fetch is running or ran
     // recently, and announces settled feedback. Resolves once that work is done.

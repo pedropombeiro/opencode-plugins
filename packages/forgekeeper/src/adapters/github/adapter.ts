@@ -51,6 +51,7 @@ interface Pull {
   baseRepository: { nameWithOwner: string };
   baseRefName: string;
   updatedAt: string;
+  author?: { id?: string } | null;
   reviewThreads: Connection<{ isResolved: boolean }>;
   reviewRequests: Connection<{
     requestedReviewer?: { __typename?: string; login?: string; name?: string } | null;
@@ -67,6 +68,7 @@ const COPILOT_AUTHOR = 'copilot-pull-request-reviewer[bot]';
 
 const fields = `number title url state isDraft mergeable reviewDecision headRefOid headRefName
   headRepository { nameWithOwner } baseRepository { nameWithOwner } baseRefName updatedAt
+  author { ... on User { id } ... on Bot { id } }
   reviewThreads(first:100) { nodes { isResolved } pageInfo { hasNextPage endCursor } }
   reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
   copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
@@ -233,6 +235,24 @@ export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
     status: (request) => copilotStatus(request.copilotReview),
   },
   feedback: {
+    async viewerID(run, directory, host) {
+      const data = await typed(ghGraphQL(run, directory))(
+        host,
+        query<{ viewer: { id: string } | null }>('query { viewer { id } }'),
+        {},
+      );
+      return data.viewer?.id;
+    },
+    async reviewerID(run, directory, host, username) {
+      const result = await run(
+        'gh',
+        ['api', '--hostname', host, `users/${encodeURIComponent(username)}`],
+        directory,
+      );
+      if (result.code !== 0) throw new Error('Could not resolve the GitHub reviewer account');
+      const user = JSON.parse(result.stdout) as { login?: string; node_id?: string };
+      return user.login?.toLowerCase() === username.toLowerCase() ? user.node_id : undefined;
+    },
     async fetch(run, directory, request) {
       const ref = githubTraits.parseUrl(request.url);
       return ref
@@ -500,6 +520,7 @@ export class GitHubForge implements Forge {
       ...(node.headRepository ? { sourceProject: node.headRepository.nameWithOwner } : {}),
       sourceBranch: node.headRefName,
       headSha: node.headRefOid,
+      ...(node.author?.id ? { authorID: node.author.id } : {}),
       updatedAt: node.updatedAt,
       pipeline:
         contexts.nodes.length || !contexts.complete

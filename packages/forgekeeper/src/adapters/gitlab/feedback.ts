@@ -159,7 +159,7 @@ interface DetailNode {
     oldPath: string | null;
     oldLine: number | null;
   } | null;
-  author: { username: string } | null;
+  author: { id?: string; username: string } | null;
   discussion?: {
     notes?: {
       nodes: Array<{ id: string; body: string; author: { username: string } | null }>;
@@ -210,7 +210,7 @@ export async function fetchDetails(
       .slice(start, start + DETAIL_BATCH)
       .map(
         (id, index) =>
-          `n${index}: note(id: "gid://gitlab/Note/${id}") { id url body author { username }
+          `n${index}: note(id: "gid://gitlab/Note/${id}") { id url body author { id username }
             position { diffRefs { baseSha headSha } newPath newLine oldPath oldLine }
             discussion { notes(first: ${THREAD_NOTES}) { nodes { id body author { username } } } } }`,
       )
@@ -240,6 +240,7 @@ export async function fetchDetails(
       id: noteNumber(node.id),
       url: node.url ?? '',
       username: node.author?.username ?? '',
+      ...(node.author?.id ? { authorID: node.author.id } : {}),
       body: node.body,
       ...(at ? { path: at.path, line: at.line } : {}),
       ...(text && at ? { code: { path: at.path, text } } : {}),

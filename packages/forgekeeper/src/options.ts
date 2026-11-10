@@ -10,6 +10,7 @@ export interface StatusOptions {
   reviewBots: ReviewBots;
   delivery: Delivery;
   lifecycleExecution: LifecycleExecution;
+  automation: { rules: AutomationRule[] };
   // Option values that were ignored, and why, for a notice at startup.
   problems: string[];
 }
@@ -49,6 +50,22 @@ export interface LifecycleExecution {
   parentMerged: EventPolicy;
 }
 
+// What starts an automatic coding turn, and what it does. Each rule names its
+// trigger in `on`, so other triggers, such as failed jobs, can be added.
+export type AutomationRule = ReviewAutomationRule;
+
+// Feedback from the listed reviewers starts a turn that prepares fixes. With
+// `allowedModels`, from the rule or its `allowedModelGroup`, only those
+// models, as `provider/model`, may act on that feedback.
+export interface ReviewAutomationRule {
+  on: 'review';
+  host: string;
+  projects: string[];
+  reviewers: string[];
+  action: 'prepare';
+  allowedModels?: string[];
+}
+
 // Review bot usernames by host, both lowercase.
 export type ReviewBots = Readonly<Record<string, readonly string[]>>;
 
@@ -71,6 +88,17 @@ const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
 
 const HOST = /^[a-z0-9.-]+(:\d+)?$/;
 const USERNAME = /^[a-z0-9_.[\]-]+$/;
+const MODEL = /^[^/\s]+\/\S+$/;
+const GROUP = /^[a-zA-Z0-9_-]+$/;
+const RULE_KEYS = [
+  'on',
+  'host',
+  'projects',
+  'reviewers',
+  'action',
+  'allowedModels',
+  'allowedModelGroup',
+];
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
 const ACTIONS: Record<keyof LifecycleExecution, readonly ExecutionAction[]> = {
@@ -84,6 +112,7 @@ const OPTIONS = [
   'reviewBots',
   'delivery',
   'lifecycleExecution',
+  'automation',
   'hosts',
   'githubHosts',
 ];
@@ -92,12 +121,111 @@ type Source = Record<string, unknown>;
 
 const isObject = (value: unknown): value is Source =>
   !!value && typeof value === 'object' && !Array.isArray(value);
+const exactList = (list: unknown, pattern: RegExp): list is string[] =>
+  Array.isArray(list) &&
+  list.length > 0 &&
+  list.every((entry) => typeof entry === 'string' && pattern.test(entry));
 const quoted = (values: readonly string[]) => values.map((value) => `"${value}"`).join(', ');
 
 // Reads options, collecting each ignored value as a problem that names its
 // path and what's used instead.
 class Reader {
   readonly problems: string[] = [];
+
+  // Named lists of allowed models that rules share. An invalid group is
+  // dropped, so the rules that name it are too.
+  modelGroups(value: unknown): Map<string, string[]> {
+    const groups = new Map<string, string[]>();
+    if (value === undefined) return groups;
+    if (!isObject(value)) {
+      this.ignore('automation.modelGroups', 'must map group names to model lists', 'no groups');
+      return groups;
+    }
+    for (const [name, models] of Object.entries(value)) {
+      if (!GROUP.test(name) || !exactList(models, MODEL)) {
+        this.ignore(
+          `automation.modelGroups.${name}`,
+          'must be a nonempty list of "provider/model" IDs',
+          'no group',
+        );
+        continue;
+      }
+      groups.set(name, [...new Set(models)]);
+    }
+    return groups;
+  }
+
+  // A rule's allowed models: its own list or its group's, or undefined for
+  // any model. Returns null when they're invalid, which drops the rule.
+  allowedModels(
+    path: string,
+    rule: Source,
+    groups: ReadonlyMap<string, string[]>,
+  ): string[] | undefined | null {
+    const { allowedModels: listed, allowedModelGroup: group } = rule;
+    if (listed !== undefined && group !== undefined) {
+      this.ignore(path, 'can set allowedModels or allowedModelGroup, not both', 'no rule');
+      return null;
+    }
+    if (group !== undefined) {
+      const models = typeof group === 'string' ? groups.get(group) : undefined;
+      if (models) return models;
+      this.ignore(
+        path,
+        `names allowed model group ${JSON.stringify(group)}, which automation.modelGroups doesn't define`,
+        'no rule',
+      );
+      return null;
+    }
+    if (listed === undefined) return undefined;
+    if (exactList(listed, MODEL)) return [...new Set(listed)];
+    this.ignore(path, 'allowedModels must be a nonempty list of "provider/model" IDs', 'no rule');
+    return null;
+  }
+
+  automation(value: unknown): { rules: AutomationRule[] } {
+    const source = this.object('automation', value, ['rules', 'modelGroups']);
+    const groups = this.modelGroups(source.modelGroups);
+    if (source.rules === undefined) return { rules: [] };
+    if (!Array.isArray(source.rules)) {
+      this.ignore('automation.rules', 'must be a list', 'no rules');
+      return { rules: [] };
+    }
+    const rules: AutomationRule[] = [];
+    source.rules.forEach((rule: unknown, index: number) => {
+      const path = `automation.rules[${index}]`;
+      if (!isObject(rule) || rule.on !== 'review') {
+        this.ignore(path, 'must set "on" to "review", the only supported trigger', 'no rule');
+        return;
+      }
+      if (
+        Object.keys(rule).some((key) => !RULE_KEYS.includes(key)) ||
+        typeof rule.host !== 'string' ||
+        !HOST.test(rule.host.toLowerCase()) ||
+        !exactList(rule.projects, /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/) ||
+        !exactList(rule.reviewers, /^[a-zA-Z0-9_.[\]-]+$/) ||
+        rule.action !== 'prepare'
+      ) {
+        this.ignore(
+          path,
+          'needs an exact host, project and reviewer lists, and action "prepare"',
+          'no rule',
+        );
+        return;
+      }
+      const allowedModels = this.allowedModels(path, rule, groups);
+      if (allowedModels === null) return;
+      rules.push({
+        on: 'review',
+        host: rule.host.toLowerCase(),
+        projects: [...new Set(rule.projects)],
+        reviewers: [...new Set(rule.reviewers.map((name) => name.toLowerCase()))],
+        action: 'prepare',
+        ...(allowedModels ? { allowedModels } : {}),
+      });
+    });
+    return { rules };
+  }
 
   ignore(path: string, reason: string, fallback: string) {
     this.problems.push(`${path} ${reason}; using ${fallback}`);
@@ -237,6 +365,7 @@ export function statusOptions(options: unknown): StatusOptions {
     reviewBots: read.reviewBots(source.reviewBots),
     delivery: { reviews: delivered('reviews'), lifecycle: delivered('lifecycle') },
     lifecycleExecution: { parentMerged: read.policy('parentMerged', execution.parentMerged) },
+    automation: read.automation(source.automation),
     problems: read.problems,
   };
 }

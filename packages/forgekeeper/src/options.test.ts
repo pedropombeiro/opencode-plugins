@@ -5,6 +5,104 @@ const notify = { mode: 'notify' as const, actions: [] };
 const prepare = { mode: 'prepare' as const, actions: ['retarget' as const] };
 
 describe('statusOptions', () => {
+  test('automation is opt-in and validates whole rules without broadening them', () => {
+    const rule = {
+      on: 'review' as const,
+      host: 'GitLab.com',
+      projects: ['team/project'],
+      reviewers: ['GitLabDuo'],
+      action: 'prepare' as const,
+    };
+    expect(statusOptions({ automation: { rules: [rule] } }).automation.rules).toEqual([
+      { ...rule, host: 'gitlab.com', reviewers: ['gitlabduo'] },
+    ]);
+    for (const invalid of [
+      { ...rule, host: '*.gitlab.com' },
+      { ...rule, projects: ['team/*'] },
+      { ...rule, reviewers: ['duo*'] },
+      { ...rule, reviewers: [] },
+      { ...rule, action: 'push' },
+      { ...rule, unexpected: true },
+    ]) {
+      const options = statusOptions({ automation: { rules: [invalid] } });
+      expect(options.automation.rules).toEqual([]);
+      expect(options.problems).toHaveLength(1);
+    }
+    expect(statusOptions({ reviewBots: { 'gitlab.com': ['GitLabDuo'] } }).automation.rules).toEqual(
+      [],
+    );
+  });
+
+  test('automation rules restrict models inline or through a named group', () => {
+    const rule = {
+      on: 'review' as const,
+      host: 'gitlab.com',
+      projects: ['team/project'],
+      reviewers: ['gitlabduo'],
+      action: 'prepare' as const,
+    };
+    const modelGroups = { coding: ['gitlab/strong', 'gitlab/strong', 'openrouter/vendor/model'] };
+    const read = (rules: unknown[], groups: unknown = modelGroups) =>
+      statusOptions({ automation: { modelGroups: groups, rules } });
+    const grouped = read([
+      { ...rule, allowedModelGroup: 'coding' },
+      { ...rule, allowedModels: ['gitlab/other'] },
+      rule,
+    ]);
+    expect(grouped.problems).toEqual([]);
+    expect(grouped.automation.rules).toEqual([
+      { ...rule, allowedModels: ['gitlab/strong', 'openrouter/vendor/model'] },
+      { ...rule, allowedModels: ['gitlab/other'] },
+      rule,
+    ]);
+    for (const [invalid, problem] of [
+      [
+        { ...rule, allowedModelGroup: 'coding', allowedModels: ['gitlab/strong'] },
+        'automation.rules[0] can set allowedModels or allowedModelGroup, not both; using no rule',
+      ],
+      [
+        { ...rule, allowedModelGroup: 'missing' },
+        'automation.rules[0] names allowed model group "missing", which automation.modelGroups doesn\'t define; using no rule',
+      ],
+      [
+        { ...rule, allowedModels: [] },
+        'automation.rules[0] allowedModels must be a nonempty list of "provider/model" IDs; using no rule',
+      ],
+      [
+        { ...rule, allowedModels: ['strong'] },
+        'automation.rules[0] allowedModels must be a nonempty list of "provider/model" IDs; using no rule',
+      ],
+    ] as const) {
+      const options = read([invalid]);
+      expect(options.automation.rules).toEqual([]);
+      expect(options.problems).toEqual([problem]);
+    }
+    const broken = read([{ ...rule, allowedModelGroup: 'empty' }], { empty: [] });
+    expect(broken.automation.rules).toEqual([]);
+    expect(broken.problems).toEqual([
+      'automation.modelGroups.empty must be a nonempty list of "provider/model" IDs; using no group',
+      'automation.rules[0] names allowed model group "empty", which automation.modelGroups doesn\'t define; using no rule',
+    ]);
+  });
+
+  test('automation rules name their trigger, and unsupported triggers are ignored', () => {
+    const untriggered = {
+      host: 'gitlab.com',
+      projects: ['team/project'],
+      reviewers: ['GitLabDuo'],
+      action: 'prepare',
+    };
+    for (const rule of [untriggered, { ...untriggered, on: 'job-failed' }]) {
+      const options = statusOptions({ automation: { rules: [rule] } });
+      expect(options.automation.rules).toEqual([]);
+      expect(options.problems).toEqual([
+        'automation.rules[0] must set "on" to "review", the only supported trigger; using no rule',
+      ]);
+    }
+    expect(statusOptions({ reviewAutomation: { rules: [] } }).problems).toEqual([
+      "reviewAutomation isn't a Forgekeeper option; ignoring it",
+    ]);
+  });
   test('watches everything and delivers only to the inbox by default', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
@@ -13,6 +111,7 @@ describe('statusOptions', () => {
       reviewBots: DEFAULT_REVIEW_BOTS,
       delivery: { reviews: 'inbox', lifecycle: 'inbox' },
       lifecycleExecution: { parentMerged: notify },
+      automation: { rules: [] },
       problems: [],
     });
     expect(DEFAULT_REVIEW_BOTS).toEqual({

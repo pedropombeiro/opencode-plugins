@@ -240,6 +240,9 @@ export function createReviewMonitoring(
         ? {
             watches: (request: ReviewRequest) =>
               !!human || !!traitsOf(request).automatedReview?.publishedFeedback,
+            settling: (sessionID: string, requests: readonly ReviewRequest[]) =>
+              !!human?.settling(sessionID, requests) ||
+              !!publishedFeedback?.settling(sessionID, requests),
             async check(sessionID: string, request: ReviewRequest) {
               await Promise.all([
                 human?.check(sessionID, request),

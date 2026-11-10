@@ -402,6 +402,36 @@ describe('createFeedbackWatcher', () => {
     expect(h.sent).toEqual([['1']]);
   });
 
+  test('reports new comments as settling until they are announced', async () => {
+    const h = harness();
+    await h.check();
+    expect(h.watcher.settling('ses_1', [mr])).toBe(false);
+    h.set(snapshot(comment('1', { editedAt: h.now() })));
+    h.tick();
+    await h.check();
+    expect(h.watcher.settling('ses_1', [mr])).toBe(true);
+    // Only the session's current requests count.
+    expect(h.watcher.settling('ses_1', [])).toBe(false);
+    expect(h.watcher.settling('ses_2', [mr])).toBe(false);
+    h.tick(SETTLE_TIME);
+    await h.check();
+    expect(h.sent).toEqual([['1']]);
+    expect(h.watcher.settling('ses_1', [mr])).toBe(false);
+  });
+
+  test('stops reporting settling while a failed send waits to retry', async () => {
+    const h = harness();
+    await h.check();
+    h.set(snapshot(comment('1', { editedAt: h.now() })));
+    h.setFail(new Error('down'));
+    h.tick(SETTLE_TIME);
+    await h.check();
+    expect(h.sendErrors).toHaveLength(1);
+    h.tick();
+    await h.check();
+    expect(h.watcher.settling('ses_1', [mr])).toBe(false);
+  });
+
   test('restarts the settle time after an edit', async () => {
     const h = harness();
     await h.check();

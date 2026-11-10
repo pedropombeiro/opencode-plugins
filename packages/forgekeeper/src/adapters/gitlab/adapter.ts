@@ -42,6 +42,7 @@ interface MergeRequestNode {
   sourceBranch: string;
   sourceProject: { fullPath: string } | null;
   targetProject: { fullPath: string };
+  author?: { id: string } | null;
   headPipeline: {
     id?: string | null;
     status: string;
@@ -100,6 +101,7 @@ const MERGE_REQUEST_FIELDS = `
   approvedBy(first: 100) { nodes { id bot } }
   sourceProject { fullPath }
   targetProject { fullPath }
+  author { id }
   headPipeline {
     id status path detailedStatus { label }
     jobs(statuses: [FAILED], retried: false, first: ${FIRST_FAILED_JOBS}) { ${FAILED_JOBS} }
@@ -266,6 +268,26 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     },
   },
   feedback: {
+    async viewerID(run, directory, host) {
+      const data = await typed(glabGraphQL(run, directory))(
+        host,
+        query<{ currentUser: { id: string } | null }>('query { currentUser { id } }'),
+        {},
+      );
+      return data.currentUser?.id;
+    },
+    async reviewerID(run, directory, host, username) {
+      const data = await typed(glabGraphQL(run, directory))(
+        host,
+        query<{ user: { id: string; username: string } | null }>(
+          'query($username: String!) { user(username: $username) { id username } }',
+        ),
+        { username },
+      );
+      return data.user?.username.toLowerCase() === username.toLowerCase()
+        ? data.user.id
+        : undefined;
+    },
     subscribe: subscribeToNotes,
     async fetch(run, directory, request) {
       const ref = gitlabTraits.parseUrl(request.url);
@@ -466,6 +488,7 @@ export class GitLabForge implements Forge {
       ...(node.sourceProject ? { sourceProject: node.sourceProject.fullPath } : {}),
       sourceBranch: node.sourceBranch,
       headSha: node.diffHeadSha ?? undefined,
+      ...(node.author?.id ? { authorID: node.author.id } : {}),
       updatedAt: node.updatedAt ?? undefined,
       pipeline: pipeline
         ? {

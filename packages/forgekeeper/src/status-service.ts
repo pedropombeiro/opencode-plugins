@@ -28,6 +28,8 @@ export interface StatusServiceOptions {
   human?: {
     check: (sessionID: string, request: ReviewRequest) => unknown;
     watches?: (request: ReviewRequest) => boolean;
+    // Whether new comments are waiting for the quiet period.
+    settling?: (sessionID: string, requests: readonly ReviewRequest[]) => boolean;
   };
   feedbackTargets?: (sessionID: string, requests: ReviewRequest[]) => void;
   // Receives each lookup's targets, in every state, for lifecycle events.
@@ -83,7 +85,10 @@ export function createStatusService(options: StatusServiceOptions) {
     onChange: (key) => options.publish(key, store.get(key)),
     onLoad: (key, previous, next) => onLoad(key, previous, next),
     onLoadError: report,
-    active: isReviewRunning,
+    // New comments poll faster too, so a batch starts soon after it settles.
+    active: (lookup, key) =>
+      isReviewRunning(lookup) ||
+      (!feedbackPaused && !!options.human?.settling?.(key, watchedForFeedback(key, lookup))),
     interval: options.interval,
     activeInterval: options.activeInterval,
     now,
