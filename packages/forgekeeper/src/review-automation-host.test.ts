@@ -330,6 +330,7 @@ describe('failed-job checks', () => {
       checkout?: string;
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
+      sessions?: () => string[];
     } = {},
   ) {
     const request = {
@@ -387,7 +388,11 @@ describe('failed-job checks', () => {
         },
         deliverable: async () => true,
         readFeedback: async () => undefined,
-        scan: async () => [{ key: 'sessions/one', value: { targets: [{ url }] } }],
+        scan: async () =>
+          (overrides.sessions?.() ?? ['one']).map((id) => ({
+            key: `sessions/${id}`,
+            value: { targets: [{ url }] },
+          })),
         missingSession: () => false,
         redeliver: () => {},
         report: () => {},
@@ -470,6 +475,36 @@ describe('failed-job checks', () => {
     const started = (await f.claims.records.read(jobBatch))!;
     expect(started.item.id).toBe('f3');
     expect(started.startedAt! - f3At).toBeGreaterThanOrEqual(INVESTIGATION_QUIET_TIME);
+    f.close();
+  });
+
+  test('rechecks sole ownership after waiting out the quiet time', async () => {
+    let clock = 1_000_000;
+    const sessions = ['one'];
+    const jobBatch = 'd'.repeat(64);
+    const running: AutomationRecord = {
+      batch: jobBatch,
+      item: { ...failure, at: clock },
+      messageID: preparationMessageID(jobBatch, 1),
+      state: 'running',
+      attempt: 1,
+      at: clock,
+      manual: true,
+    };
+    const f = jobHost({
+      now: () => clock,
+      sessions: () => sessions,
+      // Another session targets the PR/MR while the request waits.
+      sleep: async (ms) => {
+        clock += ms;
+        if (!sessions.includes('two')) sessions.push('two');
+      },
+    });
+    await f.claims.records.save(running);
+    await expect(f.automation.authorizeStart(running, 'gitlab/any')).rejects.toThrow(
+      'ownership changed',
+    );
+    expect((await f.claims.records.read(jobBatch))!.startedAt).toBeUndefined();
     f.close();
   });
 

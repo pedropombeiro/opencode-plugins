@@ -428,6 +428,12 @@ export function createAutomationHost(
       throw new Error('Review automation was canceled before the coding turn');
   }
 
+  async function assertSoleOwner(item: FeedbackItem) {
+    const sessions = await associations(item.url);
+    if (sessions.length !== 1 || sessions[0] !== item.sessionID)
+      throw new Error('Review automation ownership changed before the coding turn');
+  }
+
   async function pipelineDone(item: FeedbackItem) {
     const request = await currentRequest(deps, directory, item.url);
     return (
@@ -534,9 +540,7 @@ export function createAutomationHost(
     async authorizeStart(record: AutomationRecord, requested: string) {
       if (record.state !== 'running') throw new Error('Review automation is no longer running');
       await assertPending(record.item);
-      const sessions = await associations(record.item.url);
-      if (sessions.length !== 1 || sessions[0] !== record.item.sessionID)
-        throw new Error('Review automation ownership changed before the coding turn');
+      await assertSoleOwner(record.item);
       const ref = parseUrl(record.item.url);
       if (isJobFailure(record.item)) {
         // A job that fails before this first request replaces the batch's
@@ -569,6 +573,8 @@ export function createAutomationHost(
           const refusal = modelRefusal(models, requested, 'retry');
           if (refusal) throw new Error(refusal);
           await assertPending(current.item);
+          // Another session may have targeted the PR/MR during the wait.
+          await assertSoleOwner(current.item);
           const started: AutomationRecord = { ...current, startedAt: now() };
           if (models) started.models = models;
           if (await save(started, current)) return;
