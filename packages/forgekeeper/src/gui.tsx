@@ -507,12 +507,14 @@ export default Plugin.define({
     ctx.add(Panel, {
       id: STATUS_TAB,
       region: 'side',
+      width: 420,
       list: (input) => (input.open.includes(STATUS_TAB) ? [statusTab] : []),
       render: (props) => <StatusView session={props.session} />,
     });
     ctx.add(Panel, {
       id: FEEDBACK_TAB,
       region: 'side',
+      width: 420,
       list: (input) => (input.open.includes(FEEDBACK_TAB) ? [feedbackTab] : []),
       render: (props) => <FeedbackView session={props.session} />,
     });
