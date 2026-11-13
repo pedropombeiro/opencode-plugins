@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="Build with sourcemaps for development"
 #USAGE arg "<package>" help="Package to build (e.g. terminal-progress)"
+#USAGE complete "package" run="find packages -mindepth 2 -maxdepth 2 -name package.json | sed 's|/package.json$||; s|^packages/||'"
 set -euo pipefail
 # shellcheck disable=SC2154 # mise sets usage_* from the #USAGE lines
 pkg="packages/${usage_package}"

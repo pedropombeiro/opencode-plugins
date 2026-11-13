@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
 #MISE description="Run all tests"
+#MISE raw_args=true
+#USAGE arg "[args]" var=#true help="Test files and additional Bun test arguments"
+#USAGE flag "-t --test-name-pattern <pattern>" help="Run tests with matching names"
+#USAGE flag "--timeout <milliseconds>" help="Per-test timeout"
+#USAGE flag "--coverage" help="Collect test coverage"
+#USAGE flag "--watch" help="Rerun tests when files change"
+#USAGE flag "--only" help="Run tests marked with only"
+#USAGE flag "--update-snapshots" help="Update snapshot files"
+#USAGE flag "--bail" help="Stop after a test failure"
+#USAGE complete "args" type="file"
 set -euo pipefail
 bun test "$@"

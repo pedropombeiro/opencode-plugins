@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 #MISE description="Build all plugins, or only the packages passed as arguments"
+#MISE raw_args=true
+#USAGE arg "[package]" var=#true help="Packages to build (default: all)"
+#USAGE complete "package" run="find packages -mindepth 2 -maxdepth 2 -name package.json | sed 's|/package.json$||; s|^packages/||'"
 set -euo pipefail
 if [ $# -gt 0 ]; then
   pkgs=()
