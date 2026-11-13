@@ -68,6 +68,12 @@ In OpenCode Desktop, a pill above the composer shows the same status, and the co
 above open side panels for the status and the inbox. Server notices appear as toasts and
 system notifications.
 
+![OpenCode Desktop showing a merged MR, review-update summaries, and the Forgekeeper status panel.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/desktop-status.png)
+
+Conflicts appear in both the composer pill and the status panel:
+
+![OpenCode Desktop showing a PR with merge conflicts in the composer pill and Forgekeeper status panel.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/desktop-conflicts.png)
+
 The OpenCode web app loads neither the terminal nor the desktop part, but it offers two
 commands that answer in the conversation:
 
