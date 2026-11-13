@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.2.1...opencode-cache-coach-0.3.0) (2026-11-13)
+
+
+### Features
+
+* **cache-coach:** support OpenCode Desktop ([#147](https://github.com/pedropombeiro/opencode-plugins/issues/147)) ([a3a0577](https://github.com/pedropombeiro/opencode-plugins/commit/a3a057793b45c05f0e49ce152c92a70152330468))
+
 ## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.2.0...opencode-cache-coach-0.2.1) (2026-11-09)
 
 

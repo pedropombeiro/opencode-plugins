@@ -5,5 +5,5 @@
   "packages/atuin-history": "1.0.2",
   "packages/tmux-indicator": "1.0.2",
   "packages/session-finder": "1.1.1",
-  "packages/cache-coach": "0.2.1"
+  "packages/cache-coach": "0.3.0"
 }
