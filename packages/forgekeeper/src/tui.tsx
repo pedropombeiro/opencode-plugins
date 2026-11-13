@@ -20,8 +20,9 @@ import { yesNo, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import { automatedReview } from './automated-review-watch';
 import { showNotice } from './notice';
-import { ForgeSessionRpc, HEARTBEAT, HOME, type EventData, type Output } from './rpc';
-import { createStatusClient, samePlace, type Place } from './status-client';
+import { clientID, connectStatus, loadFeedback as fetchFeedback } from './client-core';
+import { ForgeSessionRpc, HOME, type EventData } from './rpc';
+import { samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
 import { feedbackFooter, feedbackTime, linkOptions, type InboxState } from './feedback-inbox';
 import type { Repository } from './git';
@@ -36,23 +37,18 @@ export default {
     let feedbackRequest = 0;
     async function loadFeedback(directory = feedbackDirectory()) {
       const request = ++feedbackRequest;
-      const state = (await rpc.feedback({}, { location: { directory } })) as InboxState;
+      const state = await fetchFeedback(rpc, directory);
       if (directory === feedbackDirectory() && request === feedbackRequest) setFeedback(state);
       return state;
     }
 
     const [version, setVersion] = createSignal(0);
-    const client = createStatusClient({
-      clientID: crypto.randomUUID(),
-      // OpenCode types the results as `unknown`; the server returns what the
-      // schemas in rpc.ts describe.
-      watch: async (directory, input) =>
-        (await rpc.watch(input, { location: { directory } })) as Output<'watch'>,
-      refresh: async (directory, key) =>
-        (await rpc.refresh({ key }, { location: { directory } })) as Output<'refresh'>,
-      release: (directory, clientID) => rpc.release({ clientID }, { location: { directory } }),
+    const connection = connectStatus(rpc, {
+      clientID: clientID(),
       onChange: () => setVersion((value) => value + 1),
+      heartbeat: () => void loadFeedback().catch(() => {}),
     });
+    const client = connection.client;
 
     // The displayed session can live in a different worktree than the one the
     // TUI started in, so resolve the directory from the session first.
@@ -84,10 +80,6 @@ export default {
     };
 
     const refresh = (place: Place) => client.refresh(place);
-    const heartbeat = setInterval(() => {
-      client.heartbeat();
-      void loadFeedback().catch(() => {});
-    }, HEARTBEAT);
 
     const color = (tone: Tone) => {
       const feedback = context.theme.text.feedback;
@@ -711,10 +703,6 @@ export default {
         const { directory } = event.data as EventData<'feedbackChanged'>;
         if (directory === feedbackDirectory()) void loadFeedback(directory).catch(() => {});
       }),
-      rpc.events.on('status', (event) => {
-        const { directory, key, snapshot } = event.data as EventData<'status'>;
-        client.receive(directory, key, snapshot);
-      }),
       rpc.events.on('notice', (event) =>
         showNotice(event.data as EventData<'notice'>, {
           hasShown: (sessionID) =>
@@ -726,9 +714,8 @@ export default {
     ];
 
     return () => {
-      clearInterval(heartbeat);
       for (const stop of stops) stop();
-      client.dispose();
+      connection.dispose();
     };
   },
 } satisfies Plugin.Definition;

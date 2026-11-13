@@ -22,8 +22,8 @@ OpenCode server's `PATH`; only the CLI for your forge is required.
 opencode plugin add opencode-forgekeeper
 ```
 
-OpenCode loads the server and terminal parts automatically. Forgekeeper uses your forge CLI's
-credentials and has none of its own. Without a forge CLI, session naming still works, and
+OpenCode loads the server, terminal, and desktop parts automatically. Forgekeeper uses your
+forge CLI's credentials and has none of its own. Without a forge CLI, session naming still works, and
 `/forge-status` explains what's missing.
 
 For self-managed hosts, configure `hosts` for GitLab hosts not named `gitlab.*`, or
@@ -63,6 +63,22 @@ For example, this footer tracks four MRs, with one conflict and two already merg
 | `/forge-status` | Show detailed status and refresh it. Aliases: `/mr-status`, `/pr-status`. |
 | `/forge-open` | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`. |
 | `/forge-feedback` | Browse pending review feedback and PR/MR updates. |
+
+In OpenCode Desktop, a pill above the composer shows the same status, and the commands
+above open side panels for the status and the inbox. Server notices appear as toasts and
+system notifications.
+
+The OpenCode web app loads neither the terminal nor the desktop part, but it offers two
+commands that answer in the conversation:
+
+| Command | Action |
+| --- | --- |
+| `/forge-report` | Show the PR/MR status of the session. |
+| `/forge-inbox` | List the session's pending updates. `ack <number>` or `ack all` acknowledges them, and `summarize <number>` summarizes one. |
+
+Each answer is a short tool-free model turn that shows a report written from forge data.
+Those apps don't display the text of messages that plugins add, so the model shows it.
+The report stays out of the session's history.
 
 Status normally refreshes every 2 minutes, or every 30 seconds during automated reviews and
 while new review feedback settles.

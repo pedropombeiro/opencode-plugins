@@ -1,5 +1,16 @@
 import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
+import {
+  FEEDBACK_COMMAND,
+  FEEDBACK_TITLE,
+  feedbackReport,
+  invalidFeedbackReport,
+  parseFeedbackAction,
+  sessionItems,
+  STATUS_COMMAND,
+  STATUS_TITLE,
+  statusReport,
+} from './commands';
 import type { TitleLookups } from './lookups';
 import { createKeyedQueue } from './keyed-queue';
 import { statusOptions } from './options';
@@ -351,6 +362,65 @@ export async function setupServer(
     }
   });
 
+  // Each answer is a report that a tool-free turn shows, or undefined when
+  // the command started a turn of its own, such as a summary.
+  async function feedbackCommand(
+    status: Status,
+    sessionID: string,
+    input: string,
+  ): Promise<string | undefined> {
+    const action = parseFeedbackAction(input);
+    if (action.kind === 'invalid') return invalidFeedbackReport(action.input);
+    const state = await status.inbox.list();
+    if (action.kind === 'list') return feedbackReport(state, sessionID);
+    const items = sessionItems(state, sessionID);
+    const chosen = action.which === 'all' ? items : [items[action.which - 1]].filter(Boolean);
+    if (chosen.length === 0)
+      return feedbackReport(
+        state,
+        sessionID,
+        action.which === 'all' ? undefined : `There is no update number ${action.which}.`,
+      );
+    if (action.kind === 'summarize') {
+      await status.summarize(chosen[0].id);
+      return undefined;
+    }
+    let next = state;
+    for (const item of chosen) next = await status.inbox.acknowledge(item.id);
+    const note =
+      chosen.length === 1
+        ? `Acknowledged: ${chosen[0].title}`
+        : `Acknowledged ${chosen.length} updates.`;
+    return feedbackReport(next, sessionID, note);
+  }
+
+  // Without status, the commands have nothing to show, and the CLI's own
+  // commands explain why.
+  const commands = watcher
+    ? await ctx.command.transform((editor) => {
+        const status = watcher!;
+        editor.add({
+          name: STATUS_COMMAND,
+          description: 'Show the PR/MR status of this session in the conversation',
+          execute: async ({ sessionID }) =>
+            status.relay(sessionID, STATUS_TITLE, statusReport(await status.refresh(sessionID))),
+        });
+        editor.add({
+          name: FEEDBACK_COMMAND,
+          description: 'List, acknowledge, or summarize review updates in the conversation',
+          execute: async ({ sessionID, prompt }) => {
+            let report: string | undefined;
+            try {
+              report = await feedbackCommand(status, sessionID, prompt.text ?? '');
+            } catch (error) {
+              report = `Forgekeeper could not complete /${FEEDBACK_COMMAND}: ${error instanceof Error ? error.message : String(error)}`;
+            }
+            if (report) await status.relay(sessionID, FEEDBACK_TITLE, report);
+          },
+        });
+      })
+    : undefined;
+
   async function writeInstructions(sessionID: string): Promise<void> {
     if (closing) return;
     const state = await stateFor(sessionID);
@@ -528,6 +598,7 @@ export async function setupServer(
     controller.abort();
     await drain(pending.tasks(), DRAIN_TIME);
     await watcher?.dispose();
+    await commands?.dispose();
     await tools.dispose();
     await rpc.dispose();
   };

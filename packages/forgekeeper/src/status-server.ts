@@ -560,6 +560,9 @@ export async function setupStatus(
       return true;
     },
     prepareSummary: summaries.prepare,
+    // Shows a report, such as a command's answer, in a tool-free turn.
+    relay: (sessionID: string, title: string, report: string): Promise<void> =>
+      tracked(summaries.relay(sessionID, title, report)),
     // Starts a summary turn for an update on request, in any delivery mode.
     summarize: (id: string): Promise<InboxState> =>
       tracked(

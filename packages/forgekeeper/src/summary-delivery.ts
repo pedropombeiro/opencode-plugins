@@ -21,6 +21,9 @@ import {
   messageTag,
   NOTICE_KIND,
   noticeText,
+  RELAY_SYSTEM,
+  relayText,
+  relayMaxTokens,
   taggedInput,
   superseded,
   restrictRequest,
@@ -48,7 +51,7 @@ interface SummaryRecord {
   at: number;
   request?: string;
   linked?: LinkedState;
-  system?: 'lifecycle';
+  system?: 'lifecycle' | 'relay';
 }
 
 export interface SummaryDependencies {
@@ -274,8 +277,40 @@ export function createSummaryDelivery(
     });
   }
 
+  // Starts a tool-free turn in which the model shows the developer a report,
+  // such as a command's answer. Only the turn's request holds the report, so
+  // it stays out of the session's history, like a summary's findings.
+  async function relay(sessionID: string, title: string, report: string): Promise<void> {
+    const hash = createHash('sha256')
+      .update(`${sessionID} ${title} ${now()} ${Math.random()}`)
+      .digest('hex');
+    const messageID = `${SUMMARY_PREFIX}${hash}`;
+    const record: SummaryRecord = {
+      sessionID,
+      messageID,
+      findings: relayText(report),
+      at: now(),
+      system: 'relay',
+    };
+    await ctx.storage.set(summaryKey(sessionID, messageID), record as never);
+    track(sessionID, messageID);
+    if (host.closing()) throw new Error('The plugin stopped');
+    await ctx.session.synthetic({
+      sessionID,
+      id: messageID,
+      text: [title, 'Forgekeeper shows this report without tools.', messageTag(messageID)].join(
+        '\n\n',
+      ),
+      description: title,
+      metadata: { forgekeeper: SUMMARY_KIND },
+      delivery: 'queue',
+      resume: true,
+    });
+  }
+
   return {
     deliver,
+    relay,
     fetchLinked,
     async prepare(event: SummaryRequest): Promise<boolean> {
       const tagged = taggedInput(event.messages);
@@ -296,12 +331,16 @@ export function createSummaryDelivery(
         event,
         record !== 'failed' && record.system === 'lifecycle'
           ? LIFECYCLE_SYSTEM
-          : summarySystem(!!tool, !!linked),
+          : record !== 'failed' && record.system === 'relay'
+            ? RELAY_SYSTEM
+            : summarySystem(!!tool, !!linked),
         record === 'failed'
           ? UNAVAILABLE_TEXT
           : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n'),
         tool ? { name: LINKED_NOTE_TOOL, value: tool } : undefined,
       );
+      if (record !== 'failed' && record.system === 'relay')
+        event.options.maxTokens = relayMaxTokens(record.findings);
       return true;
     },
     async summarizing(sessionID: string): Promise<boolean> {
