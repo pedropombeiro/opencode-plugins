@@ -34,6 +34,14 @@ type Tool = {
   options?: { codemode?: boolean };
   execute: (input: unknown, context: { sessionID: string }) => Promise<unknown>;
 };
+type Command = {
+  name: string;
+  execute: (input: {
+    sessionID: string;
+    prompt: { text: string };
+    delivery: string;
+  }) => Promise<void>;
+};
 type Hook = (event: {
   sessionID: string;
   system: { type: string; text: string }[];
@@ -226,6 +234,7 @@ async function harness(options: Options = {}) {
   };
   let tool!: Tool;
   let linked: Tool | undefined;
+  const commands = new Map<string, Command>();
   const entries = new Map<string, Map<string, string>>();
   const entriesOf = (sessionID: string) => {
     if (!entries.has(sessionID)) entries.set(sessionID, new Map());
@@ -399,6 +408,12 @@ async function harness(options: Options = {}) {
         toolHook = callback;
       },
     },
+    command: {
+      transform: async (callback: (editor: { add: (value: Command) => void }) => void) => {
+        callback({ add: (value) => void commands.set(value.name, value) });
+        return { dispose: async () => void disposed.push('command') };
+      },
+    },
     permission: {
       hook: async (_name: string, callback: typeof permissionHook) => {
         permissionHook = callback;
@@ -509,6 +524,13 @@ async function harness(options: Options = {}) {
         (event) => event.name === 'status' && (event.data as { key: string }).key === key,
       )?.data as { snapshot: Snapshot } | undefined,
     set: (input: unknown, sessionID = 'one') => tool.execute(input, { sessionID }),
+    commandNames: () => [...commands.keys()],
+    // Runs a server command, and returns the answer it wrote to the session.
+    runCommand: async (name: string, text = '', sessionID = 'one') => {
+      const before = passive.length;
+      await commands.get(name)!.execute({ sessionID, prompt: { text }, delivery: 'queue' });
+      return passive.slice(before);
+    },
     toolOptions: () => tool.options,
     entries: (sessionID = 'one') => Object.fromEntries(entriesOf(sessionID)),
     entryWrites,
@@ -1736,7 +1758,7 @@ describe('PR/MR status lifecycle', () => {
     expect(reader.reads()).toBe(1);
     reader.advance(FETCH_INTERVAL);
     reader.set([reader.comment('7')]);
-    return { app, reader };
+    return { app, reader, forge };
   }
 
   test("tells the session about security reviewers' comments, under the automated review setting", async () => {
@@ -1863,6 +1885,83 @@ describe('PR/MR status lifecycle', () => {
     await app.refresh();
     await settle();
     expect(app.synthetic).toHaveLength(1);
+    await app.cleanup();
+  });
+
+  test('offers the status commands only with status on', async () => {
+    const off = await harness();
+    expect(off.commandNames()).toEqual([]);
+    await off.cleanup();
+    const { app } = await watchedFeedback();
+    expect(app.commandNames()).toEqual(['forge-report', 'forge-inbox']);
+    await app.cleanup();
+  });
+
+  test('shows the PR/MR status in a tool-free turn that keeps it out of the session', async () => {
+    const { app, forge } = await watchedFeedback();
+    forge.set('group/a', '1', {
+      title: 'Add the widget',
+      draft: false,
+      unresolvedThreads: 0,
+      threadsComplete: true,
+      awaitingReviewers: [],
+      reviewersComplete: true,
+    });
+    const [queued] = await app.runCommand('forge-report');
+    expect(queued).toMatchObject({
+      sessionID: 'one',
+      resume: true,
+      delivery: 'queue',
+      metadata: { forgekeeper: 'review-summary' },
+    });
+    expect(queued.id).toStartWith('msg_forgekeeper_summary_');
+    expect(queued.text).toStartWith('PR/MR status');
+    expect(queued.text).not.toContain(projectA);
+
+    const relay = await app.request();
+    expect(relay.tools).toEqual({});
+    expect(relay.system[0].text).toContain('report from Forgekeeper');
+    const text = relay.messages[0].content[0].text;
+    expect(text).toContain('<forgekeeper-report>');
+    expect(text).toContain(`- ${projectA}`);
+    expect(await app.toolCall()).toContain('Tools are disabled');
+
+    app.prompt();
+    expect(Object.keys((await app.request()).tools)).toEqual(['read', 'bash']);
+    await app.cleanup();
+  });
+
+  test('lists, acknowledges, and summarizes review updates by number', async () => {
+    const { app } = await watchedFeedback();
+    await app.refresh();
+    await settle();
+    const [item] = (await app.feedback()).items;
+    expect(item).toBeDefined();
+
+    const reportOf = async (args: string) => {
+      const before = app.passive.length;
+      await app.runCommand('forge-inbox', args);
+      if (app.passive.length === before) return undefined;
+      const relay = await app.request();
+      app.prompt();
+      return relay.messages[0].content[0].text as string;
+    };
+    const listed = await reportOf('');
+    expect(listed).toContain(`1. ${item.title}`);
+    expect(listed).toContain(`- ${projectA}#note_7`);
+    expect(await reportOf('summarize 2')).toContain('There is no update number 2.');
+    expect(await reportOf('frobnicate')).toContain('did not understand "frobnicate"');
+
+    // Summarizing starts the summary's own turn instead of a report.
+    await app.runCommand('forge-inbox', 'summarize 1');
+    expect(app.passive.at(-1)!.text).toContain('Forgekeeper summarizes this review feedback');
+    await app.request();
+    app.prompt();
+
+    const acknowledged = await reportOf('ack 1');
+    expect(acknowledged).toContain(`Acknowledged: ${item.title}`);
+    expect(acknowledged).toContain('No pending review updates for this session.');
+    expect((await app.feedback()).items).toEqual([]);
     await app.cleanup();
   });
 

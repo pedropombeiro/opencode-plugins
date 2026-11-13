@@ -64,6 +64,19 @@ For example, this footer tracks four MRs, with one conflict and two already merg
 | `/forge-open` | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`. |
 | `/forge-feedback` | Browse pending review feedback and PR/MR updates. |
 
+The footer, dialogs, and the commands above are part of the terminal UI. The OpenCode web
+and desktop apps don't load them, but they offer two commands that answer in the
+conversation:
+
+| Command | Action |
+| --- | --- |
+| `/forge-report` | Show the PR/MR status of the session. |
+| `/forge-inbox` | List the session's pending updates. `ack <number>` or `ack all` acknowledges them, and `summarize <number>` summarizes one. |
+
+Each answer is a short tool-free model turn that shows a report written from forge data.
+Those apps don't display the text of messages that plugins add, so the model shows it.
+The report stays out of the session's history.
+
 Status normally refreshes every 2 minutes, or every 30 seconds during automated reviews and
 while new review feedback settles.
 Explicit PR/MR targets take precedence over title references and branch discovery. Issue
