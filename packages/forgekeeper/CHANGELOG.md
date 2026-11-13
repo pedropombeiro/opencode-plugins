@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.2.0...opencode-forgekeeper-3.3.0) (2026-11-13)
+
+
+### Features
+
+* **forgekeeper:** support OpenCode Desktop and web clients ([40e97ef](https://github.com/pedropombeiro/opencode-plugins/commit/40e97ef2569ab6a87efa38b5e6a6c1ebb4da807d))
+
 ## [3.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.1.0...opencode-forgekeeper-3.2.0) (2026-11-10)
 
 
