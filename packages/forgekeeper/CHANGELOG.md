@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.3.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.3.0...opencode-forgekeeper-3.3.1) (2026-11-13)
+
+
+### Documentation
+
+* **forgekeeper:** showcase Desktop status and conflict panels ([05fd752](https://github.com/pedropombeiro/opencode-plugins/commit/05fd7529f43f20dffff92325c14eec73bd6bffbd))
+
 ## [3.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.2.0...opencode-forgekeeper-3.3.0) (2026-11-13)
 
 
