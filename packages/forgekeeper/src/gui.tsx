@@ -10,7 +10,6 @@ import {
   Panel,
   Plugin,
   Style,
-  type ComposerPillTone,
   type ComposerPillView,
   type MountedSession,
   type PanelTab,
@@ -35,7 +34,8 @@ import {
 } from './feedback-inbox';
 import { yesNo, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
-import { detailsMessage, footerSegments, pipelineTone, type Tone } from './format';
+import { detailsMessage, pipelineTone, type Tone } from './format';
+import { statusPill } from './gui-status';
 import { showNotice } from './notice';
 import { ForgeSessionRpc, type EventData } from './rpc';
 import type { Place } from './status-client';
@@ -72,14 +72,6 @@ const toneClass = (tone?: Tone) =>
         : tone === 'muted'
           ? 'fk-muted'
           : undefined;
-
-// The pill's tone is its most urgent segment's.
-function pillTone(tones: readonly Tone[]): ComposerPillTone | undefined {
-  if (tones.includes('error')) return 'danger';
-  if (tones.includes('warning')) return 'warning';
-  if (tones.includes('success')) return 'success';
-  return undefined;
-}
 
 export default Plugin.define({
   setup(ctx) {
@@ -171,46 +163,12 @@ export default Plugin.define({
       if (!ownServer(session)) return undefined;
       const place = placeOf(session);
       if (!enabledFor(place.directory)) return undefined;
-      const segments = footerSegments(snapshotOf(place));
       const updates = feedbackFooter(inboxOf(place.directory), session.id);
-      if (!segments.length && !updates) return undefined;
-      return {
-        icon: 'review' as const,
-        label: [...segments.map((segment) => segment.compact ?? segment.text), updates]
-          .filter(Boolean)
-          .join(' · '),
-        tone: pillTone(segments.map((segment) => segment.tone)),
-        title: 'PR/MR status',
-        rows: [
-          ...segments.map((segment, index) => ({
-            id: `segment-${index}`,
-            label: segment.text,
-            ...(segment.url ? { icon: 'outline-arrow-up-right' as const } : {}),
-            ...(segment.tone === 'success' || segment.tone === 'warning'
-              ? { tone: segment.tone }
-              : segment.tone === 'error'
-                ? { tone: 'danger' as const }
-                : {}),
-            ...(segment.url ? { run: () => ctx.system.openExternal(segment.url!) } : {}),
-          })),
-          {
-            id: 'details',
-            label: 'Show PR/MR status',
-            icon: 'status' as const,
-            run: () => open(STATUS_TAB, session),
-          },
-          ...(updates
-            ? [
-                {
-                  id: 'feedback',
-                  label: updates,
-                  icon: 'comment' as const,
-                  run: () => open(FEEDBACK_TAB, session),
-                },
-              ]
-            : []),
-        ],
-      };
+      return statusPill(snapshotOf(place), updates, {
+        external: (url) => ctx.system.openExternal(url),
+        status: () => open(STATUS_TAB, session),
+        feedback: () => open(FEEDBACK_TAB, session),
+      });
     }
 
     const ui = ctx.ui;
