@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.3.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.3.1...opencode-forgekeeper-3.3.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **forgekeeper:** compact Desktop status and show pending reviewers ([bb5fc5e](https://github.com/pedropombeiro/opencode-plugins/commit/bb5fc5ee43294a12f97fb80e3165a9ba69335b80))
+
 ## [3.3.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.3.0...opencode-forgekeeper-3.3.1) (2026-11-13)
 
 
