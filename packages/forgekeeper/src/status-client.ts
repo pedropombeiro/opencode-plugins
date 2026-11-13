@@ -101,6 +101,7 @@ export function createStatusClient(options: StatusClientOptions) {
         keys,
         ...(visible?.directory === directory ? { visible: visible.key } : {}),
       });
+      if (disposed) return;
       failures.delete(directory);
       enabled.set(directory, result.enabled);
       for (const [key, snapshot] of Object.entries(result.statuses)) {
@@ -108,6 +109,7 @@ export function createStatusClient(options: StatusClientOptions) {
       }
       options.onChange();
     } catch (error) {
+      if (disposed) return;
       unavailable(directory, error);
       retryLater(directory);
     }
@@ -157,10 +159,12 @@ export function createStatusClient(options: StatusClientOptions) {
       options.onChange();
       try {
         const result = await options.refresh(place.directory, place.key);
+        if (disposed) return;
         enabled.set(place.directory, result.enabled);
         apply(place, result.snapshot);
         options.onChange();
       } catch (error) {
+        if (disposed) return;
         unavailable(place.directory, error);
       }
     },

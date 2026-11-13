@@ -2,6 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import type { CommentDetail } from './forge';
 import {
   addLinked,
+  boundedReport,
+  MAX_REPORT_BYTES,
+  relayText,
+  relayMaxTokens,
   excerpt,
   findingsText,
   isForgekeeperInput,
@@ -33,6 +37,31 @@ const detail = (id: string, overrides: Partial<CommentDetail> = {}): CommentDeta
   username: 'alice',
   body: `Comment ${id}`,
   ...overrides,
+});
+
+describe('relay reports', () => {
+  test('bounds large reports at complete lines and announces omitted content', () => {
+    const lines = Array.from(
+      { length: 100 },
+      (_, index) =>
+        `${index + 1}. Review 更新 https://github.com/example/project/pull/${index + 1} ${'x'.repeat(100)}`,
+    );
+    const report = boundedReport(lines.join('\n'));
+    expect(new TextEncoder().encode(report).length).toBeLessThanOrEqual(MAX_REPORT_BYTES);
+    expect(report).toContain('Report shortened because of its size.');
+    const kept = report.split('\n\n')[0].split('\n');
+    expect(kept).toEqual(lines.slice(0, kept.length));
+    expect(kept.length).toBeLessThan(lines.length);
+    expect(relayMaxTokens(relayText(report))).toBeGreaterThan(1_200);
+  });
+
+  test('preserves small reports and never splits an oversized URL', () => {
+    const small = 'Status: passed\nhttps://github.com/example/project/pull/1';
+    expect(boundedReport(small)).toBe(small);
+    const large = boundedReport(`${small}\nhttps://example.com/${'x'.repeat(10_000)}`);
+    expect(large).toStartWith(`${small}\n\nReport shortened`);
+    expect(large).not.toContain('https://example.com');
+  });
 });
 
 describe('findingsText', () => {

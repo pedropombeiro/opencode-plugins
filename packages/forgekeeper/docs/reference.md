@@ -267,6 +267,10 @@ Like a [summary turn](#summary-turns), only the turn's request holds the report,
 record stays in plugin storage until the next user prompt or for at most 7 days. The
 commands take other names than the CLI's, so the terminal UI doesn't list them twice.
 
+Reports use an output budget based on their size, separate from the summary limit. Reports
+larger than 6,000 UTF-8 bytes end at a complete line and include a notice that content was
+omitted. Open the Desktop or terminal panels to read the complete report.
+
 The server caches each session's status and polls every 2 minutes while a CLI shows an open
 PR/MR, or every 30 seconds while an automated review runs or new review feedback waits for
 its quiet period. Each change reaches the CLIs as

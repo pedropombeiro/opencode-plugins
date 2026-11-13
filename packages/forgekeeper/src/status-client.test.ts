@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { HOME, type Output } from './rpc';
 import { createStatusClient } from './status-client';
 import type { Snapshot } from './store';
-import { flush } from './testing';
+import { deferred, flush } from './testing';
 
 const found = (iid: string): Snapshot => ({
   loading: false,
@@ -49,6 +49,27 @@ function harness() {
 }
 
 describe('createStatusClient', () => {
+  test('does not retry or publish an in-flight failure after disposal', async () => {
+    const pending = deferred<Output<'watch'>>();
+    let changes = 0;
+    const timers: Array<() => void> = [];
+    const client = createStatusClient({
+      clientID: 'old',
+      watch: () => pending.promise,
+      refresh: async () => ({ enabled: true, snapshot: { loading: false } }),
+      release: async () => {},
+      onChange: () => changes++,
+      setTimer: (callback) => timers.push(callback),
+    });
+    client.show({ directory: '/repo', key: 'one' });
+    await flush();
+    client.dispose();
+    pending.reject(new Error('server stopped'));
+    await flush();
+    expect(changes).toBe(0);
+    expect(timers).toEqual([]);
+  });
+
   test("moves a session's lease when the session moves to another directory", async () => {
     const app = harness();
     app.statuses.set('/a', { ses_1: found('1') });

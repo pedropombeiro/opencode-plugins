@@ -19,7 +19,13 @@ import {
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { automatedReview } from './automated-review-watch';
-import { clientID, connectStatus, loadFeedback, type ForgeRpcClient } from './client-core';
+import {
+  clientID,
+  createFeedbackLoader,
+  createLiveStatus,
+  loadFeedback,
+  type ForgeRpcClient,
+} from './client-core';
 import {
   feedbackFooter,
   feedbackTime,
@@ -78,24 +84,29 @@ function pillTone(tones: readonly Tone[]): ComposerPillTone | undefined {
 export default Plugin.define({
   setup(ctx) {
     ctx.add(Style, CSS);
-    const rpc = ctx.client.rpc(ForgeSessionRpc) as unknown as ForgeRpcClient &
-      Record<string, (input: object, options: object) => Promise<unknown>>;
+    const rpc = () =>
+      ctx.client.rpc(ForgeSessionRpc) as unknown as ForgeRpcClient &
+        Record<string, (input: object, options: object) => Promise<unknown>>;
     const at = (directory: string) => ({ location: { directory } });
 
     const [version, setVersion] = createSignal(0);
     const [inboxes, setInboxes] = createStore<Record<string, InboxState>>({});
-    const reload = (directory: string) =>
-      loadFeedback(rpc, directory)
-        .then((state) => setInboxes(directory, state))
-        .catch(() => {});
-    const connection = connectStatus(rpc, {
+    const [inboxErrors, setInboxErrors] = createStore<Record<string, string | undefined>>({});
+    const feedback = createFeedbackLoader({
+      load: (directory) => loadFeedback(rpc(), directory),
+      changed: (directory, state) => {
+        setInboxes(directory, state);
+        setInboxErrors(directory, undefined);
+      },
+      failed: (directory, error) => setInboxErrors(directory, error),
+    });
+    const reload = feedback.reload;
+    const connection = createLiveStatus({
       clientID: clientID(),
       onChange: () => setVersion((value) => value + 1),
-      heartbeat: () => {
-        for (const directory of Object.keys(inboxes)) void reload(directory);
-      },
+      heartbeat: () => void feedback.refresh(),
     });
-    const client = connection.client;
+    const client = () => connection.client;
 
     // Only the app's own server runs this plugin. Sessions on other servers
     // have no Forgekeeper there.
@@ -108,11 +119,11 @@ export default Plugin.define({
     });
     const snapshotOf = (place: Place): Snapshot => {
       version();
-      return client.snapshot(place);
+      return client()?.snapshot(place) ?? { loading: false };
     };
     const enabledFor = (directory: string) => {
       version();
-      return client.enabled(directory);
+      return client()?.enabled(directory) ?? true;
     };
     const inboxOf = (directory: string) => inboxes[directory] ?? EMPTY;
     const requestsOf = (place: Place): ReviewRequest[] => {
@@ -135,9 +146,9 @@ export default Plugin.define({
       (key) => {
         const [directory, sessionID] = JSON.parse(key) as [string, string];
         const place = { directory, key: sessionID };
-        client.show(place);
+        connection.show(place);
         void reload(directory);
-        onCleanup(() => client.hide(place));
+        onCleanup(() => connection.hide(place));
       },
     );
 
@@ -323,7 +334,7 @@ export default Plugin.define({
               size="small"
               icon="refresh"
               busy={snapshot().loading}
-              onClick={() => void client.refresh(place())}
+              onClick={() => void client()?.refresh(place())}
             >
               Refresh
             </ui.Button>
@@ -398,7 +409,8 @@ export default Plugin.define({
     // failure as a toast.
     async function inboxAction(directory: string, method: string, input: object) {
       try {
-        setInboxes(directory, (await rpc[method](input, at(directory))) as InboxState);
+        await rpc()[method](input, at(directory));
+        await reload(directory);
       } catch (error) {
         ctx.toast.show({
           title: error instanceof Error ? error.message : String(error),
@@ -487,9 +499,24 @@ export default Plugin.define({
               {state().paused ? 'Resume monitoring' : 'Pause monitoring'}
             </ui.Button>
           </header>
+          <Show when={inboxErrors[directory()]}>
+            {(error: () => string) => (
+              <div class="fk-error">
+                Could not load review updates: {error()}. Retrying automatically.
+              </div>
+            )}
+          </Show>
           <Show
             when={state().items.length}
-            fallback={<div class="fk-muted">No pending review updates in this checkout.</div>}
+            fallback={
+              <Show when={!inboxErrors[directory()]}>
+                <div class="fk-muted">
+                  {inboxes[directory()]
+                    ? 'No pending review updates in this checkout.'
+                    : 'Loading review updates…'}
+                </div>
+              </Show>
+            }
           >
             <For each={state().items}>
               {(item) => (
@@ -530,7 +557,7 @@ export default Plugin.define({
         run: () => {
           const session = current();
           if (!session || statusOff(directoryOf(session))) return;
-          void client.refresh(placeOf(session));
+          void client()?.refresh(placeOf(session));
           open(STATUS_TAB, session);
         },
       }),
@@ -565,7 +592,7 @@ export default Plugin.define({
           const place = placeOf(session);
           let requests = requestsOf(place);
           if (requests.length === 0) {
-            await client.refresh(place);
+            await client()?.refresh(place);
             requests = requestsOf(place);
           }
           if (requests.length === 0) {
@@ -593,53 +620,67 @@ export default Plugin.define({
         .list()
         .map((id) => ctx.servers.get(id))
         .find((server) => server?.builtin);
-    const stops = [
-      rpc.events.on('feedbackChanged', (event) => {
-        const { directory } = event.data as EventData<'feedbackChanged'>;
-        if (directory in inboxes) void reload(directory);
-      }),
-      rpc.events.on('notice', (event) => {
-        const notice = event.data as EventData<'notice'>;
-        showNotice(notice, {
-          hasShown: (sessionID) =>
-            client.hasShown(sessionID) ||
-            (!!event.location?.directory && event.location.directory in inboxes),
-          openTab: (sessionID) => {
-            const server = builtinServer()?.id;
-            if (server) ctx.tabs.open({ server, id: sessionID });
-          },
-          toast: ({ title, message, variant }) => {
-            const server = builtinServer()?.id;
-            const sessionID = notice.sessionID;
-            ctx.toast.show({
-              title: title ?? message,
-              ...(title ? { description: message } : {}),
-              variant: variant === 'error' ? 'error' : 'default',
-              ...(server && sessionID
-                ? {
-                    actions: [
-                      {
-                        label: 'Open session',
-                        run: () => ctx.tabs.open({ server, id: sessionID }, { focus: true }),
-                      },
-                    ],
-                  }
-                : {}),
+    createKeyed(
+      () => ctx.client,
+      () => {
+        const currentRpc = rpc();
+        feedback.invalidate();
+        connection.connect(currentRpc);
+        void feedback.refresh();
+        const stops = [
+          currentRpc.events.on('feedbackChanged', (event) => {
+            const { directory } = event.data as EventData<'feedbackChanged'>;
+            if (feedback.has(directory)) void reload(directory);
+          }),
+          currentRpc.events.on('notice', (event) => {
+            const notice = event.data as EventData<'notice'>;
+            showNotice(notice, {
+              hasShown: (sessionID) =>
+                !!client()?.hasShown(sessionID) ||
+                (!!event.location?.directory && feedback.has(event.location.directory)),
+              openTab: (sessionID) => {
+                const server = builtinServer()?.id;
+                if (server) ctx.tabs.open({ server, id: sessionID });
+              },
+              toast: ({ title, message, variant }) => {
+                const server = builtinServer()?.id;
+                const sessionID = notice.sessionID;
+                ctx.toast.show({
+                  title: title ?? message,
+                  ...(title ? { description: message } : {}),
+                  variant: variant === 'error' ? 'error' : 'default',
+                  ...(server && sessionID
+                    ? {
+                        actions: [
+                          {
+                            label: 'Open session',
+                            run: () => ctx.tabs.open({ server, id: sessionID }, { focus: true }),
+                          },
+                        ],
+                      }
+                    : {}),
+                });
+                void ctx.attention.notify({
+                  title: title ?? 'Forgekeeper',
+                  message,
+                  variant: variant === 'error' ? 'error' : 'default',
+                  ...(server && sessionID ? { session: { server, id: sessionID } } : {}),
+                  id: `forgekeeper:${sessionID ?? ''}:${title ?? ''}:${message}`,
+                });
+              },
             });
-            void ctx.attention.notify({
-              title: title ?? 'Forgekeeper',
-              message,
-              variant: variant === 'error' ? 'error' : 'default',
-              ...(server && sessionID ? { session: { server, id: sessionID } } : {}),
-              id: `forgekeeper:${sessionID ?? ''}:${title ?? ''}:${message}`,
-            });
-          },
+          }),
+        ];
+        onCleanup(() => {
+          for (const stop of stops) stop();
+          feedback.invalidate();
+          connection.dispose();
         });
-      }),
-    ];
+      },
+    );
 
     return () => {
-      for (const stop of stops) stop();
+      feedback.invalidate();
       connection.dispose();
     };
   },

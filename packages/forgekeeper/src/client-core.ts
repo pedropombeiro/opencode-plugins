@@ -3,6 +3,7 @@
 import type { InboxState } from './feedback-inbox';
 import { HEARTBEAT, type EventData, type Output } from './rpc';
 import { createStatusClient, type StatusClient } from './status-client';
+import type { Place } from './status-client';
 
 type Location = { location: { directory: string } };
 type Call = (input: never, options: Location) => Promise<unknown>;
@@ -33,6 +34,78 @@ export const loadFeedback = async (rpc: ForgeRpcClient, directory: string) =>
 export interface ForgeConnection {
   client: StatusClient;
   dispose: () => void;
+}
+
+export function createLiveStatus(options: {
+  clientID: string;
+  onChange: () => void;
+  heartbeat?: () => void;
+}) {
+  let connection: ForgeConnection | undefined;
+  let generation = 0;
+  const shown = new Map<string, Place>();
+  let visible: Place | undefined;
+  return {
+    get client() {
+      return connection?.client;
+    },
+    connect(rpc: ForgeRpcClient) {
+      connection?.dispose();
+      connection = connectStatus(rpc, {
+        ...options,
+        clientID: `${options.clientID}:${++generation}`,
+      });
+      for (const place of shown.values()) {
+        connection.client.show(place);
+        connection.client.hide(place);
+      }
+      if (visible) connection.client.show(visible);
+      options.onChange();
+    },
+    show(place: Place) {
+      shown.set(place.key, place);
+      visible = place;
+      connection?.client.show(place);
+    },
+    hide(place: Place) {
+      if (visible?.key === place.key && visible.directory === place.directory) visible = undefined;
+      connection?.client.hide(place);
+    },
+    dispose() {
+      connection?.dispose();
+      connection = undefined;
+    },
+  };
+}
+
+export function createFeedbackLoader(options: {
+  load: (directory: string) => Promise<InboxState>;
+  changed: (directory: string, state: InboxState) => void;
+  failed: (directory: string, error: string) => void;
+}) {
+  const requests = new Map<string, number>();
+  let generation = 0;
+  const reload = async (directory: string) => {
+    const request = (requests.get(directory) ?? 0) + 1;
+    requests.set(directory, request);
+    const current = generation;
+    const latest = () => current === generation && requests.get(directory) === request;
+    try {
+      const state = await options.load(directory);
+      if (latest()) options.changed(directory, state);
+    } catch (error) {
+      if (latest())
+        options.failed(directory, error instanceof Error ? error.message : String(error));
+    }
+  };
+  return {
+    reload,
+    has: (directory: string) => requests.has(directory),
+    refresh: () => Promise.all([...requests.keys()].map(reload)),
+    invalidate() {
+      generation++;
+    },
+  };
 }
 
 // Connects a status client to the RPC. `onChange` runs after any snapshot or

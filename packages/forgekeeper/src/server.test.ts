@@ -1931,6 +1931,27 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
+  test('bounds oversized command reports and gives relay turns their own output budget', async () => {
+    const { app, forge } = await watchedFeedback();
+    forge.set('group/a', '1', { title: 'x'.repeat(10_000), awaitingReviewers: [] });
+    await app.runCommand('forge-report');
+    const relay = await app.request();
+    const text = relay.messages[0].content[0].text;
+    expect(text).toContain('Report shortened because of its size.');
+    expect(text.length).toBeLessThan(6_500);
+    expect(relay.options.maxTokens).toBeGreaterThanOrEqual(
+      new TextEncoder().encode(text).length + 512,
+    );
+    expect(relay.tools).toEqual({});
+    app.prompt();
+    forge.set('group/a', '1', { title: 'x'.repeat(3_000), awaitingReviewers: [] });
+    await app.runCommand('forge-report');
+    const complete = await app.request();
+    expect(complete.messages[0].content[0].text).toContain('x'.repeat(3_000));
+    expect(complete.options.maxTokens).toBeGreaterThan(3_000);
+    await app.cleanup();
+  });
+
   test('lists, acknowledges, and summarizes review updates by number', async () => {
     const { app } = await watchedFeedback();
     await app.refresh();

@@ -23,6 +23,7 @@ import {
   noticeText,
   RELAY_SYSTEM,
   relayText,
+  relayMaxTokens,
   taggedInput,
   superseded,
   restrictRequest,
@@ -338,6 +339,8 @@ export function createSummaryDelivery(
           : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n'),
         tool ? { name: LINKED_NOTE_TOOL, value: tool } : undefined,
       );
+      if (record !== 'failed' && record.system === 'relay')
+        event.options.maxTokens = relayMaxTokens(record.findings);
       return true;
     },
     async summarizing(sessionID: string): Promise<boolean> {
