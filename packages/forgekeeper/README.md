@@ -22,8 +22,8 @@ OpenCode server's `PATH`; only the CLI for your forge is required.
 opencode plugin add opencode-forgekeeper
 ```
 
-OpenCode loads the server and terminal parts automatically. Forgekeeper uses your forge CLI's
-credentials and has none of its own. Without a forge CLI, session naming still works, and
+OpenCode loads the server, terminal, and desktop parts automatically. Forgekeeper uses your
+forge CLI's credentials and has none of its own. Without a forge CLI, session naming still works, and
 `/forge-status` explains what's missing.
 
 For self-managed hosts, configure `hosts` for GitLab hosts not named `gitlab.*`, or
@@ -64,9 +64,12 @@ For example, this footer tracks four MRs, with one conflict and two already merg
 | `/forge-open` | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`. |
 | `/forge-feedback` | Browse pending review feedback and PR/MR updates. |
 
-The footer, dialogs, and the commands above are part of the terminal UI. The OpenCode web
-and desktop apps don't load them, but they offer two commands that answer in the
-conversation:
+In OpenCode Desktop, a pill above the composer shows the same status, and the commands
+above open side panels for the status and the inbox. Server notices appear as toasts and
+system notifications.
+
+The OpenCode web app loads neither the terminal nor the desktop part, but it offers two
+commands that answer in the conversation:
 
 | Command | Action |
 | --- | --- |

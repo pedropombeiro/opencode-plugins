@@ -32,6 +32,11 @@ Plugins target the OpenCode 2 plugin API (`@opencode/plugin`). See
 - Server plugins live in `src/index.ts`; CLI (TUI) plugins live in `src/tui.ts`, or `src/tui.tsx`
   when they render JSX. `.mise/bundle.ts` compiles whichever exist, and packages export them as `.`
   and `./tui`.
+- Desktop (GUI) parts live in `src/gui.tsx` and use `@opencode/plugin/gui`, with Solid's DOM
+  JSX (`/** @jsxImportSource solid-js */`). `.mise/bundle.ts` builds them under Node with
+  `.mise/vite.gui.config.mjs` into `dist/gui-experimental.cjs`, because Vite fails under Bun.
+  Packages export it as `./gui-experimental`. Only OpenCode Desktop loads GUI parts; the web UI
+  runs only built-in ones.
 - `.mise/bundle.ts` also compiles `src/worker.ts` into `dist/worker.js`, next to `dist/index.js`, for
   work that must not block the server. Resolve it from `import.meta.url`; see
   `packages/session-finder/src/run.ts`.

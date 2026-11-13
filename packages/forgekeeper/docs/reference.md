@@ -224,16 +224,35 @@ opens the status dialog. These commands are also available from the command pale
   `/mr-status` and `/pr-status`.
 - `/forge-open` opens the PR/MR in the browser. Aliases: `/mr-open` and `/pr-open`.
 
-### Web and desktop apps
+### Desktop app
 
-The OpenCode web and desktop apps run no terminal plugins, so they have no footer, dialogs,
+OpenCode Desktop loads Forgekeeper's desktop part, so it matches the terminal UI:
+
+- A pill above the composer shows the footer's indicators and the session's update count.
+  Its menu opens the PR/MR and pipeline links, the status panel, and the inbox panel.
+- `/forge-status` opens a side panel with the status dialog's details and a refresh action.
+- `/forge-feedback` opens a side panel with the checkout's updates. Each update offers its
+  links and **Open session**, **Summarize in session**, **Act on feedback**, **Retry**, and
+  **Acknowledge**, and the panel can pause or resume monitoring.
+- `/forge-open` opens the PR/MR in the browser, or asks which one to open.
+- Server notices appear as toasts, and as system notifications when no app window has
+  focus, following **Settings > Notifications**.
+
+The desktop part watches only sessions on the app's own server. It uses OpenCode's
+experimental GUI plugin API, which may change between releases. Settings > Extensions >
+Plugins can turn it off without affecting the server part.
+
+### Web app
+
+The OpenCode web app runs no terminal or desktop plugin parts, so it has no footer, panels,
 toasts, or `/forge-status`, `/forge-open`, and `/forge-feedback`. Monitoring doesn't depend
 on them: the server watches [discovered sessions](#which-sessions-the-server-watches)
-without a CLI. To see updates in those apps, set `delivery.reviews` and
+without a client. To see updates in the web app, set `delivery.reviews` and
 `delivery.lifecycle` to `summary`. A `passive` notice is queued until the session's next
-turn, and those apps show only its title.
+turn, and the web app shows only its title.
 
-The server registers two commands that every client offers, while status is on:
+The server registers two commands that every client offers, while status is on, including
+the web app:
 
 - `/forge-report` refreshes the session's status and shows what `/forge-status` shows.
 - `/forge-inbox` lists the session's pending updates, numbered newest first, with their
@@ -241,7 +260,7 @@ The server registers two commands that every client offers, while status is on:
   `/forge-inbox summarize <number>` starts the update's summary turn, as Ctrl+R does in
   `/forge-feedback`. A number refers to the list as it is when the command runs.
 
-Those apps don't display the text of a synthetic message, so each answer runs as a
+The apps don't display the text of a synthetic message, so each answer runs as a
 tool-free turn in which the session's model shows Forgekeeper's report. The report is
 written from forge data, such as titles and branch names, which the request marks as data.
 Like a [summary turn](#summary-turns), only the turn's request holds the report, and its
@@ -1094,7 +1113,9 @@ If you set options for `opencode-forgekeeper` 2.x, also see
 - `src/lookups.ts` answers the title's forge questions: the branch's newest PR/MR number
   and a PR/MR's source branch.
 - `src/status-client.ts` holds the CLI's leases, snapshots, and per-directory settings.
-  `src/tui.tsx` connects it to the RPC and renders the footer, dialog, commands, and notices.
+  `src/client-core.ts` connects it to the RPC for both clients. `src/tui.tsx` renders the
+  terminal footer, dialog, commands, and notices; `src/gui.tsx` renders the desktop pill,
+  panels, commands, and notices.
   `src/notice.ts` decides which notices a CLI shows and which tabs it reopens.
 - `src/forge.ts` defines the forge-neutral types, the `Forge` adapter interface, and
   `ForgeTraits` with its optional `automatedReview`, `feedback`, and `lifecycle`
