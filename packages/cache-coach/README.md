@@ -33,8 +33,9 @@ This adds the plugin to your `opencode.json`:
 }
 ```
 
-The CLI part shows the indicator, tips, and expiry messages. The server part only keeps the expiry
-messages out of model requests.
+The CLI part shows the indicator, tips, and expiry messages. The Desktop part shows the same
+indicator, details, and tips in OpenCode Desktop; see [OpenCode Desktop](#opencode-desktop). The
+server part only keeps the expiry messages out of model requests.
 
 ## Cache indicator
 
@@ -120,10 +121,27 @@ session, except the model-switch tips, which appear for every switch away from a
 Tips stay in the TUI and never enter the conversation, so they don't add tokens or change the
 cache. Subagent sessions don't get tips.
 
+## OpenCode Desktop
+
+In OpenCode Desktop, a pill above the composer shows the cache state, such as `cache 3:42` or
+`cache cold · rewrite ~180K ($0.90)`. Click it, or run `/cache`, to open the **Prompt cache** side
+panel. The panel shows the same details as the CLI, a cheaper compaction model when one applies,
+and the pending expiry advice.
+
+Tips appear as toasts. Shortly before the cache of a large context expires, a toast and a system
+notification show the expiry advice, instead of a message in the session. Desktop sends
+notifications only when they're turned on in **Settings > Notifications**.
+
+Desktop coaches sessions open in its tabs, on every server it connects to. The plugin never
+switches models, compacts, or calls a model on its own.
+
+The OpenCode web app doesn't load Desktop parts, so it shows no cache indicator.
+
 ## Options
 
-The options belong to the CLI part, which reads them from `cli.json`. Add the same package there
-with the object form. OpenCode still loads the plugin once:
+The CLI part reads its options from `cli.json`. OpenCode Desktop reads them from the plugin entry
+in your global `opencode.json`, so set them in both files to use them in both apps. Use the object
+form of the package entry. OpenCode still loads the plugin once:
 
 ```json
 {
@@ -139,7 +157,7 @@ with the object form. OpenCode still loads the plugin once:
 | Option            | Default                                  | Description                                                                                                                                                                                                               |
 | ----------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tips`            | `true`                                   | Set to `false` to keep only the indicator.                                                                                                                                                                                |
-| `notices`         | `true`                                   | Set to `false` to turn off the expiry messages.                                                                                                                                                                           |
+| `notices`         | `true`                                   | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                                          |
 | `compactionModel` |                                          | Model to suggest for compacting after the cache expires, such as `"gitlab/duo-chat-gpt-6-1-sol"`, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`. |
 | `ttl`             |                                          | Cache lifetime, such as `"1h"`. Overrides the model and provider `cache.ttl`.                                                                                                                                             |
 | `contextCeiling`  | `250000`, or where a higher price starts | Context size the ceiling tip measures against. Setting it applies to every model, including tiered ones. Capped at the model's input limit.                                                                               |

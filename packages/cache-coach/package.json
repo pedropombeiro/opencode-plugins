@@ -13,6 +13,9 @@
     },
     "./tui": {
       "default": "./dist/tui.js"
+    },
+    "./gui-experimental": {
+      "default": "./dist/gui-experimental.cjs"
     }
   },
   "repository": {
