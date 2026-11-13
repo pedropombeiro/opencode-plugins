@@ -102,7 +102,7 @@ export default Plugin.define({
     }
 
     function showTip(server: ServerRef, sessionID: string, tip: Tip | undefined) {
-      const taken = gate.take(sessionID, tip);
+      const taken = gate.take(`${server.id}\n${sessionID}`, tip);
       if (taken) toast(server, sessionID, taken);
     }
 
@@ -189,7 +189,7 @@ export default Plugin.define({
                     showTip(server, sessionID, coach.toolOutput(event.data));
                 }),
                 data.on('session.compaction.ended', (event) =>
-                  gate.compacted(event.data.sessionID),
+                  gate.compacted(`${server.id}\n${event.data.sessionID}`),
                 ),
               ];
               onCleanup(() => {
