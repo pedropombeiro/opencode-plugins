@@ -290,7 +290,7 @@ export default Plugin.define({
     ctx.add(Panel, {
       id: DETAILS_TAB,
       region: 'side',
-      width: 'narrow',
+      width: 420,
       list: (input) => (input.open.includes(DETAILS_TAB) ? [detailsTab] : []),
       render: (props) => <DetailsView session={props.session} />,
     });
