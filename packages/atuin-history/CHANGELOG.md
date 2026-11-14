@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-1.0.2...opencode-atuin-history-1.1.0) (2026-11-14)
+
+
+### Features
+
+* **atuin-history:** mark entries as agent-run and record intent ([5a5d123](https://github.com/pedropombeiro/opencode-plugins/commit/5a5d123eab885a290b8e81d332187fb0fafc897f))
+
+
+### Bug Fixes
+
+* **atuin-history:** record timeouts and signals as failures ([b9348a9](https://github.com/pedropombeiro/opencode-plugins/commit/b9348a9912e053e06bdb23f181d30e274486b93f))
+
 ## [1.0.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-atuin-history-1.0.1...opencode-atuin-history-1.0.2) (2026-11-05)
 
 
