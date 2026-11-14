@@ -13,6 +13,11 @@ Requires OpenCode 2. For OpenCode 1, install the `opencode-v1` dist-tag
 - After each `shell` tool execution, calls `atuin history start` / `atuin history end` to record
   the command with its exit code and duration
 
+When the shell tool reports no exit code, the plugin records `124` for a command stopped by its
+timeout, `128` plus the signal number for a command stopped by a signal, and `1` otherwise. A
+command moved to the background is recorded without an exit code or duration, because it hasn't
+finished.
+
 Commands appear in your Atuin history tagged with `opencode@<hostname>`, making them easy to
 filter or exclude.
 

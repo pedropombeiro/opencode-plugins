@@ -1,16 +1,14 @@
 import { hostname } from 'node:os';
 import type { Plugin } from '@opencode/plugin';
 import { exec } from '../../_shared/src/index.ts';
+import type { ShellMetadata } from './history.ts';
+import { exitCode, isRunning } from './history.ts';
 
 const AUTHOR = 'opencode';
 const SHELL_TOOL = 'shell';
 
 interface ShellInput {
   command?: unknown;
-}
-
-interface ShellMetadata {
-  exit?: unknown;
 }
 
 export default {
@@ -45,12 +43,14 @@ export default {
       const command = (event.input as ShellInput | undefined)?.command;
       if (typeof command !== 'string' || !command) return;
 
-      const exit = (event.result.metadata as ShellMetadata | undefined)?.exit;
       const history = await exec('atuin', ['history', 'start', '--', command], { env });
       const id = history.stdout.trim();
       if (history.code !== 0 || !id) return;
 
-      const args = ['history', 'end', '--exit', String(typeof exit === 'number' ? exit : 0)];
+      const metadata = event.result.metadata as ShellMetadata | undefined;
+      if (isRunning(metadata)) return;
+
+      const args = ['history', 'end', '--exit', String(exitCode(metadata))];
       if (start !== undefined) args.push('--duration', String((Date.now() - start) * 1e6));
       await exec('atuin', [...args, '--', id], { env });
     });
