@@ -1,15 +1,10 @@
 import { hostname } from 'node:os';
 import type { Plugin } from '@opencode/plugin';
 import { exec } from '../../_shared/src/index.ts';
-import type { ShellMetadata } from './history.ts';
-import { exitCode, isRunning } from './history.ts';
+import type { ShellInput, ShellMetadata } from './history.ts';
+import { AUTHOR, exitCode, isRunning, startArgs } from './history.ts';
 
-const AUTHOR = 'opencode';
 const SHELL_TOOL = 'shell';
-
-interface ShellInput {
-  command?: unknown;
-}
 
 export default {
   id: 'opencode-atuin-history',
@@ -40,10 +35,11 @@ export default {
       started.delete(event.id);
       if (event.status !== 'completed') return;
 
-      const command = (event.input as ShellInput | undefined)?.command;
+      const input = event.input as ShellInput | undefined;
+      const command = input?.command;
       if (typeof command !== 'string' || !command) return;
 
-      const history = await exec('atuin', ['history', 'start', '--', command], { env });
+      const history = await exec('atuin', startArgs(command, input), { env });
       const id = history.stdout.trim();
       if (history.code !== 0 || !id) return;
 
