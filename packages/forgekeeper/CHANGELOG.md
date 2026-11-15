@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.3.2...opencode-forgekeeper-4.0.0) (2026-11-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forgekeeper:** Forgekeeper requires @opencode/plugin 2.3.0 or later.
+
+### Bug Fixes
+
+* **forgekeeper:** build isolated summary requests on OpenCode 2.3 ([91fbc3a](https://github.com/pedropombeiro/opencode-plugins/commit/91fbc3a3a8c9fcf6417c59539a7368eff061d030))
+* **forgekeeper:** exclude cancelled and superseded check failures ([2d93e0a](https://github.com/pedropombeiro/opencode-plugins/commit/2d93e0ae2baa62b8cea19088f85ad80b337f2a5d))
+
 ## [3.3.2](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.3.1...opencode-forgekeeper-3.3.2) (2026-11-13)
 
 
