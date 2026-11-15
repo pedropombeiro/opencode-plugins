@@ -42,6 +42,26 @@ const events = (records: Map<string, LifecycleRecord>) =>
   [...records.values()].flatMap((record) => record.pending.map((event) => event.id));
 
 describe('observe', () => {
+  test('does not announce cancelled checks or cancellations followed by a pending rerun', () => {
+    const pipeline = {
+      id: 'sha',
+      status: 'CANCELLED',
+      label: '1 check cancelled',
+      failedJobs: [],
+      failedJobsComplete: true,
+    };
+    const records = run(
+      [mr('1')],
+      [mr('1', { pipeline })],
+      [
+        mr('1', {
+          pipeline: { ...pipeline, status: 'PENDING', label: '1 check cancelled, 1 check pending' },
+        }),
+      ],
+    );
+    expect(events(records)).toEqual([]);
+  });
+
   test('records the first lookup without events, so nothing old is announced', () => {
     const records = run([mr('1', { conflicts: true }), mr('2', { state: 'merged' })]);
     expect(events(records)).toEqual([]);

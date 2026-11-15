@@ -177,6 +177,278 @@ test('check rollup names the failed checks of a commit while others still run', 
   expect(checks([], true, 'url').id).toBeUndefined();
 });
 
+test('check rollup separates cancellations and stale checks from failures', () => {
+  for (const conclusion of [
+    'FAILURE',
+    'ERROR',
+    'TIMED_OUT',
+    'ACTION_REQUIRED',
+    'STARTUP_FAILURE',
+  ]) {
+    expect(
+      checks(
+        [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion }],
+        true,
+        'url',
+        'sha',
+      ),
+    ).toMatchObject({ status: 'FAILED', failedJobs: [{ name: 'test' }] });
+  }
+  const cancelled = Array.from({ length: 9 }, (_, index) => ({
+    __typename: 'CheckRun',
+    name: `cancelled-${index}`,
+    status: 'COMPLETED',
+    conclusion: 'CANCELLED',
+  }));
+  expect(checks(cancelled, true, 'url', 'sha')).toMatchObject({
+    status: 'CANCELLED',
+    label: '9 checks cancelled',
+    failedJobs: [],
+  });
+  expect(
+    checks(
+      [
+        ...cancelled,
+        { __typename: 'CheckRun', name: 'aggregate', status: 'COMPLETED', conclusion: 'FAILURE' },
+      ],
+      true,
+      'url',
+      'sha',
+    ),
+  ).toMatchObject({
+    status: 'FAILED',
+    label: '1 check failed, 9 checks cancelled',
+    failedJobs: [{ name: 'aggregate' }],
+  });
+  expect(
+    checks([...cancelled, { __typename: 'CheckRun', status: 'QUEUED' }], true, 'url', 'sha'),
+  ).toMatchObject({
+    status: 'PENDING',
+    label: '9 checks cancelled, 1 check pending',
+    failedJobs: [],
+  });
+  expect(checks(cancelled, false, 'url').status).toBe('PENDING');
+  expect(
+    checks([{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'STALE' }], true, 'url'),
+  ).toMatchObject({ status: 'CANCELLED', label: '1 check stale' });
+});
+
+test('check rollup selects newer attempts without merging different workflows or apps', () => {
+  const attempt = (
+    id: string,
+    conclusion: string,
+    createdAt: string,
+    workflow = 'workflow',
+    app = 'actions',
+  ) => ({
+    __typename: 'CheckRun',
+    id,
+    name: 'test',
+    status: 'COMPLETED',
+    conclusion,
+    startedAt: createdAt,
+    checkSuite: { createdAt, app: { id: app }, workflowRun: { workflow: { id: workflow } } },
+  });
+  const old = attempt('old', 'FAILURE', '2026-11-14T10:00:00Z');
+  const passed = attempt('new', 'SUCCESS', '2026-11-14T11:00:00Z');
+  for (const nodes of [
+    [old, passed],
+    [passed, old],
+  ]) {
+    expect(checks(nodes, true, 'url', 'sha')).toMatchObject({
+      status: 'SUCCESS',
+      label: '1 check passed',
+      failedJobs: [],
+    });
+    expect(checks(nodes, false, 'url').status).toBe('PENDING');
+  }
+  expect(
+    checks([passed, old, attempt('other', 'FAILURE', old.startedAt, 'other')], true, 'url', 'sha'),
+  ).toMatchObject({ status: 'FAILED', failedJobs: [{ id: 'other' }] });
+  expect(
+    checks(
+      [passed, attempt('other', 'FAILURE', old.startedAt, 'workflow', 'other')],
+      true,
+      'url',
+      'sha',
+    ),
+  ).toMatchObject({ status: 'FAILED', failedJobs: [{ id: 'other' }] });
+  expect(
+    checks(
+      [old, { ...passed, status: 'QUEUED', conclusion: '', startedAt: null }],
+      true,
+      'url',
+      'sha',
+    ),
+  ).toMatchObject({ status: 'PENDING', failedJobs: [] });
+  expect(
+    checks(
+      [
+        old,
+        {
+          ...passed,
+          startedAt: 'invalid',
+          checkSuite: { ...passed.checkSuite, createdAt: 'invalid' },
+        },
+      ],
+      true,
+      'url',
+      'sha',
+    ).status,
+  ).toBe('FAILED');
+  expect(
+    checks(
+      [
+        { ...old, checkSuite: null },
+        { ...passed, checkSuite: null },
+      ],
+      true,
+      'url',
+      'sha',
+    ).status,
+  ).toBe('FAILED');
+});
+
+test('newer workflows supersede old jobs even when the old job started later', () => {
+  const old = {
+    __typename: 'CheckRun',
+    name: 'aggregate',
+    status: 'COMPLETED',
+    conclusion: 'FAILURE',
+    startedAt: '2026-11-14T23:48:00Z',
+    checkSuite: {
+      createdAt: '2026-11-14T23:45:38Z',
+      app: { id: 'actions' },
+      workflowRun: { workflow: { id: 'ci' } },
+    },
+  };
+  const replacement = {
+    ...old,
+    conclusion: 'SUCCESS',
+    startedAt: '2026-11-14T23:46:38Z',
+    checkSuite: { ...old.checkSuite, createdAt: '2026-11-14T23:45:41Z' },
+  };
+  expect(checks([replacement, old], true, 'url', 'sha')).toMatchObject({
+    status: 'SUCCESS',
+    failedJobs: [],
+  });
+  expect(
+    checks([old, { ...replacement, checkSuite: old.checkSuite }], true, 'url', 'sha'),
+  ).toMatchObject({ status: 'FAILED' });
+});
+
+test('keeps distinct same-name jobs and ambiguous retries within one workflow suite', () => {
+  const failed = {
+    __typename: 'CheckRun',
+    id: 'linux',
+    name: 'test',
+    status: 'COMPLETED',
+    conclusion: 'FAILURE',
+    startedAt: '2026-11-14T10:01:00Z',
+    checkSuite: {
+      createdAt: '2026-11-14T10:00:00Z',
+      app: { id: 'actions' },
+      workflowRun: { workflow: { id: 'ci' } },
+    },
+  };
+  const passed = {
+    ...failed,
+    id: 'macos',
+    conclusion: 'SUCCESS',
+    startedAt: '2026-11-14T10:02:00Z',
+  };
+  for (const nodes of [
+    [failed, passed],
+    [passed, failed],
+  ]) {
+    expect(checks(nodes, true, 'url', 'sha')).toMatchObject({
+      status: 'FAILED',
+      failedJobs: [{ id: 'linux' }],
+    });
+  }
+  expect(
+    checks(
+      [failed, { ...passed, id: 'retry', status: 'QUEUED', conclusion: '', startedAt: null }],
+      true,
+      'url',
+      'sha',
+    ),
+  ).toMatchObject({
+    status: 'FAILED',
+    running: true,
+    failedJobs: [{ id: 'linux' }],
+  });
+  expect(
+    checks(
+      [
+        { ...failed, checkSuite: { ...failed.checkSuite, workflowRun: null } },
+        {
+          ...passed,
+          checkSuite: {
+            ...passed.checkSuite,
+            createdAt: '2026-11-14T11:00:00Z',
+            workflowRun: null,
+          },
+        },
+      ],
+      true,
+      'url',
+      'sha',
+    ),
+  ).toMatchObject({
+    status: 'FAILED',
+    failedJobs: [{ id: 'linux' }],
+  });
+});
+
+test('deduplicates old failures after reading later check pages', async () => {
+  const first = pull();
+  const contexts = first.commits.nodes[0].commit.statusCheckRollup.contexts;
+  const check = {
+    __typename: 'CheckRun',
+    name: 'aggregate',
+    status: 'COMPLETED',
+    conclusion: 'FAILURE',
+    startedAt: '2026-11-14T23:45:47Z',
+    checkSuite: {
+      createdAt: '2026-11-14T23:45:38Z',
+      app: { id: 'actions' },
+      workflowRun: { workflow: { id: 'ci' } },
+    },
+  };
+  Object.assign(contexts, { nodes: [check], pageInfo: { hasNextPage: true, endCursor: 'next' } });
+  const pr = await byNumber(async (_host, query, variables) => {
+    expect(query).toContain(
+      'startedAt checkSuite { createdAt app { id } workflowRun { workflow { id } } }',
+    );
+    if (!variables.after) return { repository: { pullRequest: first } };
+    return {
+      repository: {
+        object: {
+          statusCheckRollup: {
+            contexts: {
+              nodes: [
+                {
+                  ...check,
+                  conclusion: 'SUCCESS',
+                  startedAt: '2026-11-14T23:46:38Z',
+                  checkSuite: { ...check.checkSuite, createdAt: '2026-11-14T23:45:41Z' },
+                },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      },
+    };
+  });
+  expect(pr?.pipeline).toMatchObject({
+    status: 'SUCCESS',
+    label: '1 check passed',
+    failedJobs: [],
+  });
+});
+
 test('check rollup distinguishes passed, skipped, and neutral checks', () => {
   const passed = [
     { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },

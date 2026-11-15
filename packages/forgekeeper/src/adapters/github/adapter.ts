@@ -35,6 +35,12 @@ interface Check {
   state?: string;
   detailsUrl?: string;
   targetUrl?: string;
+  startedAt?: string | null;
+  checkSuite?: {
+    createdAt?: string;
+    app?: { id: string } | null;
+    workflowRun?: { workflow: { id: string } | null } | null;
+  } | null;
 }
 
 interface Pull {
@@ -75,7 +81,7 @@ const fields = `number title url state isDraft mergeable reviewDecision headRefO
   latestReviews(first:100) { nodes { author { ... on User { id } } } }
   copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
   commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
-    nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } }
+    nodes { __typename ... on CheckRun { id name status conclusion detailsUrl startedAt checkSuite { createdAt app { id } workflowRun { workflow { id } } } } ... on StatusContext { id context state targetUrl } }
     pageInfo { hasNextPage endCursor }
   } } } } }`;
 
@@ -125,15 +131,7 @@ export function classifyError(message: string, code: number): ForgeError {
   return new ForgeError('request', text.split('\n')[0]);
 }
 
-const FAILED = [
-  'FAILURE',
-  'ERROR',
-  'TIMED_OUT',
-  'CANCELLED',
-  'ACTION_REQUIRED',
-  'STARTUP_FAILURE',
-  'STALE',
-];
+const FAILED = ['FAILURE', 'ERROR', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
 const CONCLUSIONS = [
   'SUCCESS',
   'NEUTRAL',
@@ -147,10 +145,38 @@ const CONCLUSIONS = [
 ];
 const STATES = ['SUCCESS', 'FAILURE', 'ERROR', 'PENDING', 'EXPECTED'];
 
+const checkKey = (node: Check) =>
+  node.__typename === 'CheckRun' &&
+  node.name &&
+  node.checkSuite?.app?.id &&
+  node.checkSuite.workflowRun?.workflow?.id &&
+  JSON.stringify([node.checkSuite.app.id, node.checkSuite.workflowRun?.workflow?.id, node.name]);
+const checkTime = (node: Check) => Date.parse(node.checkSuite?.createdAt ?? '');
+const newerCheck = (node: Check, previous: Check) => checkTime(node) > checkTime(previous);
+
 // Summarizes the head commit's checks. Failures win over pending checks, and
 // partial or unrecognized results never report success.
 export function checks(nodes: Check[], complete: boolean, url: string, id?: string): Pipeline {
+  const latest = new Map<string, Check>();
+  for (const node of nodes) {
+    const time = checkTime(node);
+    const key = checkKey(node);
+    if (!key || !Number.isFinite(time)) continue;
+    const previous = latest.get(key);
+    if (!previous || newerCheck(node, previous)) latest.set(key, node);
+  }
+  nodes = nodes.filter((node) => {
+    const key = checkKey(node);
+    const replacement = key && latest.get(key);
+    return !replacement || !newerCheck(replacement, node);
+  });
   const count = (value: number) => `${value} check${value === 1 ? '' : 's'}`;
+  const cancelled = nodes.filter((node) => node.conclusion === 'CANCELLED').length;
+  const stale = nodes.filter((node) => node.conclusion === 'STALE').length;
+  const stopped = [
+    ...(cancelled ? [`${count(cancelled)} cancelled`] : []),
+    ...(stale ? [`${count(stale)} stale`] : []),
+  ];
   const failing = nodes.filter((node) => FAILED.includes(node.conclusion ?? node.state ?? ''));
   const failed = failing.length;
   // The checks of one commit count as one run.
@@ -178,7 +204,12 @@ export function checks(nodes: Check[], complete: boolean, url: string, id?: stri
   if (failed)
     return {
       status: 'FAILED',
-      label: `${count(failed)} failed${pending ? `, ${count(pending)} pending` : ''}${complete ? '' : ' (partial)'}`,
+      label:
+        [
+          `${count(failed)} failed`,
+          ...stopped,
+          ...(pending ? [`${count(pending)} pending`] : []),
+        ].join(', ') + (complete ? '' : ' (partial)'),
       url,
       ...run,
       // GitHub reports a failure before the other checks finish.
@@ -187,10 +218,13 @@ export function checks(nodes: Check[], complete: boolean, url: string, id?: stri
   if (pending || !complete || unknown)
     return {
       status: 'PENDING',
-      label: `${pending ? `${count(pending)} pending` : 'unknown'}${complete ? '' : ' (partial)'}`,
+      label:
+        [...stopped, pending ? `${count(pending)} pending` : 'unknown'].join(', ') +
+        (complete ? '' : ' (partial)'),
       url,
       ...run,
     };
+  if (cancelled || stale) return { status: 'CANCELLED', label: stopped.join(', '), url, ...run };
   const label = [
     ['SUCCESS', 'passed'],
     ['SKIPPED', 'skipped'],
@@ -453,7 +487,7 @@ export class GitHubForge implements Forge {
           }>
         >(`query($owner:String!,$repo:String!,$oid:GitObjectID!,$after:String!) {
         repository(owner:$owner,name:$repo) { object(oid:$oid) { ... on Commit { statusCheckRollup {
-          contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { id name status conclusion detailsUrl } ... on StatusContext { id context state targetUrl } } pageInfo { hasNextPage endCursor } }
+          contexts(first:100,after:$after) { nodes { __typename ... on CheckRun { id name status conclusion detailsUrl startedAt checkSuite { createdAt app { id } workflowRun { workflow { id } } } } ... on StatusContext { id context state targetUrl } } pageInfo { hasNextPage endCursor } }
         } } } } }`),
         { owner, repo, oid: node.headRefOid, after: cursor.endCursor },
       );
