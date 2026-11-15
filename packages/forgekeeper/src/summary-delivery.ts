@@ -313,15 +313,14 @@ export function createSummaryDelivery(
     relay,
     fetchLinked,
     async prepare(event: SummaryRequest): Promise<boolean> {
+      requesting.delete(event.sessionID);
       const tagged = taggedInput(event.messages);
       let record = await summaryTurn(event.sessionID);
       if (!record && tagged && !(await userInput(event.sessionID)))
         record = (await readRecord(event.sessionID, tagged)) ?? 'failed';
       if (!record) {
-        requesting.delete(event.sessionID);
         return false;
       }
-      requesting.set(event.sessionID, record === 'failed' ? undefined : record.messageID);
       const linked =
         record === 'failed' || !record.linked
           ? undefined
@@ -341,6 +340,7 @@ export function createSummaryDelivery(
       );
       if (record !== 'failed' && record.system === 'relay')
         event.options.maxTokens = relayMaxTokens(record.findings);
+      requesting.set(event.sessionID, record === 'failed' ? undefined : record.messageID);
       return true;
     },
     async summarizing(sessionID: string): Promise<boolean> {

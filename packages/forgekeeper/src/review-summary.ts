@@ -401,24 +401,15 @@ export function restrictRequest(
   text: string,
   tool?: { name: string; value: unknown },
 ) {
+  const message = {
+    role: 'user',
+    content: [{ type: 'text', text }],
+    metadata: { forgekeeper: SUMMARY_KIND },
+  };
   for (const name of Object.keys(event.tools)) delete event.tools[name];
   if (tool) event.tools[tool.name] = tool.value;
   event.system.splice(0, event.system.length, { type: 'text', text: system });
   event.options.maxTokens = SUMMARY_MAX_TOKENS;
-  // The hook's messages are instances of OpenCode's message classes, one per
-  // role, which validate their fields. The plugin can't import them, so it
-  // reuses the constructor of a user message in the request; after a tool
-  // call, the last message is a tool result. Without one, the request fails
-  // rather than keeping any of the session's messages.
-  const user = event.messages.findLast(
-    (message) => (message as { role?: unknown } | undefined)?.role === 'user',
-  );
-  const Message = (user as { constructor?: unknown } | undefined)?.constructor as
-    | (new (input: unknown) => unknown)
-    | undefined;
-  if (!Message || Message === Object)
-    throw new Error('Forgekeeper could not build a tool-free review request');
-  const message = new Message({ role: 'user', content: [{ type: 'text', text }] });
   event.messages.splice(0, event.messages.length, message);
 }
 

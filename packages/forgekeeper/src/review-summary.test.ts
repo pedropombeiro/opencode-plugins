@@ -28,6 +28,9 @@ import {
   SUMMARY_PREFIX,
   superseded,
   turnInput,
+  restrictRequest,
+  SUMMARY_MAX_TOKENS,
+  type SummaryRequest,
 } from './review-summary';
 
 const url = 'https://gitlab.com/g/p/-/merge_requests/1';
@@ -37,6 +40,51 @@ const detail = (id: string, overrides: Partial<CommentDetail> = {}): CommentDeta
   username: 'alice',
   body: `Comment ${id}`,
   ...overrides,
+});
+
+describe('isolated summary requests', () => {
+  for (const messages of [
+    [],
+    [{ role: 'user', content: [{ type: 'text', text: 'private history' }] }],
+    [{ role: 'tool', content: [{ type: 'text', text: 'private tool output' }] }],
+    [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'synthetic notice' }],
+        metadata: { forgekeeper: SUMMARY_KIND },
+      },
+      { role: 'tool', content: [{ type: 'text', text: 'linked-note receipt' }] },
+    ],
+  ]) {
+    test(`replaces ${messages.length} input messages without borrowing their constructors`, () => {
+      for (const linked of [false, true]) {
+        const allowed = { description: 'Read one linked note' };
+        const event: SummaryRequest = {
+          sessionID: 'one',
+          messages: structuredClone(messages),
+          system: [{ type: 'text', text: 'private instructions' }],
+          tools: { bash: {}, read: {}, [LINKED_NOTE_TOOL]: allowed },
+          options: { maxTokens: 9999, temperature: 0 },
+        };
+        restrictRequest(
+          event,
+          'trusted summary instructions',
+          'untrusted findings',
+          linked ? { name: LINKED_NOTE_TOOL, value: allowed } : undefined,
+        );
+        expect(event.messages).toEqual([
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'untrusted findings' }],
+            metadata: { forgekeeper: SUMMARY_KIND },
+          },
+        ]);
+        expect(event.system).toEqual([{ type: 'text', text: 'trusted summary instructions' }]);
+        expect(event.tools).toEqual(linked ? { [LINKED_NOTE_TOOL]: allowed } : {});
+        expect(event.options).toEqual({ maxTokens: SUMMARY_MAX_TOKENS, temperature: 0 });
+      }
+    });
+  }
 });
 
 describe('relay reports', () => {

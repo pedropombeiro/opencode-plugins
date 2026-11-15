@@ -1862,7 +1862,7 @@ describe('PR/MR status lifecycle', () => {
     expect(summary.system[0].text).toContain('untrusted');
     expect(summary.options.maxTokens).toBe(1200);
     expect(summary.messages).toHaveLength(1);
-    expect(summary.messages[0]).toBeInstanceOf(ProviderMessage);
+    expect(summary.messages[0]).toMatchObject({ metadata: { forgekeeper: 'review-summary' } });
     const text = summary.messages[0].content[0].text;
     expect(text).toContain(injection);
     expect(text).toContain(`Latest comment: ${formatTime(item.postedAt!)}`);
@@ -2103,13 +2103,25 @@ describe('PR/MR status lifecycle', () => {
     }
   });
 
-  test('fails a Forgekeeper request it cannot rebuild instead of keeping session messages', async () => {
+  test('rebuilds metadata-bearing plain messages without keeping session history', async () => {
     const app = await harness({ status: new StatusForge(), ...summaryMode });
     const plain = [
       { role: 'tool', content: [{ type: 'text', text: 'UNRELATED TOOL OUTPUT' }] },
-      { role: 'user', content: [{ type: 'text', text: '[forgekeeper:msg_forgekeeper_x]' }] },
+      {
+        role: 'user',
+        content: [{ type: 'text', text: '[forgekeeper:msg_forgekeeper_x]' }],
+        metadata: { forgekeeper: 'review-summary' },
+      },
     ];
-    await expect(app.request('one', true, plain)).rejects.toThrow('could not build');
+    const request = await app.request('one', true, plain);
+    expect(request.messages).toHaveLength(1);
+    expect(request.messages[0]).toMatchObject({
+      role: 'user',
+      metadata: { forgekeeper: 'review-summary' },
+    });
+    expect(JSON.stringify(request)).not.toContain('UNRELATED TOOL OUTPUT');
+    expect(request.tools).toEqual({});
+    expect(request.options.maxTokens).toBe(1200);
     await app.cleanup();
   });
 
@@ -2247,7 +2259,7 @@ describe('PR/MR status lifecycle', () => {
       new ProviderMessage({ role: 'user', content: [{ type: 'text', text: 'earlier work' }] }),
       new ToolMessage({ role: 'tool', content: [{ type: 'text', text: 'UNRELATED TOOL OUTPUT' }] }),
     ]);
-    expect(second.messages[0]).toBeInstanceOf(ProviderMessage);
+    expect(second.messages[0]).toMatchObject({ metadata: { forgekeeper: 'review-summary' } });
     expect(JSON.stringify(second.messages)).not.toContain('UNRELATED TOOL OUTPUT');
     // Nothing is left to read, so the step has no tools, but keeps the rules
     // for the linked note it now holds.
@@ -3120,7 +3132,7 @@ describe('PR/MR status lifecycle', () => {
   test('warns about ignored options even with status off', async () => {
     const app = await harness({
       status: new StatusForge(),
-      pluginOptions: { status: false, delivery: { reviews: 'summmary' } },
+      pluginOptions: { status: false, delivery: { reviews: 'summary' } },
     });
     await settle();
     expect(app.notices()).toContainEqual(
