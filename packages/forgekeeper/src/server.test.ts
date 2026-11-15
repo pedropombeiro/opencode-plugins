@@ -3132,7 +3132,7 @@ describe('PR/MR status lifecycle', () => {
   test('warns about ignored options even with status off', async () => {
     const app = await harness({
       status: new StatusForge(),
-      pluginOptions: { status: false, delivery: { reviews: 'summary' } },
+      pluginOptions: { status: false, delivery: { reviews: 'invalid' } },
     });
     await settle();
     expect(app.notices()).toContainEqual(
