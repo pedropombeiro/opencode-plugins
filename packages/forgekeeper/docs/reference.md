@@ -1145,7 +1145,9 @@ Forgekeeper removes only worktrees it created, through OpenCode, when all of the
   PR/MR doesn't.
 - No attempt that may still run holds it, no session in it or below its directory is
   running, and every such session is a linked one or one of their subagents. Forgekeeper
-  archives the linked sessions once it removes the worktree.
+  asks OpenCode to archive the linked sessions once it removes the worktree. OpenCode 2.3.0
+  ignores `archived` in a plugin's session update, so they stay in the session list until you
+  archive them.
 
 Forgekeeper checks this at startup and every five minutes, so a worktree that stops
 qualifying, such as one you committed in, stays. No attempt can start using a worktree while
