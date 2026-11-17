@@ -1,4 +1,4 @@
-import type { FeedbackItem } from './feedback-inbox';
+import { isReviewRequest, type FeedbackItem } from './feedback-inbox';
 import { pipelineFails, type FeedbackSnapshot } from './forge';
 import type { Lookup } from './store';
 import { commentIDsOf } from './summary-delivery';
@@ -22,7 +22,9 @@ export function resolvedFeedback(url: string, snapshot: FeedbackSnapshot) {
     snapshot.comments.filter((comment) => comment.resolved).map((comment) => comment.id),
   );
   return (item: FeedbackItem): boolean => {
-    if (!snapshot.complete || item.url !== url) return false;
+    // A review request's comments are context, which stays useful once the
+    // author resolves their threads.
+    if (!snapshot.complete || item.url !== url || isReviewRequest(item)) return false;
     const ids = commentIDsOf(item);
     return ids.length > 0 && ids.every((id) => resolved.has(id));
   };
