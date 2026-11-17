@@ -1068,21 +1068,28 @@ Forgekeeper uses the first of these that applies:
 
 1. A worktree Forgekeeper created for the same PR/MR, at the head commit, even with
    uncommitted changes from an earlier batch, so later batches build on them.
-1. Another worktree at the head commit, on the source branch or with a detached HEAD, without
-   uncommitted changes.
+1. Another worktree at the head commit, without uncommitted changes, on the source branch
+   pushing to the source project, or with a detached HEAD and a remote for the source
+   project.
 1. A new worktree, created with OpenCode's worktree API and named
-   `forgekeeper-<project>-<iid>`, so OpenCode lists it and its sessions with the project.
+   `forgekeeper-<project>-<iid>-<random>`, so OpenCode lists it and its sessions with the
+   project. The random part identifies this one creation, so what a failed creation left is
+   never confused with another worktree.
 
 A worktree is reused only while no session in it, subagents included, is running, and only
-one attempt uses a worktree at a time, even across PRs/MRs at the same commit. The owning
-session's own checkout is never one of them.
+one attempt uses a worktree at a time, even across PRs/MRs at the same commit. Sessions in a
+directory below the worktree's count, except in another worktree nested there. Forgekeeper
+takes the worktree for the attempt before it checks it, so no other attempt changes it in
+between. The owning session's own checkout is never one of them.
 
 OpenCode creates worktrees with a detached HEAD, and runs the project's start command in
 them. Forgekeeper then switches a new worktree to the source branch when that changes no
 branch: the local branch is at the head commit and checked out nowhere else, or there is no
-local branch yet, which Forgekeeper creates to track the source branch. Otherwise the
-worktree keeps its detached HEAD, and the notices give the command to publish commits made
-there, such as `git push origin HEAD:feature`.
+local branch yet, which Forgekeeper creates to track the source branch. A local branch of
+the same name that pushes to another project, such as upstream for a PR/MR from a fork,
+doesn't count. Otherwise the worktree keeps its detached HEAD, and the notices give the
+command to publish commits made there, quoted for the shell, such as
+`git push 'origin' 'HEAD:refs/heads/feature'`.
 
 When the head commit isn't in the repository, Forgekeeper fetches only the source branch from
 the remote that points to the source project, and never pulls, rebases, or updates other
@@ -1098,11 +1105,27 @@ path and session, and another when the turn ends, with the worktree's uncommitte
 Linked sessions never count as owners, aren't watched for feedback, get no inbox updates or
 target guidance, and can't set targets.
 
+The linked session's permissions are those of the owning session in its checkout: its
+agent's rules as the owning checkout configures them, followed by the session's own rules.
+OpenCode applies a session's rules after its agent's, and the last matching rule wins, so
+these rules apply in the worktree even where its configuration of the agent differs. An
+`allow` from the owning checkout therefore overrides a `deny` of the worktree's agent
+configuration. The owning session needs an agent of its own: without one, the attempt ends
+before anything runs, with the reason.
+
 Forgekeeper must be enabled, with PR/MR status on, in both checkouts. The worktree's instance
 checks the turn's first model request as the owning checkout would, under the owning
-checkout's current rules, and refuses the turn while Forgekeeper isn't running there. The
-linked session's prompt doesn't hold the findings: Forgekeeper adds them to its requests, so
-without Forgekeeper in the worktree, the model reads only a note that the task couldn't start.
+checkout's current rules, and refuses the turn while Forgekeeper isn't running there. Right
+before the turn starts, after any wait, such as for a failed-job batch's quiet time, it also
+refuses the turn when another session in the worktree is running, or when someone else's
+uncommitted changes appeared there. These checks cover the start of the turn: Forgekeeper
+can't keep another session from starting in the worktree afterward. The linked session's
+prompt doesn't hold the findings: Forgekeeper adds them to its requests, so without
+Forgekeeper in the worktree, the model reads only a note that the task couldn't start.
+
+**Act on feedback** and **Retry feedback work** don't wait for the owning session when the
+turn runs in a worktree. A failed job that joins a failed-job batch while its worktree is
+prepared joins the attempt, and the turn waits out the quiet time again.
 
 Deleting the owning session doesn't end a turn that its linked session is still running. If
 Forgekeeper stops before the turn is submitted, the attempt ends and frees the PR/MR, so
@@ -1117,15 +1140,17 @@ Forgekeeper removes only worktrees it created, through OpenCode, when all of the
 - The worktree has no uncommitted or untracked changes.
 - Its HEAD is the PR/MR's final head commit, or one of its ancestors, so it has no commits the
   PR/MR doesn't.
-- No attempt holds it, no session in it is running, and every session in it is a linked one
-  or one of their subagents. Forgekeeper archives the linked sessions once it removes the
-  worktree.
+- No attempt that may still run holds it, no session in it or below its directory is
+  running, and every such session is a linked one or one of their subagents. Forgekeeper
+  archives the linked sessions once it removes the worktree.
 
 Forgekeeper checks this at startup and every five minutes, so a worktree that stops
 qualifying, such as one you committed in, stays. No attempt can start using a worktree while
 Forgekeeper removes it. If OpenCode fails partway through creating a worktree, such as when
 the start command fails, Forgekeeper still records what it created, so cleanup finds it. It
-never removes a worktree that it didn't create.
+records only a worktree with the name it requested, whose random part no other creation
+shares, and never a directory another PR/MR's record already holds. It never removes a
+worktree that it didn't create.
 
 ## Options
 

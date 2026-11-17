@@ -659,16 +659,32 @@ export function createReviewAutomation(host: AutomationHost) {
     admitting: () => void,
   ): Promise<AutomationRecord | undefined> {
     let stored = running;
-    const save = async (next: AutomationRecord) => {
-      if (!(await host.save(next, stored)))
-        throw new Error('Review automation changed while preparing its worktree');
-      stored = next;
-      return next;
+    // Stores `change` of the attempt as stored now. A later failure of a
+    // failed-job batch replaces its update meanwhile, which the change
+    // keeps, since the first model request waits out its quiet time. Any
+    // other change, such as the attempt ending, stops the preparation.
+    const save = async (change: (current: AutomationRecord) => AutomationRecord) => {
+      for (let retry = 0; retry < 3; retry++) {
+        const current = await host.read(stored.batch);
+        if (
+          !current ||
+          JSON.stringify({ ...current, item: stored.item }) !== JSON.stringify(stored) ||
+          (current.item.id !== stored.item.id &&
+            !(isJobFailure(current.item) && sameUpdate(current.item, stored.item)))
+        )
+          throw new Error('Review automation changed while preparing its worktree');
+        const next = change(current);
+        if (await host.save(next, current)) return (stored = next);
+      }
+      throw new Error('Review automation changed repeatedly while preparing its worktree');
     };
     const update = (patch: Partial<ProvisioningExecution>) => {
       if (stored.execution?.stage === 'submitting')
         throw new Error('Review automation submitted its turn already');
-      return save({ ...stored, execution: { ...stored.execution!, ...patch } });
+      return save((current) => ({
+        ...current,
+        execution: { ...current.execution!, ...patch } as ProvisioningExecution,
+      }));
     };
     try {
       await host.status(stored.item, stored);
@@ -690,10 +706,11 @@ export function createReviewAutomation(host: AutomationHost) {
       };
       if (prepared.models) next.models = prepared.models;
       await host.verifyExecution(next);
-      await assertPendingInboxItem(stored.item);
+      const latest = await host.read(stored.batch);
+      await assertPendingInboxItem(latest?.item ?? stored.item);
       const conflict = await ownershipConflictReason(stored.item);
       if (conflict) throw new Error(conflict);
-      await save(next);
+      await save((current) => ({ ...next, item: current.item }));
     } catch (error) {
       if (host.closing()) return undefined;
       await transitionAttempt(stored, 'failed', message(error), { release: true });
@@ -802,10 +819,23 @@ export function createReviewAutomation(host: AutomationHost) {
     }
   }
 
+  // Records where a manual attempt runs, which its selection didn't, so a
+  // turn in a worktree doesn't wait for the owning session. A check that
+  // fails leaves it to the checks before the turn. Returns the attempt as
+  // stored.
+  async function placeManual(record: AutomationRecord): Promise<AutomationRecord> {
+    if (!record.manual || record.checkout) return record;
+    const validation = await host.validate(record.item, false).catch(() => undefined);
+    if (validation?.placement !== 'worktree') return record;
+    const placed: AutomationRecord = { ...record, checkout: 'worktree' };
+    return (await host.save(placed, record)) ? placed : record;
+  }
+
   async function execute(queued: AutomationRecord) {
     let admitted = false;
     let record = queued;
     try {
+      record = await placeManual(record);
       // A later failure that replaces a failed-job batch's update before the
       // turn starts restarts its quiet time, even while the session is busy.
       for (;;) {

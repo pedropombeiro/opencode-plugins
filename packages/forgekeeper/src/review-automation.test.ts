@@ -704,7 +704,8 @@ describe('review automation', () => {
     await f.automation.act(item);
     await f.settled();
     expect(f.record()).toMatchObject({ state: 'completed', manual: true });
-    expect(validations).toEqual([true, false, false]);
+    // The manual attempt checks where it runs, then twice more before its turn.
+    expect(validations).toEqual([true, false, false, false]);
   });
 
   test("each reviewer's findings need a model one of the reviewer's rules allows", () => {
@@ -1421,5 +1422,115 @@ describe('review automation in a worktree', () => {
     expect(f.record().ended).toBeUndefined();
     await f.automation.turnEnded('linked', 'succeeded', 70);
     expect(f.record().ended).toEqual({ outcome: 'succeeded', at: 70 });
+  });
+
+  test('a manual action runs in its worktree without waiting for a busy owner', async () => {
+    const f = worktreeFixture({
+      // The owning session runs a long task on another branch.
+      wait: (sessionID) => (sessionID === 'one' ? new Promise<void>(() => {}) : Promise.resolve()),
+    });
+    await f.automation.act(item);
+    await f.settled();
+    expect(f.submitted).toHaveLength(1);
+    expect(f.record()).toMatchObject({ state: 'completed', manual: true, checkout: 'worktree' });
+    await f.automation.act(item, true);
+    await f.settled();
+    expect(f.submitted).toHaveLength(2);
+    expect(f.record()).toMatchObject({ state: 'completed', attempt: 2, checkout: 'worktree' });
+  });
+
+  test('a manual action in the owning session still waits for it', async () => {
+    const waited: string[] = [];
+    const f = fixture({ wait: async (sessionID) => void waited.push(sessionID) });
+    await f.automation.act(item);
+    await f.settled();
+    expect(waited[0]).toBe('one');
+    expect(f.record()).toMatchObject({ state: 'completed', manual: true });
+    expect(f.record().checkout).toBeUndefined();
+  });
+
+  describe('while the worktree is prepared', () => {
+    const jobRule = {
+      on: 'job-failed' as const,
+      host: 'gitlab.com',
+      projects: ['team/project'],
+      action: 'investigate' as const,
+    };
+    const failure = (id: string, at: number): FeedbackItem => ({
+      id,
+      kind: 'ci-failed',
+      sessionID: 'one',
+      url,
+      title: 'Job failed',
+      links: [`${url}/jobs/${id}`],
+      pipeline: 'p1',
+      at,
+      automationAllowed: true,
+    });
+    const first = failure('f1', 100);
+    const batch = automationBatch(first);
+    type Step = 'worktree' | 'session' | 'verification';
+
+    // Investigates `first`, running `during` at each step of the preparation.
+    function preparing(during: (step: Step, f: ReturnType<typeof worktreeFixture>) => unknown) {
+      const f: ReturnType<typeof worktreeFixture> = worktreeFixture({
+        rules: [jobRule],
+        pipelineDone: async () => true,
+        async provision(_record, update) {
+          await update({
+            stage: 'provisioning',
+            ownerDirectory: '/repo',
+            head: 'abc',
+            sourceProject: 'team/project',
+            sourceBranch: 'feature',
+          });
+          await during('worktree', f);
+          await update({ directory: '/worktree', detached: false });
+          await during('session', f);
+          return update({ sessionID: 'linked' });
+        },
+        verifyExecution: async () => void (await during('verification', f)),
+      });
+      f.setItems([first]);
+      return f;
+    }
+
+    for (const step of ['worktree', 'session', 'verification'] as const)
+      test(`a later failure during ${step} preparation joins the attempt`, async () => {
+        const second = failure('f2', 200);
+        const f = preparing(async (at, f) => {
+          if (at !== step) return;
+          f.setItems([second]);
+          expect(await f.automation.selectAutomatic(second)).toBe(true);
+        });
+        expect(await f.automation.selectAutomatic(first)).toBe(true);
+        await f.settled();
+        expect(f.submitted).toHaveLength(1);
+        expect(f.submitted[0]).toMatchObject({
+          item: { id: 'f2' },
+          execution: { stage: 'submitting', sessionID: 'linked' },
+        });
+        expect(f.records.get(batch)).toMatchObject({ state: 'completed', item: { id: 'f2' } });
+      });
+
+    test('an attempt ended or replaced meanwhile stops the preparation', async () => {
+      const changes: Record<string, (stored: AutomationRecord) => AutomationRecord> = {
+        ended: (stored) => ({ ...stored, state: 'failed', reason: 'Canceled' }),
+        replaced: (stored) => ({ ...stored, messageID: 'another', attempt: 2 }),
+      };
+      for (const change of Object.values(changes)) {
+        let changed: AutomationRecord | undefined;
+        const f = preparing((at, f) => {
+          if (at !== 'session') return;
+          changed = change(f.records.get(batch)!);
+          f.records.set(batch, structuredClone(changed));
+        });
+        expect(await f.automation.selectAutomatic(first)).toBe(true);
+        await f.settled();
+        expect(f.submitted).toEqual([]);
+        // The other writer's record stays as it stored it.
+        expect(f.records.get(batch)).toEqual(changed!);
+      }
+    });
   });
 });

@@ -43,7 +43,7 @@ import {
 import { createReviewClaims, type ExecutionClaim } from './review-claim';
 import { findingsDigest, PREPARATION_INSTRUCTIONS, preparationBatch } from './review-preparation';
 import { boundedReport, isForgekeeperInput, turnInput } from './review-summary';
-import { shortStatus } from './git';
+import { listWorktrees, shortStatus } from './git';
 import {
   freshPresence,
   linkedMetadata,
@@ -55,9 +55,10 @@ import {
 } from './linked-session';
 import { PLUGIN_ID } from './plugin-id';
 import {
+  inCheckout,
   prepareWorktree,
   sweepWorktrees,
-  worktreeBusy,
+  worktreeAdmission,
   worktreeMismatch,
   type WorktreeDependencies,
   type WorktreeRequest,
@@ -114,6 +115,9 @@ interface StartContext {
     automatic: boolean,
     rules: readonly AutomationRule[],
   ) => Promise<readonly AutomationRule[]>;
+  // Rejects when the checkout can't take the turn now. Runs last, right
+  // before the start is recorded, after any wait.
+  admit: () => Promise<void>;
 }
 
 // The PR/MR's source and the commit a linked turn runs at.
@@ -131,6 +135,47 @@ export const WORKTREE_NOTICE = 'worktree-notice';
 // itself in a worktree before it gives up.
 const PRESENCE_CHECK = 2_000;
 const PRESENCE_CHECKS = 10;
+
+type SessionInfo = Awaited<ReturnType<Context['session']['get']>>;
+
+// The owning session's agent, and its permissions as they apply in the
+// owning checkout: its agent's rules there, then its own. A session's rules
+// apply after its agent's, and the last matching rule wins, so in a linked
+// session they apply as in the owner, even where the worktree configures the
+// agent otherwise. Without an agent of the owner's own, which agent's rules
+// apply can't be read for certain, so it rejects.
+export async function ownerPolicy(ctx: Context, owner: SessionInfo) {
+  if (!owner.agent)
+    throw new Ineligible(
+      "The owning session has no agent of its own, so Forgekeeper can't give the linked session its permissions. Pick an agent in the owning session, then use Retry feedback work.",
+    );
+  const agent = await ctx.agent.get({
+    agentID: owner.agent,
+    location: { directory: owner.location.directory },
+  });
+  return {
+    agent: owner.agent,
+    permissions: [...agent.data.permissions, ...(owner.permissions ?? [])],
+  };
+}
+
+// The argument as a POSIX shell reads it literally.
+export const shellQuote = (argument: string) => `'${argument.replaceAll("'", `'\\''`)}'`;
+
+// How to publish commits made in a worktree with a detached HEAD: a push to
+// the source branch, quoted for the shell, since a branch name can hold
+// characters such as `;` and `$`, in a code block fenced longer than any
+// run of backticks in it.
+export function pushNotice(sourceBranch: string, remote: string | undefined) {
+  const command = `git push ${remote ? shellQuote(remote) : '<remote>'} ${shellQuote(`HEAD:refs/heads/${sourceBranch}`)}`;
+  const fence = '`'.repeat(
+    Math.max(3, ...(command.match(/`+/g) ?? []).map((run) => run.length + 1)),
+  );
+  return [
+    `The worktree has a detached HEAD. To publish commits made there, run this in it${remote ? '' : ", with the source project's remote for <remote>"}:`,
+    `${fence}sh\n${command}\n${fence}`,
+  ].join('\n\n');
+}
 
 // The stored attempt whose prompt started the session's current turn. When a
 // compaction removed that prompt, an attempt counts only if it started after
@@ -614,16 +659,27 @@ export function createAutomationHost(
     if (!includesRequest(stored?.targets ?? [], item.url)) throw canceled();
   }
 
-  // Every non-archived session in the directory, subagents included, from
-  // every page.
+  // Every non-archived session of the project in the checkout at `path`, in
+  // its directory or below it, subagents included, from every page.
+  // OpenCode lists a directory's sessions without those below it, so this
+  // lists the project's, and leaves out those in another checkout nested
+  // in this one. Without the repository's worktrees, none counts as nested,
+  // so more sessions count, never fewer.
   const directorySessions = async (path: string): Promise<DirectorySession[]> => {
+    const checkouts = ((await listWorktrees(deps.exec, path)) ?? []).map(
+      (entry) => entry.directory,
+    );
     const sessions: DirectorySession[] = [];
-    let page = await ctx.session.list({ directory: path, archived: false, limit: 200 });
+    let page = await ctx.session.list({
+      project: ctx.location.project.id,
+      archived: false,
+      limit: 200,
+    });
     for (;;) {
       for (const session of page.data as unknown as Array<
         DirectorySession & { location: { directory: string } }
       >)
-        if (session.location.directory === path) sessions.push(session);
+        if (inCheckout(session.location.directory, path, checkouts)) sessions.push(session);
       const next = page.cursor.next;
       if (!next) return sessions;
       page = await ctx.session.list({ cursor: next, limit: 200 } as never);
@@ -640,6 +696,7 @@ export function createAutomationHost(
       remove: (input) => ctx.worktree.remove(input),
     },
     sessions: directorySessions,
+    repository: (path) => deps.forges.repository(path),
     now,
   });
   const worktreeRequest = (url: string, source: ExecutionSource): WorktreeRequest => {
@@ -669,6 +726,7 @@ export function createAutomationHost(
             throw new Ineligible('The checkout does not match the PR/MR source project and branch');
           return rules;
         },
+        admit: async () => {},
       };
     if (execution.stage !== 'submitting') throw new Error('Review automation is no longer running');
     if (execution.directory !== directory)
@@ -713,6 +771,17 @@ export function createAutomationHost(
           throw new Error('Switch the linked session to a coding agent before acting on feedback');
         return rules;
       },
+      // Another session may have started in the worktree, or left changes
+      // there, since the turn was submitted, such as during a quiet time.
+      async admit() {
+        const refusal = await worktreeAdmission(
+          worktreeDeps(),
+          directory,
+          record.item.url,
+          execution.sessionID,
+        );
+        if (refusal) throw new Error(refusal);
+      },
     };
   }
 
@@ -723,7 +792,7 @@ export function createAutomationHost(
       ? 'investigating the failed jobs of'
       : 'preparing fixes for';
     const push = execution.detached
-      ? `The worktree has a detached HEAD. To publish commits made there, run \`git push ${execution.remote ?? '<remote>'} HEAD:${execution.sourceBranch}\` in it.`
+      ? pushNotice(execution.sourceBranch, execution.remote)
       : `The worktree is on ${execution.sourceBranch}.`;
     const lines =
       phase === 'started'
@@ -854,6 +923,11 @@ export function createAutomationHost(
         sourceProject: request.sourceProject,
         sourceBranch: request.sourceBranch,
       };
+      // Read before the worktree is prepared, so an owner whose permissions
+      // can't be given to the linked session leaves no worktree behind.
+      const owner = await ctx.session.get({ sessionID: record.item.sessionID });
+      const policy = await ownerPolicy(ctx, owner);
+      const model = await modelOf(owner);
       let stored = await update({ stage: 'provisioning', ownerDirectory: directory, ...source });
       const placement = await prepareWorktree(
         worktreeDeps(),
@@ -870,14 +944,11 @@ export function createAutomationHost(
         detached: placement.detached,
         ...(placement.remote ? { remote: placement.remote } : {}),
       });
-      const owner = await ctx.session.get({ sessionID: stored.item.sessionID });
-      const model = await modelOf(owner);
       const session = await ctx.session.create({
         location: { directory: placement.directory },
         title: `Forgekeeper: ${isJobFailure(stored.item) ? 'investigate' : 'prepare fixes for'} ${stored.item.url}`,
-        ...(owner.agent ? { agent: owner.agent } : {}),
+        ...policy,
         ...(model ? { model } : {}),
-        ...(owner.permissions ? { permissions: owner.permissions } : {}),
         metadata: linkedMetadata(owner.id, stored.batch),
       });
       await ctx.session.update({
@@ -916,8 +987,13 @@ export function createAutomationHost(
         worktreeRequest(record.item.url, execution),
       );
       if (mismatch) throw new Error(mismatch);
-      if (await worktreeBusy(worktreeDeps(), path, execution.sessionID))
-        throw new Error(`Another session is running in ${path}`);
+      const refusal = await worktreeAdmission(
+        worktreeDeps(),
+        path,
+        record.item.url,
+        execution.sessionID,
+      );
+      if (refusal) throw new Error(refusal);
     },
     notify,
     async submit(record, text) {
@@ -999,6 +1075,7 @@ export function createAutomationHost(
           await start.pending(current.item);
           // Another session may have targeted the PR/MR during the wait.
           await assertSoleOwner(current.item);
+          await start.admit();
           const started = startedRecord(current, models);
           if (await save(started, current)) return started;
         }
@@ -1020,6 +1097,7 @@ export function createAutomationHost(
       const refusal = modelRefusal(models, requested, 'retry');
       if (refusal) throw new Error(refusal);
       await start.pending(record.item);
+      await start.admit();
       const started = startedRecord(record, models);
       if (!(await save(started, record)))
         throw new Error('Review automation changed before the coding turn');

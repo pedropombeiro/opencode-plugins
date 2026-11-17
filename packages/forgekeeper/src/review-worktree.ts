@@ -2,8 +2,9 @@
 // isn't at the PR/MR's head commit: finds or creates a worktree there, checks
 // it before the turn, and removes the worktrees Forgekeeper created once their
 // PR/MR is over and nothing in them would be lost.
-import { statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { basename, resolve, sep } from 'node:path';
 import type { Exec } from './exec';
 import {
   checkoutState,
@@ -65,9 +66,12 @@ export interface WorktreeDependencies {
     }) => Promise<ReadonlyArray<{ directory: string; strategy?: string }>>;
     remove: (input: { projectID: string; directory: string; force: boolean }) => Promise<void>;
   };
-  // Every non-archived session whose directory is the given one, including
-  // subagents, whose work in the checkout counts as much as their parent's.
+  // Every non-archived session in the checkout, in its directory or below
+  // it, including subagents, whose work in the checkout counts as much as
+  // their parent's. Rejects when they can't all be read.
   sessions: (directory: string) => Promise<DirectorySession[]>;
+  // The checkout's branch and the source it pushes to.
+  repository: (directory: string) => Promise<RepositoryLookup>;
   now: () => number;
 }
 
@@ -76,18 +80,52 @@ export interface WorktreeDependencies {
 export const CREATION_TIME = 60 * 60_000;
 export const REMOVAL_TIME = 10 * 60_000;
 
-// The name of the worktree Forgekeeper creates for a PR/MR, so later batches
-// find it again.
-export function worktreeName(request: Pick<WorktreeRequest, 'sourceProject' | 'iid'>) {
+// The name of the worktree Forgekeeper creates for a PR/MR. Its prefix
+// names the PR/MR, and `creation`, random for each creation, sets it apart,
+// so what a failed creation left is never confused with another worktree.
+export function worktreeName(
+  request: Pick<WorktreeRequest, 'sourceProject' | 'iid'>,
+  creation: string,
+) {
   const project = (request.sourceProject.split('/').at(-1) ?? 'project').replace(
     /[^A-Za-z0-9_.-]+/g,
     '-',
   );
-  return `forgekeeper-${project}-${request.iid}`;
+  return `forgekeeper-${project}-${request.iid}-${creation}`;
 }
 
+// Whether OpenCode created the directory for the requested name, which it
+// suffixes with a number when the directory exists.
 const nameMatches = (directory: string, name: string) =>
   new RegExp(`^${name.replace(/[.]/g, '\\.')}(?:-\\d+)?$`).test(basename(directory));
+
+// The path with symbolic links resolved, or as given when it doesn't exist.
+function canonical(path: string) {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+const within = (path: string, root: string) =>
+  path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+
+// Whether a session at `location` works in the checkout at `root`: its
+// directory is the checkout's or below it, but not in another checkout of
+// the repository nested there. Both the paths as given and with symbolic
+// links resolved count, so an alias never hides a session.
+export function inCheckout(location: string, root: string, checkouts: readonly string[]) {
+  const forms = (path: string) => [...new Set([resolve(path), canonical(path)])];
+  const roots = forms(root);
+  const nested = checkouts
+    .flatMap(forms)
+    .filter((other) => roots.some((path) => other !== path && within(other, path)));
+  return forms(location).some(
+    (path) =>
+      roots.some((root) => within(path, root)) && !nested.some((other) => within(path, other)),
+  );
+}
 
 async function git(run: Exec, directory: string, args: string[]) {
   const result = await run('git', args, directory);
@@ -125,7 +163,7 @@ export async function prepareWorktree(
     (row): row is RecordedWorktree => row.state === 'ready',
   );
   const ours = (entry: WorktreeEntry) =>
-    created.find((row) => row.directory === entry.directory && row.url === request.url);
+    created.some((row) => row.directory === entry.directory && row.url === request.url);
   const usable = entries.filter(
     (entry) => !entry.unusable && entry.directory !== owner.top && entry.head === request.headSha,
   );
@@ -138,20 +176,50 @@ export async function prepareWorktree(
     ),
   ];
   for (const entry of candidates) {
-    if (!ours(entry) && !(await isClean(exec, entry.directory))) continue;
     if (!(await deps.claims.locks.acquire(entry.directory, holder))) continue;
-    if ((await deps.sessions(entry.directory)).some(isBusy)) {
+    // Checked while the attempt holds the worktree, so no other attempt
+    // changes it in between: its branch pushes to the source branch of the
+    // source project, and no one else uses it or left changes there.
+    const refusal =
+      (await worktreeMismatch(exec, deps.repository, entry.directory, request)) ??
+      (await worktreeAdmission(deps, entry.directory, request.url));
+    if (refusal) {
       await deps.claims.locks.release(holder);
       continue;
     }
     return {
       directory: entry.directory,
-      created: !!ours(entry),
+      created: await ownedFor(deps.claims, entry.directory, request.url),
       ...(remote ? { remote } : {}),
       detached: !entry.branch,
     };
   }
   return createWorktree(deps, request, holder, entries, remote);
+}
+
+// Whether Forgekeeper created the worktree for the PR/MR, so changes there
+// are an earlier batch's.
+async function ownedFor(claims: Claims, directory: string, url: string) {
+  const row = await claims.worktrees.read(directory);
+  return row?.state === 'ready' && row.url === url;
+}
+
+// Why the attempt can't run in the worktree now, or undefined when it can:
+// another session there, other than `except`, such as the linked session
+// about to run there, is running, or it has uncommitted changes, which only
+// Forgekeeper's own worktree for the same PR/MR may keep.
+export async function worktreeAdmission(
+  deps: Pick<WorktreeDependencies, 'exec' | 'claims' | 'sessions'>,
+  directory: string,
+  url: string,
+  except?: string,
+): Promise<string | undefined> {
+  const sessions = await deps.sessions(directory);
+  if (sessions.some((session) => session.id !== except && isBusy(session)))
+    return `Another session is running in ${directory}`;
+  if (!(await ownedFor(deps.claims, directory, url)) && !(await isClean(deps.exec, directory)))
+    return `${directory} has uncommitted changes that this task didn't make`;
+  return undefined;
 }
 
 async function createWorktree(
@@ -162,15 +230,17 @@ async function createWorktree(
   remote: string | undefined,
 ): Promise<WorktreePlacement> {
   const { exec, claims, projectID } = deps;
-  const name = worktreeName(request);
+  const creation = randomBytes(4).toString('hex');
+  const name = worktreeName(request, creation);
   const at = deps.now();
   const intent: WorktreeIntent = {
-    key: `intent:${name}:${at}`,
+    key: `intent:${name}`,
     name,
     url: request.url,
     projectID,
     state: 'creating',
     at,
+    creation,
   };
   if (!(await claims.worktrees.save(intent)))
     throw new Error('Another instance is creating this worktree');
@@ -180,8 +250,9 @@ async function createWorktree(
     directory = (await deps.worktree.create({ projectID, branch: request.headSha, name }))
       .directory;
   } catch (error) {
-    // A start command can fail after the worktree exists. What appeared
-    // under the requested name during the creation is the one it made.
+    // A start command can fail after the worktree exists. The requested
+    // name is this creation's alone, so what appeared under it is the one
+    // it made.
     const after = await deps.worktree.list({ projectID }).catch(() => undefined);
     const left = (after ?? []).filter(
       (entry) =>
@@ -199,37 +270,51 @@ async function createWorktree(
       );
     throw error;
   }
-  await claims.worktrees.replace(intent, [
-    { ...intent, key: directory, directory, state: 'ready' },
-  ]);
+  const [recorded] =
+    (await claims.worktrees.replace(intent, [
+      { ...intent, key: directory, directory, state: 'ready' },
+    ])) ?? [];
+  if (!recorded) throw new Error('The new worktree is recorded for another creation already');
+  // Fails once the attempt ended during the creation, such as when its
+  // owning session was deleted. The worktree stays recorded for cleanup.
   if (!(await claims.locks.acquire(directory, holder)))
-    throw new Error('Another attempt took the new worktree');
+    throw new Error('The attempt ended, or another took the new worktree, while it was created');
   const state = await checkoutState(exec, directory);
   if (state?.head !== request.headSha)
     throw new Error("The new worktree isn't at the PR/MR's head commit");
-  const detached = !(await switchToBranch(exec, directory, request, entries, remote));
+  const detached = !(await switchToBranch(deps, directory, request, entries, remote));
   return { directory, created: true, ...(remote ? { remote } : {}), detached };
 }
 
 // Puts the new, detached worktree on the source branch when that changes no
-// branch: the local branch is at the head commit and checked out nowhere, or
-// there is none yet. Returns whether it did.
+// branch, and the branch pushes to the source project: the local branch is
+// at the head commit and checked out nowhere, or there is none yet. Returns
+// whether it did.
 async function switchToBranch(
-  exec: Exec,
+  deps: WorktreeDependencies,
   directory: string,
   request: WorktreeRequest,
   entries: WorktreeEntry[],
   remote: string | undefined,
 ): Promise<boolean> {
+  const { exec } = deps;
   const branch = request.sourceBranch;
   if (entries.some((entry) => entry.branch === branch)) return false;
   const local = await localBranch(exec, directory, branch);
-  if (local) return local === request.headSha && git(exec, directory, ['switch', branch]);
-  if (!remote) return false;
-  if (!(await git(exec, directory, ['switch', '--create', branch]))) return false;
-  await git(exec, directory, ['config', `branch.${branch}.remote`, remote]);
-  await git(exec, directory, ['config', `branch.${branch}.merge`, `refs/heads/${branch}`]);
-  return true;
+  if (local) {
+    if (local !== request.headSha || !(await git(exec, directory, ['switch', branch])))
+      return false;
+  } else {
+    if (!remote || !(await git(exec, directory, ['switch', '--create', branch]))) return false;
+    await git(exec, directory, ['config', `branch.${branch}.remote`, remote]);
+    await git(exec, directory, ['config', `branch.${branch}.merge`, `refs/heads/${branch}`]);
+  }
+  // A same-named branch of another fork, say, pushes elsewhere, so the
+  // worktree stays detached, with the source project's remote to push to.
+  if (!(await worktreeMismatch(exec, deps.repository, directory, request))) return true;
+  if (!(await git(exec, directory, ['switch', '--detach', request.headSha])))
+    throw new Error("The new worktree's branch isn't the PR/MR's source branch");
+  return false;
 }
 
 // Why the worktree can't run the turn now, or undefined when it can: it's at
@@ -260,18 +345,6 @@ export async function worktreeMismatch(
   )
     return "The worktree's branch isn't the PR/MR's source branch";
   return undefined;
-}
-
-// Whether a session in the directory other than `except`, such as the linked
-// session about to run there, is running.
-export async function worktreeBusy(
-  deps: Pick<WorktreeDependencies, 'sessions'>,
-  directory: string,
-  except: string,
-): Promise<boolean> {
-  return (await deps.sessions(directory)).some(
-    (session) => session.id !== except && isBusy(session),
-  );
 }
 
 export interface SweepDependencies extends WorktreeDependencies {
@@ -358,7 +431,10 @@ function linkedTree(session: DirectorySession, sessions: readonly DirectorySessi
 }
 
 // Records the worktree that a creation interrupted by a crash left, if any:
-// one OpenCode lists under the requested name, made after the intent.
+// one OpenCode lists under the requested name, which holds the creation's
+// random part. An intent without one, from an earlier version, names
+// nothing only its creation could have made, so it's dropped, and whatever
+// it left is never removed.
 async function adoptLeftovers(
   deps: SweepDependencies,
   intent: WorktreeIntent,
@@ -368,15 +444,14 @@ async function adoptLeftovers(
   const listed = await deps.worktree.list({ projectID: deps.projectID }).catch(() => undefined);
   if (!listed) return;
   const known = new Set(rows.map((row) => row.directory));
-  const left = listed.filter((entry) => {
-    if (!entry.strategy || known.has(entry.directory) || !nameMatches(entry.directory, intent.name))
-      return false;
-    try {
-      return statSync(entry.directory).birthtimeMs >= intent.at - 1_000;
-    } catch {
-      return false;
-    }
-  });
+  const left = intent.creation
+    ? listed.filter(
+        (entry) =>
+          entry.strategy &&
+          !known.has(entry.directory) &&
+          nameMatches(entry.directory, intent.name),
+      )
+    : [];
   await deps.claims.worktrees.replace(
     intent,
     left.map((entry) => ({

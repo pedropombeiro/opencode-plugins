@@ -1,19 +1,20 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { exec as run } from '../../_shared/src/index.ts';
 import type { Exec } from './exec';
 import { resolveRepository } from './git';
-import { Ineligible } from './review-automation';
+import { Ineligible, type AutomationRecord } from './review-automation';
 import { createReviewClaims, type CheckoutLock, type RecordedWorktree } from './review-claim';
 import { linkedMetadata, type DirectorySession } from './linked-session';
 import {
+  CREATION_TIME,
+  inCheckout,
   REMOVAL_TIME,
   prepareWorktree,
   sweepWorktrees,
   worktreeMismatch,
-  worktreeName,
   type SweepDependencies,
   type WorktreeDependencies,
   type WorktreeRequest,
@@ -81,7 +82,32 @@ async function request(overrides: Partial<WorktreeRequest> = {}): Promise<Worktr
   };
 }
 
-const lock = (batch = 'b1'): CheckoutLock => ({ batch, messageID: `m-${batch}`, url: URL, at: 1 });
+// The lock of attempt `batch`, whose PR/MR claim is its own.
+const lock = (batch = 'b1'): CheckoutLock => ({
+  batch,
+  messageID: `m-${batch}`,
+  url: `${URL}#${batch}`,
+  at: 1,
+});
+
+// Stores attempt `batch` as running, holding its claim, so it may take
+// checkouts. Returns its lock.
+async function running(claims: ReturnType<typeof createReviewClaims>, batch = 'b1') {
+  const held = lock(batch);
+  if (!(await claims.records.read(batch))) {
+    const queued: AutomationRecord = {
+      batch,
+      messageID: held.messageID,
+      state: 'queued',
+      attempt: 1,
+      at: 1,
+      item: { id: batch, sessionID: 'one', url: held.url, title: 'Review', links: [], at: 1 },
+    };
+    await claims.records.save(queued);
+    expect(await claims.records.start({ ...queued, state: 'running' }, queued)).toBe(true);
+  }
+  return held;
+}
 
 // OpenCode's default worktree strategy, which always creates a detached HEAD.
 function fixture(sessions: Record<string, DirectorySession[]> = {}) {
@@ -89,6 +115,7 @@ function fixture(sessions: Record<string, DirectorySession[]> = {}) {
   const created: string[] = [];
   const removed: string[] = [];
   let failCreate = false;
+  let beforeCreate: (name: string) => Promise<void> | void = () => {};
   const deps: WorktreeDependencies = {
     exec,
     claims,
@@ -96,6 +123,7 @@ function fixture(sessions: Record<string, DirectorySession[]> = {}) {
     ownerDirectory: main,
     worktree: {
       async create({ branch, name }) {
+        await beforeCreate(name!);
         const directory = join(root, name!);
         await git(main, 'worktree', 'add', '--quiet', '--detach', directory, branch ?? 'HEAD');
         created.push(directory);
@@ -110,6 +138,7 @@ function fixture(sessions: Record<string, DirectorySession[]> = {}) {
       },
     },
     sessions: async (directory) => sessions[directory] ?? [],
+    repository: (directory) => resolveRepository(exec, directory, () => true),
     now: () => 1_000,
   };
   return {
@@ -118,8 +147,12 @@ function fixture(sessions: Record<string, DirectorySession[]> = {}) {
     created,
     removed,
     failNextCreate: () => (failCreate = true),
+    onCreate: (hook: typeof beforeCreate) => (beforeCreate = hook),
+    lock: (batch?: string) => running(claims, batch),
   };
 }
+
+const NEW = /^forgekeeper-project-7-[0-9a-f]{8}$/;
 
 const session = (id: string, extra: Partial<DirectorySession> = {}): DirectorySession => ({
   id,
@@ -132,7 +165,7 @@ describe('prepareWorktree', () => {
     const existing = join(root, 'existing');
     await git(main, 'worktree', 'add', '--quiet', existing, 'feature');
     const f = fixture();
-    const placement = await prepareWorktree(f.deps, await request(), lock());
+    const placement = await prepareWorktree(f.deps, await request(), await f.lock());
     expect(placement).toEqual({
       directory: existing,
       created: false,
@@ -150,8 +183,8 @@ describe('prepareWorktree', () => {
     const busy = join(root, 'busy');
     await git(main, 'worktree', 'add', '--quiet', '--detach', busy, 'feature');
     const f = fixture({ [busy]: [session('s1', { time: { idle: 1, busy: 2 } })] });
-    const placement = await prepareWorktree(f.deps, await request(), lock());
-    expect(placement.directory).toBe(join(root, worktreeName(await request())));
+    const placement = await prepareWorktree(f.deps, await request(), await f.lock());
+    expect(basename(placement.directory)).toMatch(NEW);
     expect(placement.created).toBe(true);
     // The busy worktree's lock was given back.
     expect(await f.claims.locks.read(busy)).toBeUndefined();
@@ -159,10 +192,10 @@ describe('prepareWorktree', () => {
 
   test('reuses its own worktree for the PR/MR with uncommitted fixes', async () => {
     const f = fixture();
-    const first = await prepareWorktree(f.deps, await request(), lock('b1'));
+    const first = await prepareWorktree(f.deps, await request(), await f.lock('b1'));
     await f.claims.locks.release(lock('b1'));
     writeFileSync(join(first.directory, 'file'), 'fixed\n');
-    const second = await prepareWorktree(f.deps, await request(), lock('b2'));
+    const second = await prepareWorktree(f.deps, await request(), await f.lock('b2'));
     expect(second).toEqual(first);
     expect(f.created).toHaveLength(1);
     // Another PR/MR at the same commit doesn't take the changed worktree.
@@ -170,7 +203,7 @@ describe('prepareWorktree', () => {
     const other = await prepareWorktree(
       f.deps,
       await request({ url: `${URL}0`, iid: '70' }),
-      lock('b3'),
+      await f.lock('b3'),
     );
     expect(other.directory).not.toBe(first.directory);
   });
@@ -179,18 +212,20 @@ describe('prepareWorktree', () => {
     const existing = join(root, 'existing');
     await git(main, 'worktree', 'add', '--quiet', existing, 'feature');
     const f = fixture();
-    expect((await prepareWorktree(f.deps, await request(), lock('b1'))).directory).toBe(existing);
+    expect((await prepareWorktree(f.deps, await request(), await f.lock('b1'))).directory).toBe(
+      existing,
+    );
     const second = await prepareWorktree(
       f.deps,
       await request({ url: `${URL}0`, iid: '70' }),
-      lock('b2'),
+      await f.lock('b2'),
     );
     expect(second.directory).not.toBe(existing);
   });
 
   test('puts a new worktree on the local branch when it is at the head commit', async () => {
     const f = fixture();
-    const placement = await prepareWorktree(f.deps, await request(), lock());
+    const placement = await prepareWorktree(f.deps, await request(), await f.lock());
     expect(placement.detached).toBe(false);
     expect(await git(placement.directory, 'symbolic-ref', '--short', 'HEAD')).toBe('feature');
     expect(await git(main, 'rev-parse', 'feature')).toBe(await head());
@@ -200,7 +235,11 @@ describe('prepareWorktree', () => {
     const sha = await head();
     await git(main, 'branch', '-D', 'feature');
     const f = fixture();
-    const placement = await prepareWorktree(f.deps, await request({ headSha: sha }), lock());
+    const placement = await prepareWorktree(
+      f.deps,
+      await request({ headSha: sha }),
+      await f.lock(),
+    );
     expect(placement.detached).toBe(false);
     expect(await git(placement.directory, 'rev-parse', 'HEAD')).toBe(sha);
     const lookup = await resolveRepository(exec, placement.directory, () => true);
@@ -214,7 +253,11 @@ describe('prepareWorktree', () => {
     writeFileSync(join(elsewhere, 'file'), 'three\n');
     await git(elsewhere, 'commit', '--quiet', '-am', 'three');
     const f = fixture();
-    const placement = await prepareWorktree(f.deps, await request({ headSha: sha }), lock());
+    const placement = await prepareWorktree(
+      f.deps,
+      await request({ headSha: sha }),
+      await f.lock(),
+    );
     expect(placement).toMatchObject({ created: true, detached: true, remote: 'origin' });
     expect(await git(placement.directory, 'rev-parse', 'HEAD')).toBe(sha);
     // The other worktree's branch is untouched.
@@ -225,7 +268,11 @@ describe('prepareWorktree', () => {
     const sha = await head();
     await git(main, 'branch', '--force', 'feature', 'main');
     const f = fixture();
-    const placement = await prepareWorktree(f.deps, await request({ headSha: sha }), lock());
+    const placement = await prepareWorktree(
+      f.deps,
+      await request({ headSha: sha }),
+      await f.lock(),
+    );
     expect(placement.detached).toBe(true);
     expect(await git(main, 'rev-parse', 'feature')).toBe(await git(main, 'rev-parse', 'main'));
   });
@@ -245,7 +292,11 @@ describe('prepareWorktree', () => {
     const before = await git(main, 'rev-parse', 'feature');
 
     const f = fixture();
-    const placement = await prepareWorktree(f.deps, await request({ headSha: sha }), lock());
+    const placement = await prepareWorktree(
+      f.deps,
+      await request({ headSha: sha }),
+      await f.lock(),
+    );
     expect(await git(placement.directory, 'rev-parse', 'HEAD')).toBe(sha);
     // The local branch is behind, so it stays as it was, and so do others.
     expect(placement.detached).toBe(true);
@@ -258,9 +309,11 @@ describe('prepareWorktree', () => {
   test('skips with a reason when the head commit is still missing after fetching', async () => {
     const f = fixture();
     const missing = 'f'.repeat(40);
-    const error = await prepareWorktree(f.deps, await request({ headSha: missing }), lock()).catch(
-      (error) => error,
-    );
+    const error = await prepareWorktree(
+      f.deps,
+      await request({ headSha: missing }),
+      await f.lock(),
+    ).catch((error) => error);
     expect(error).toBeInstanceOf(Ineligible);
     expect(error.message).toContain('even after fetching feature from origin');
   });
@@ -268,13 +321,143 @@ describe('prepareWorktree', () => {
   test('records what a failed creation left, so cleanup can find it', async () => {
     const f = fixture();
     f.failNextCreate();
-    await expect(prepareWorktree(f.deps, await request(), lock())).rejects.toThrow(
+    await expect(prepareWorktree(f.deps, await request(), await f.lock())).rejects.toThrow(
       'The start command failed',
     );
     const rows = await f.claims.worktrees.list();
     expect(rows).toEqual([
       expect.objectContaining({ key: f.created[0], directory: f.created[0], state: 'ready' }),
     ]);
+  });
+
+  test("a failed creation records only its own worktree, never another one's", async () => {
+    const f = fixture();
+    // Another creation for the PR/MR makes a worktree with the same prefix
+    // while this one runs, and already has it recorded.
+    const other = join(root, 'forgekeeper-project-7-0badc0de');
+    const recorded: RecordedWorktree = {
+      key: other,
+      directory: other,
+      name: basename(other),
+      url: `${URL}0`,
+      projectID: 'project',
+      state: 'ready',
+      at: 1,
+      creation: '0badc0de',
+    };
+    f.onCreate(async () => {
+      await git(main, 'worktree', 'add', '--quiet', '--detach', other, 'feature');
+      f.created.push(other);
+      await f.claims.worktrees.save(recorded);
+    });
+    f.failNextCreate();
+    await expect(prepareWorktree(f.deps, await request(), await f.lock())).rejects.toThrow(
+      'The start command failed',
+    );
+    const mine = f.created.find((directory) => directory !== other)!;
+    expect(basename(mine)).toMatch(NEW);
+    expect(await f.claims.worktrees.read(other)).toEqual(recorded);
+    expect(await f.claims.worktrees.list()).toEqual([
+      recorded,
+      expect.objectContaining({ directory: mine, url: URL, state: 'ready' }),
+    ]);
+  });
+
+  test('a creation that ends after its attempt did takes no lock, and stays recorded', async () => {
+    const f = fixture();
+    const held = await f.lock();
+    // The owning session is deleted while OpenCode creates the worktree,
+    // and another session's recovery ends the attempt.
+    f.onCreate(async () => {
+      const stored = (await f.claims.records.read(held.batch))!;
+      expect(await f.claims.records.finish({ ...stored, state: 'failed' }, stored)).toBe(true);
+    });
+    await expect(prepareWorktree(f.deps, await request(), held)).rejects.toThrow(
+      'The attempt ended',
+    );
+    expect(await f.claims.locks.read(f.created[0])).toBeUndefined();
+    expect(await f.claims.worktrees.list()).toEqual([
+      expect.objectContaining({ directory: f.created[0], state: 'ready' }),
+    ]);
+    // A later attempt can use it.
+    const later = await prepareWorktree(f.deps, await request(), await f.lock('b2'));
+    expect(later.directory).toBe(f.created[0]);
+  });
+
+  test('checks a worktree for changes only once it holds it', async () => {
+    const existing = join(root, 'existing');
+    await git(main, 'worktree', 'add', '--quiet', '--detach', existing, 'feature');
+    const f = fixture();
+    const acquire = f.claims.locks.acquire;
+    // Another attempt that held the clean worktree left changes there, and
+    // let it go, just before this attempt takes it.
+    f.claims.locks.acquire = async (directory, holder) => {
+      if (directory === existing) writeFileSync(join(existing, 'file'), 'theirs\n');
+      return acquire(directory, holder);
+    };
+    const placement = await prepareWorktree(f.deps, await request(), await f.lock());
+    expect(placement.directory).not.toBe(existing);
+    expect(await f.claims.locks.read(existing)).toBeUndefined();
+  });
+
+  describe('on a fork, whose local branch of the same name pushes upstream', () => {
+    const FORK = 'https://gitlab.com/fork/project.git';
+    const fromFork = () => request({ sourceProject: 'fork/project' });
+
+    beforeEach(async () => {
+      const fork = join(root, 'fork.git');
+      await git(root, 'init', '--quiet', '--bare', fork);
+      await git(main, 'config', `url.${fork}.insteadOf`, FORK);
+      await git(main, 'remote', 'add', 'fork', FORK);
+      await git(main, 'push', '--quiet', 'fork', 'feature');
+      await git(main, 'fetch', '--quiet', 'origin');
+      await git(main, 'branch', '--quiet', '--set-upstream-to=origin/feature', 'feature');
+    });
+
+    test('a new worktree stays detached, pushing to the fork', async () => {
+      const f = fixture();
+      const placement = await prepareWorktree(f.deps, await fromFork(), await f.lock());
+      expect(placement).toMatchObject({ created: true, detached: true, remote: 'fork' });
+      const symbolic = await run('git', ['symbolic-ref', '-q', 'HEAD'], {
+        cwd: placement.directory,
+      });
+      expect(symbolic.code).not.toBe(0);
+      expect(
+        await worktreeMismatch(exec, f.deps.repository, placement.directory, await fromFork()),
+      ).toBeUndefined();
+    });
+
+    test('a worktree on that branch is skipped', async () => {
+      const existing = join(root, 'existing');
+      await git(main, 'worktree', 'add', '--quiet', existing, 'feature');
+      const f = fixture();
+      const placement = await prepareWorktree(f.deps, await fromFork(), await f.lock());
+      expect(placement.directory).not.toBe(existing);
+      expect(placement).toMatchObject({ detached: true, remote: 'fork' });
+      expect(await f.claims.locks.read(existing)).toBeUndefined();
+    });
+  });
+});
+
+describe('inCheckout', () => {
+  test('counts the checkout and below it, but no sibling or nested checkout', () => {
+    const checkouts = ['/repo', '/repo/.worktrees/a', '/repo-other'];
+    expect(inCheckout('/repo', '/repo', checkouts)).toBe(true);
+    expect(inCheckout('/repo/packages/app', '/repo', checkouts)).toBe(true);
+    expect(inCheckout('/repo-other', '/repo', checkouts)).toBe(false);
+    expect(inCheckout('/repo/.worktrees/a/src', '/repo', checkouts)).toBe(false);
+    expect(inCheckout('/repo/.worktrees/a/src', '/repo/.worktrees/a', checkouts)).toBe(true);
+    // Without the repository's checkouts, a nested one counts too.
+    expect(inCheckout('/repo/.worktrees/a/src', '/repo', [])).toBe(true);
+  });
+
+  test('counts a session reached through a symbolic link', () => {
+    const checkout = join(root, 'main');
+    const alias = join(root, 'alias');
+    symlinkSync(checkout, alias);
+    mkdirSync(join(checkout, 'nested'));
+    expect(inCheckout(join(alias, 'nested'), checkout, [checkout])).toBe(true);
+    expect(inCheckout(join(checkout, 'nested'), alias, [checkout])).toBe(true);
   });
 });
 
@@ -326,7 +509,7 @@ describe('sweepWorktrees', () => {
   ) {
     const f = fixture();
     const final = await request();
-    const placement = await prepareWorktree(f.deps, final, lock());
+    const placement = await prepareWorktree(f.deps, final, await f.lock());
     await f.claims.locks.release(lock());
     await setup(placement.directory, f);
     const archived: string[] = [];
@@ -370,7 +553,7 @@ describe('sweepWorktrees', () => {
 
   test('keeps it while an attempt holds it, or another session uses it', async () => {
     const held = await swept(async (directory, f) => {
-      await f.claims.locks.acquire(directory, lock('b9'));
+      await f.claims.locks.acquire(directory, await f.lock('b9'));
     });
     expect(held.removed).toEqual([]);
     const used = await swept(
@@ -383,7 +566,7 @@ describe('sweepWorktrees', () => {
 
   test('keeps it while an attempt holds it', async () => {
     const result = await swept(async (directory, f) => {
-      expect(await f.claims.locks.acquire(directory, lock('b9'))).toBe(true);
+      expect(await f.claims.locks.acquire(directory, await f.lock('b9'))).toBe(true);
     });
     expect(result.removed).toEqual([]);
     expect(result.f.removed).toEqual([]);
@@ -397,7 +580,7 @@ describe('sweepWorktrees', () => {
       'merged',
       async (directory, f) => {
         // Another PR/MR at the same commit tries to reuse the worktree.
-        taken.push(await f.claims.locks.acquire(directory, lock('b9')));
+        taken.push(await f.claims.locks.acquire(directory, await f.lock('b9')));
         return [];
       },
     );
@@ -449,7 +632,9 @@ describe('sweepWorktrees', () => {
     expect(await result.f.claims.worktrees.list()).toEqual([
       expect.objectContaining({ state: 'ready' }),
     ]);
-    expect(await result.f.claims.locks.acquire(result.placement.directory, lock('b9'))).toBe(true);
+    expect(
+      await result.f.claims.locks.acquire(result.placement.directory, await result.f.lock('b9')),
+    ).toBe(true);
   });
 
   test('never removes a worktree it did not create', async () => {
@@ -463,5 +648,40 @@ describe('sweepWorktrees', () => {
     });
     expect(removed).toEqual([]);
     expect(f.removed).toEqual([]);
+  });
+
+  test('records what an interrupted creation left only under its own name', async () => {
+    const f = fixture();
+    const add = async (name: string) => {
+      const directory = join(root, name);
+      await git(main, 'worktree', 'add', '--quiet', '--detach', directory, 'feature');
+      f.created.push(directory);
+      return directory;
+    };
+    const intent = (name: string, creation?: string) => ({
+      key: `intent:${name}`,
+      name,
+      url: URL,
+      projectID: 'project',
+      state: 'creating' as const,
+      at: 1,
+      ...(creation ? { creation } : {}),
+    });
+    const left = await add('forgekeeper-project-7-abcd1234');
+    // Another worktree with the PR/MR's prefix, and one an earlier version
+    // named without a creation's random part.
+    await add('forgekeeper-project-7-feedf00d');
+    await add('forgekeeper-project-7');
+    await f.claims.worktrees.save(intent('forgekeeper-project-7-abcd1234', 'abcd1234'));
+    await f.claims.worktrees.save(intent('forgekeeper-project-7'));
+    f.deps.now = () => 1 + CREATION_TIME;
+    await sweepWorktrees({
+      ...f.deps,
+      request: async () => ({ state: 'opened' }),
+      archive: async () => {},
+    });
+    expect(await f.claims.worktrees.list()).toEqual([
+      expect.objectContaining({ directory: left, state: 'ready', creation: 'abcd1234' }),
+    ]);
   });
 });

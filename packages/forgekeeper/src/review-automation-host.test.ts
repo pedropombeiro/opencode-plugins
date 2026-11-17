@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import type { Plugin } from '@opencode/plugin';
 import {
   createAutomationHost,
+  ownerPolicy,
+  pushNotice,
   readVerifiedFindings,
   storedPreparation,
   type AutomationDependencies,
@@ -762,13 +764,17 @@ describe('worktree automation', () => {
     accounts?: Record<string, string>;
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
-    // The pages of sessions that listing a directory returns.
+    // The pages of sessions that listing the project returns.
     pages?: Array<Array<Record<string, unknown>>>;
+    // What `git status --short` reports in the worktree.
+    status?: string;
   }
 
+  // What `git status --short` reports in the worktree.
+  let status = '';
   // Git in a worktree at `head` on `feature`.
   const exec = (async (_file: string, args: string[]) => ({
-    code: args[0] === 'symbolic-ref' || args[0] === 'rev-parse' ? 0 : 1,
+    code: ['symbolic-ref', 'rev-parse', 'status'].includes(args[0]) ? 0 : 1,
     stderr: '',
     stdout: args.includes('--show-toplevel')
       ? '/repo'
@@ -776,10 +782,13 @@ describe('worktree automation', () => {
         ? head
         : args[0] === 'symbolic-ref'
           ? 'feature'
-          : '',
+          : args[0] === 'status'
+            ? status
+            : '',
   })) as unknown as AutomationDependencies['exec'];
 
   function hostFixture(options: Options = {}) {
+    status = options.status ?? '';
     const sessions: Record<string, Record<string, unknown>> = {
       one: { id: 'one', agent: 'build', time: {}, location: { directory: '/repo' } },
       ...options.sessions,
@@ -1077,6 +1086,30 @@ describe('worktree automation', () => {
       f.close();
     });
 
+    test('refuses once another session started in the worktree during the wait', async () => {
+      const pages: Array<Array<Record<string, unknown>>> = [[]];
+      const context: { f?: ReturnType<typeof hostFixture>; advance?: (ms: number) => number } = {};
+      const { f, advance } = investigation([listing], {
+        pages,
+        sleep: async (ms) => {
+          const at = context.advance!(ms);
+          context.f!.storage[presenceKey('/owner')] = { at, instance: 'owner', rules: [listing] };
+          // Someone starts a task in a package of the worktree.
+          pages[0] = [
+            { id: 'other', time: { idle: 1, busy: 2 }, location: { directory: '/repo/app' } },
+          ];
+        },
+      });
+      Object.assign(context, { f, advance });
+      const attempt = linkedAttempt(failure);
+      await f.claims.records.save(attempt);
+      await expect(f.authorizeStart(attempt, 'gitlab/strong')).rejects.toThrow(
+        'Another session is running in /repo',
+      );
+      expect((await f.claims.records.read(batch))?.startedAt).toBeUndefined();
+      f.close();
+    });
+
     test("reads the owner's rules after the wait, and refuses once its instance stopped", async () => {
       const context: { advance?: (ms: number) => number } = {};
       // The owner's instance stops announcing itself during the wait.
@@ -1147,6 +1180,104 @@ describe('worktree automation', () => {
       result: 'free',
       pages: 1,
     });
+  });
+
+  test("a busy session below the worktree's directory keeps the worktree from the turn", async () => {
+    const at = Date.now();
+    const busy = { time: { idle: 1, busy: 2 } };
+    const verify = async (directory: string) => {
+      const f = hostFixture({
+        sessions: linkedSessions,
+        pages: [[{ id: 'nested', ...busy, location: { directory } }]],
+        storage: { [presenceKey('/repo')]: { at, instance: 'here', rules: [] } },
+      });
+      const result = await f.host.verifyExecution!(linkedAttempt()).then(
+        () => 'free',
+        (error: Error) => error.message,
+      );
+      f.close();
+      return { result, listed: f.listed[0] };
+    };
+    // OpenCode lists a directory's sessions without those below it, so the
+    // project's are listed.
+    expect(await verify('/repo/packages/app')).toEqual({
+      result: 'Another session is running in /repo',
+      listed: { project: 'project', archived: false, limit: 200 },
+    });
+    expect((await verify('/repo-other')).result).toBe('free');
+  });
+
+  test("a borrowed worktree with someone else's changes keeps the turn from it", async () => {
+    const at = Date.now();
+    const verify = async (owned: boolean) => {
+      const f = hostFixture({
+        sessions: linkedSessions,
+        status: ' M file',
+        storage: { [presenceKey('/repo')]: { at, instance: 'here', rules: [] } },
+      });
+      if (owned)
+        await f.claims.worktrees.save({
+          key: '/repo',
+          directory: '/repo',
+          name: 'forgekeeper-project-1-abcd1234',
+          url,
+          projectID: 'project',
+          state: 'ready',
+          at: 1,
+        });
+      const result = await f.host.verifyExecution!(linkedAttempt()).then(
+        () => 'free',
+        (error: Error) => error.message,
+      );
+      f.close();
+      return result;
+    };
+    expect(await verify(false)).toBe("/repo has uncommitted changes that this task didn't make");
+    // Forgekeeper's own worktree for the PR/MR keeps an earlier batch's fixes.
+    expect(await verify(true)).toBe('free');
+  });
+
+  test("the linked session gets the owner's agent with its rules in the owning checkout", async () => {
+    const asked: unknown[] = [];
+    const ctx = {
+      agent: {
+        get: async (input: unknown) => {
+          asked.push(input);
+          return {
+            data: { id: 'build', permissions: [{ action: 'edit', resource: '*', effect: 'deny' }] },
+          };
+        },
+      },
+    } as unknown as Plugin.Context;
+    const owner = {
+      id: 'one',
+      agent: 'build',
+      location: { directory: '/owner' },
+      permissions: [{ action: 'edit', resource: 'src/*', effect: 'allow' }],
+    } as unknown as Parameters<typeof ownerPolicy>[1];
+    // The owner's own rules follow its agent's, so they still win where
+    // they match.
+    expect(await ownerPolicy(ctx, owner)).toEqual({
+      agent: 'build',
+      permissions: [
+        { action: 'edit', resource: '*', effect: 'deny' },
+        { action: 'edit', resource: 'src/*', effect: 'allow' },
+      ],
+    });
+    expect(asked).toEqual([{ agentID: 'build', location: { directory: '/owner' } }]);
+    // Without an agent of the owner's own, its rules can't be read for certain.
+    const implicit = { ...owner, agent: undefined } as unknown as typeof owner;
+    await expect(ownerPolicy(ctx, implicit)).rejects.toBeInstanceOf(Ineligible);
+  });
+
+  test('the push command for a detached worktree reads every branch name literally', async () => {
+    for (const branch of ['feature;pwd', 'a$(id)b', "it's", 'tick`id`', 'x```y']) {
+      const notice = pushNotice(branch, 'my fork');
+      const fence = notice.match(/(`{3,})sh\n([\s\S]*?)\n\1$/);
+      expect(fence).not.toBeNull();
+      const result = Bun.spawnSync(['sh', '-c', `git() { printf '%s\\n' "$@"; }\n${fence![2]}`]);
+      expect(result.stdout.toString()).toBe(`push\nmy fork\nHEAD:refs/heads/${branch}\n`);
+    }
   });
 
   test('keeps watching a linked attempt whose owner was deleted', async () => {
