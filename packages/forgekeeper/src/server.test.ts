@@ -1176,6 +1176,14 @@ describe('session targets', () => {
     await app.cleanup();
   });
 
+  test('guides the agent to target existing work it reviews', async () => {
+    const app = await harness();
+    expect(await app.context()).toContain(
+      'Reviewing, triaging, or addressing feedback on existing issues, PRs, or MRs makes them the primary targets.',
+    );
+    await app.cleanup();
+  });
+
   test('infers the related issue from the MR source branch', async () => {
     const app = await harness({ sourceBranches: new Map([['456', '321-fix-timeout']]) });
     await app.set({ target: mr });

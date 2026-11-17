@@ -55,6 +55,7 @@ const TARGET_KEY = 'forgekeeper-session-target';
 const GUIDANCE = [
   'When the user establishes or changes the primary issue, PR, or MR for this session, call set_session_target with its full URL before starting that work.',
   'When the user asks you to work on several issues, PRs, or MRs together, call set_session_target with all of their full URLs in targets. If the user describes them instead of linking them, find them first, then set them before starting that work. When they are all PRs/MRs for one established issue, pass it as issue_url.',
+  'Reviewing, triaging, or addressing feedback on existing issues, PRs, or MRs makes them the primary targets. Call set_session_target with their full URLs before reading their discussions or changing them, including when a skill, search, or forge listing found them instead of the user linking them.',
   'After you create a PR or MR for the current task (for example with gpsup, glab mr create, gh pr create, or a forge tool), call set_session_target with the new PR/MR URL. Pass the current issue as issue_url when the PR/MR was created for it. If the session has several targets that are still part of the task, use operation "add" so they are kept.',
   'When the user drops some of several targets from the task, call set_session_target with operation "remove" and their URLs.',
   'Background references, comparisons, and dependencies do not change the target. Follow-ups without a new primary target keep the current target.',

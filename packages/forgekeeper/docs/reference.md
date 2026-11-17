@@ -83,7 +83,9 @@ context. The current target is stored in the `forgekeeper-session-target` sessio
 entry. Updates take effect at the next step without changing the system prompt.
 When you establish or change the primary issue, PR, or MR, the agent sets its full
 URL as the session target. Background references, comparisons, and dependencies keep the
-current target. After the agent creates a PR/MR for the current task, it sets the new PR/MR
+current target. Reviewing, triaging, or addressing feedback on existing issues and PRs/MRs
+also sets them as targets, including ones a skill or search found rather than ones you linked.
+After the agent creates a PR/MR for the current task, it sets the new PR/MR
 as the target, passing the current issue as `issue_url`.
 
 For example, if the title starts with `[#123, !45]` and you ask the agent to review MR `!456`,
