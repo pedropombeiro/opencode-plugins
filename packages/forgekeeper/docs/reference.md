@@ -93,7 +93,9 @@ the prefix becomes `[!456]`. Without `issue_url`, the server reads the PR/MR's s
 and takes the issue number from its name, so reviewing an MR from `321-fix-timeout` produces
 `[#321, !456]`.
 
-Targets persist per session across plugin reloads. Calling `set_session_target` with
+Targets persist per session across plugin reloads. A forked session starts with the targets of
+the session it was forked from, as they are when Forgekeeper first updates the fork, and keeps
+them from then on. Calling `set_session_target` with
 `target: "branch"` returns to branch-based naming. Child sessions and untitled sessions are
 skipped.
 
