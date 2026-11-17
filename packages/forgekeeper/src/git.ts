@@ -137,6 +137,120 @@ export async function resolveRepository(
   };
 }
 
+// A checkout of the repository, as `git worktree list` reports it.
+export interface WorktreeEntry {
+  directory: string;
+  head?: string;
+  // The local branch it has checked out, or undefined for a detached HEAD.
+  branch?: string;
+  // Bare, locked, or prunable, so it can't be reused.
+  unusable: boolean;
+}
+
+export async function listWorktrees(
+  run: Exec,
+  directory: string,
+): Promise<WorktreeEntry[] | undefined> {
+  const output = await git(run, directory, ['worktree', 'list', '--porcelain']);
+  if (output === undefined) return undefined;
+  const entries: WorktreeEntry[] = [];
+  for (const block of output.split(/\n\s*\n/)) {
+    let entry: WorktreeEntry | undefined;
+    for (const line of block.split('\n')) {
+      const [key, ...rest] = line.split(' ');
+      const value = rest.join(' ');
+      if (key === 'worktree') entry = { directory: value, unusable: false };
+      else if (!entry) continue;
+      else if (key === 'HEAD') entry.head = value;
+      else if (key === 'branch') entry.branch = stripHeads(value);
+      else if (key === 'bare' || key === 'locked' || key === 'prunable') entry.unusable = true;
+    }
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
+// The checkout's top directory, head commit, and local branch, or undefined
+// on a detached HEAD. Unlike `resolveRepository`, it reads detached HEADs.
+export async function checkoutState(
+  run: Exec,
+  directory: string,
+): Promise<{ top: string; head: string; branch?: string } | undefined> {
+  const [top, head, branch] = await Promise.all([
+    git(run, directory, ['rev-parse', '--show-toplevel']),
+    git(run, directory, ['rev-parse', 'HEAD']),
+    git(run, directory, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
+  ]);
+  if (!top || !head) return undefined;
+  return { top, head, ...(branch ? { branch } : {}) };
+}
+
+// The output of `git status --short`, including untracked files, or
+// undefined when it can't be read.
+export const shortStatus = (run: Exec, directory: string) =>
+  git(run, directory, ['status', '--short', '--untracked-files=all']);
+
+// Whether the checkout has no uncommitted or untracked changes. False when
+// that can't be read.
+export async function isClean(run: Exec, directory: string): Promise<boolean> {
+  return (await shortStatus(run, directory)) === '';
+}
+
+export async function hasCommit(run: Exec, directory: string, sha: string): Promise<boolean> {
+  return (await git(run, directory, ['cat-file', '-e', `${sha}^{commit}`])) !== undefined;
+}
+
+// Whether `ancestor` is `descendant` or one of its ancestors. False when
+// either is missing.
+export async function isAncestor(
+  run: Exec,
+  directory: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  return (
+    (await git(run, directory, ['merge-base', '--is-ancestor', ancestor, descendant])) !== undefined
+  );
+}
+
+// The commit of the local branch, or undefined when there is none.
+export const localBranch = (run: Exec, directory: string, branch: string) =>
+  git(run, directory, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]);
+
+// The remote whose URL is the project, preferring `origin`.
+export async function remoteFor(
+  run: Exec,
+  directory: string,
+  project: RemoteProject,
+): Promise<string | undefined> {
+  const remoteConfig = await git(run, directory, ['config', '--get-regexp', '^remote\\..*\\.url$']);
+  const names: string[] = [];
+  for (const line of (remoteConfig ?? '').split('\n')) {
+    const match = line.match(/^remote\.(.+)\.url\s+(.+)$/);
+    const parsed = match && parseRemote(match[2]);
+    if (
+      parsed &&
+      parsed.host === project.host &&
+      parsed.path.toLowerCase() === project.path.toLowerCase()
+    )
+      names.push(match![1]);
+  }
+  return names.includes('origin') ? 'origin' : names[0];
+}
+
+// Fetches only the branch from the remote. Updates no local branch.
+export async function fetchBranch(
+  run: Exec,
+  directory: string,
+  remote: string,
+  branch: string,
+): Promise<boolean> {
+  return (
+    (await git(run, directory, ['fetch', '--no-tags', remote, `refs/heads/${branch}`])) !==
+    undefined
+  );
+}
+
 export type ProjectsLookup =
   | { kind: 'projects'; projects: RemoteProject[] }
   | { kind: 'none'; reason: string };

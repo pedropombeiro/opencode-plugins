@@ -29,16 +29,39 @@ import {
   modelRefusal,
   RECHECK_INTERVAL,
   restrictedReviewers,
+  runnerOf,
+  worktreeCheckout,
   type ReviewFinding,
   type AutomationHost,
   type AutomationRecord,
   type AutomationStatus,
   type ExecutionOutcome,
   type PipelineFailures,
+  type Placement,
+  type Validation,
 } from './review-automation';
 import { createReviewClaims, type ExecutionClaim } from './review-claim';
 import { findingsDigest, PREPARATION_INSTRUCTIONS, preparationBatch } from './review-preparation';
-import { isForgekeeperInput, turnInput } from './review-summary';
+import { boundedReport, isForgekeeperInput, turnInput } from './review-summary';
+import { shortStatus } from './git';
+import {
+  freshPresence,
+  linkedMetadata,
+  linkedOwner,
+  linkedPlaceholder,
+  placeholderMessageID,
+  presenceKey,
+  type DirectorySession,
+} from './linked-session';
+import { PLUGIN_ID } from './plugin-id';
+import {
+  prepareWorktree,
+  sweepWorktrees,
+  worktreeBusy,
+  worktreeMismatch,
+  type WorktreeDependencies,
+  type WorktreeRequest,
+} from './review-worktree';
 import { commentIDsOf, feedbackTarget, type SummaryDependencies } from './summary-delivery';
 import { includesRequest, type Target } from './target';
 
@@ -77,6 +100,38 @@ interface AutomationEnvironment {
 
 type Context = Plugin.Context;
 
+// What a turn's first-request checks read from where it runs; see
+// `startContext`.
+interface StartContext {
+  // Rejects unless the update is still pending for the owning session.
+  pending: (item: FeedbackItem) => Promise<void>;
+  // The configured rules the turn runs under, read anew on each call.
+  rules: () => Promise<readonly AutomationRule[]>;
+  // Checks that the checkout and `rules` still let the turn run there.
+  // Returns the rules that apply to the PR/MR's author.
+  check: (
+    item: FeedbackItem,
+    automatic: boolean,
+    rules: readonly AutomationRule[],
+  ) => Promise<readonly AutomationRule[]>;
+}
+
+// The PR/MR's source and the commit a linked turn runs at.
+interface ExecutionSource {
+  head: string;
+  sourceProject: string;
+  sourceBranch: string;
+}
+type ModelRef = { providerID: string; id: string; variant?: string };
+
+// The metadata kind of the notices that tell an owning session about its
+// linked session's turn.
+export const WORKTREE_NOTICE = 'worktree-notice';
+// How often, and how many times, a turn waits for Forgekeeper to announce
+// itself in a worktree before it gives up.
+const PRESENCE_CHECK = 2_000;
+const PRESENCE_CHECKS = 10;
+
 // The stored attempt whose prompt started the session's current turn. When a
 // compaction removed that prompt, an attempt counts only if it started after
 // the session was last idle: a later turn, such as an unrelated task, can't
@@ -91,14 +146,14 @@ export async function storedPreparation(
   const batch = input && preparationBatch(input.id);
   if (batch) {
     const record = await claims.records.read(batch);
-    if (!record || record.messageID !== input.id || record.item.sessionID !== sessionID)
+    if (!record || record.messageID !== input.id || runnerOf(record) !== sessionID)
       throw new Error('Review automation execution instructions are unavailable');
     return record;
   }
   if (input || !messages.some((message) => message.type === 'compaction')) return undefined;
   const started = (await claims.records.list()).filter(
     (record) =>
-      record.item.sessionID === sessionID &&
+      runnerOf(record) === sessionID &&
       record.startedAt !== undefined &&
       (record.state === 'running' || record.state === 'failed') &&
       messages.some(
@@ -117,7 +172,8 @@ const sameStatus = (a: AutomationStatus | undefined, b: AutomationStatus) =>
   a?.state === b.state && a.at === b.at && a.messageID === b.messageID && a.reason === b.reason;
 
 // Every non-archived root session whose stored targets include the PR/MR, in
-// any checkout. Rejects when a session can't be read, since it might count.
+// any checkout. Linked sessions run turns for their owner, so they never
+// count. Rejects when a session can't be read, since it might count.
 export async function findAssociatedRootSessions(
   ctx: Context,
   env: Pick<AutomationEnvironment, 'scan' | 'missingSession'>,
@@ -134,7 +190,12 @@ export async function findAssociatedRootSessions(
       if (env.missingSession(error)) continue;
       throw error;
     }
-    if (!session.parentID && session.time.archived === undefined) ids.add(sessionID);
+    if (
+      !session.parentID &&
+      session.time.archived === undefined &&
+      !linkedOwner(session as DirectorySession)
+    )
+      ids.add(sessionID);
   }
   return [...ids];
 }
@@ -292,19 +353,26 @@ async function authorRules(
   );
 }
 
-// Checks that the PR/MR is open and the checkout is its source branch, at its
-// head commit when the forge reports one. A failed-job update's pipeline
-// must also be the head commit's. Automatic runs need a rule that covers the
-// PR/MR's author; see `authorRules`. Returns the rules that apply: for a
-// manual run, all of them.
-async function assertMatchingCheckout(
+// What applies to an update now: the PR/MR as the forge reports it, and the
+// rules that apply to its author.
+interface Policy {
+  ref: ReviewRef;
+  request: ReviewRequest;
+  rules: readonly AutomationRule[];
+}
+
+// Checks that the PR/MR is open, reports its source, and, for failed jobs,
+// that the update's pipeline is still the head commit's. Automatic runs need
+// a rule that covers the PR/MR's author; see `authorRules`. A manual run is
+// under all the rules.
+async function resolvePolicy(
   deps: AutomationDependencies,
   directory: string,
   rules: readonly AutomationRule[],
   resolveAuthor: AuthorResolver,
   item: FeedbackItem,
   automatic: boolean,
-): Promise<readonly AutomationRule[]> {
+): Promise<Policy> {
   const ref = parseUrl(item.url);
   const request = ref && (await currentRequest(deps, directory, item.url));
   if (!ref || !request || request.state !== 'opened')
@@ -317,23 +385,32 @@ async function assertMatchingCheckout(
     const mismatch = pipelineMismatch(request, item);
     if (mismatch) throw new Ineligible(mismatch);
   }
+  if (!request.sourceProject || !request.sourceBranch)
+    throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+  return { ref, request, rules: applicable };
+}
+
+// Why the checkout isn't the PR/MR's source branch at its head commit, or
+// undefined when it is.
+async function checkoutMismatch(
+  deps: AutomationDependencies,
+  directory: string,
+  { ref, request }: Policy,
+  jobs: boolean,
+): Promise<string | undefined> {
   const checkout = await deps.forges.repository(directory);
   if (
     checkout.kind !== 'repository' ||
-    !request.sourceProject ||
-    !request.sourceBranch ||
     checkout.repository.source.host !== ref.host ||
     checkout.repository.source.path !== request.sourceProject ||
     checkout.repository.sourceBranch !== request.sourceBranch
   )
-    throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+    return 'The checkout does not match the PR/MR source project and branch';
   if (request.headSha && checkout.repository.head !== request.headSha)
-    throw new Ineligible(
-      jobs
-        ? `The checkout isn't at the head commit that the failing ${traitsOf(request).ci} tested, so the failure may already be fixed. To investigate anyway, check out ${request.headSha.slice(0, 12)}, then use Retry feedback work.`
-        : 'The checkout does not match the PR/MR source project and branch',
-    );
-  return applicable;
+    return jobs
+      ? `The checkout isn't at the head commit that the failing ${traitsOf(request).ci} tested, so the failure may already be fixed. To investigate anyway, check out ${request.headSha.slice(0, 12)}, then use Retry feedback work.`
+      : 'The checkout does not match the PR/MR source project and branch';
+  return undefined;
 }
 
 // The failed jobs of the update's pipeline, while it's still the PR/MR's
@@ -369,11 +446,13 @@ export async function transcriptOutcome(
   record?: AutomationRecord,
 ): Promise<ExecutionOutcome> {
   const attempt = record?.messageID === claim.messageID ? record : undefined;
-  const messages = await ctx.session.context({ sessionID: claim.sessionID });
+  // A linked session runs the turn for the owning session, which holds the claim.
+  const sessionID = attempt ? runnerOf(attempt) : claim.sessionID;
+  const messages = await ctx.session.context({ sessionID });
   // Input during the attempt's turn makes its outcome uncertain, but while
   // the session hasn't been idle since that input, the turn is still going.
   const steered = async (input: { time: { created: number } }): Promise<ExecutionOutcome> => {
-    const idle = (await ctx.session.get({ sessionID: claim.sessionID })).time.idle;
+    const idle = (await ctx.session.get({ sessionID })).time.idle;
     return idle === undefined || idle < input.time.created ? 'running' : 'unknown';
   };
   const index = messages.findIndex((message) => message.id === claim.messageID);
@@ -382,7 +461,7 @@ export async function transcriptOutcome(
       if (message.type === 'user' || isForgekeeperInput(message)) return steered(message);
       if (message.type === 'idle') return message.outcome === 'succeeded' ? 'completed' : 'failed';
     }
-    const session = await ctx.session.get({ sessionID: claim.sessionID });
+    const session = await ctx.session.get({ sessionID });
     if (
       session.time.idle !== undefined &&
       session.time.idle >= messages[index].time.created &&
@@ -404,7 +483,7 @@ export async function transcriptOutcome(
   );
   if (input) return ended ? 'unknown' : steered(input);
   if (ended) return ended.outcome === 'succeeded' ? 'completed' : 'failed';
-  const session = await ctx.session.get({ sessionID: claim.sessionID });
+  const session = await ctx.session.get({ sessionID });
   // Not idle since the attempt started, so its turn is still going.
   if (session.time.idle === undefined || session.time.idle < startedAt) return 'running';
   // The turn ended, but its end isn't recorded yet, or was missed.
@@ -440,20 +519,20 @@ export function createAutomationHost(
     reviewers: readonly string[] | undefined,
     tagged?: readonly string[],
   ) => readVerifiedFindings(ctx, deps, env, item, reviewers, tagged);
-  const ruleReviewers = (url: string) => {
-    const ref = parseUrl(url);
-    return ref ? automationReviewers(env.rules, ref) : [];
-  };
   // The session's own model, or else its agent's, or else the default.
-  const model = async (sessionID: string) => {
-    const session = await ctx.session.get({ sessionID });
-    if (session.model) return modelKey(session.model);
+  const modelOf = async (session: {
+    model?: ModelRef;
+    agent?: string;
+  }): Promise<ModelRef | undefined> => {
+    if (session.model) return session.model;
     const agent = session.agent
       ? (await ctx.agent.get({ agentID: session.agent })).data.model
       : undefined;
-    if (agent) return modelKey(agent);
-    const fallback = (await ctx.model.default()).data;
-    return fallback ? modelKey(fallback) : undefined;
+    return agent ?? (await ctx.model.default()).data ?? undefined;
+  };
+  const model = async (sessionID: string) => {
+    const found = await modelOf(await ctx.session.get({ sessionID }));
+    return found ? modelKey(found) : undefined;
   };
 
   // A rule author that can't be resolved is ignored, so it never widens a
@@ -477,23 +556,198 @@ export function createAutomationHost(
     return undefined;
   };
 
-  async function validate(item: FeedbackItem, automatic: boolean) {
+  // Checks that the owning session may run the batch under `configured`,
+  // and where: in its checkout when that's at the PR/MR's head commit, or
+  // in a worktree when only the checkout doesn't match and the rules allow it.
+  async function validateWith(
+    item: FeedbackItem,
+    automatic: boolean,
+    configured: readonly AutomationRule[],
+  ): Promise<Validation> {
     if (!(await env.deliverable(item)))
       throw new Ineligible('The session no longer targets this PR/MR here');
     const session = await ctx.session.get({ sessionID: item.sessionID });
     if (session.parentID) throw new Ineligible('Subagents cannot own review automation');
-    const rules = await assertMatchingCheckout(
-      deps,
-      directory,
-      env.rules,
-      resolveAuthor,
-      item,
-      automatic,
-    );
+    const policy = await resolvePolicy(deps, directory, configured, resolveAuthor, item, automatic);
+    const { rules } = policy;
+    const mismatch = await checkoutMismatch(deps, directory, policy, isJobFailure(item));
+    let placement: Placement = 'session';
+    if (mismatch) {
+      if (!worktreeCheckout(rules, policy.ref, item)) throw new Ineligible(mismatch);
+      placement = 'worktree';
+    }
     // An investigation changes nothing, so a read-only agent may run it.
     if (session.agent === 'plan' && !isJobFailure(item))
       throw new Ineligible('Switch the owning session to a coding agent before acting on feedback');
-    return rules;
+    return { placement, rules };
+  }
+  const validate = (item: FeedbackItem, automatic: boolean) =>
+    validateWith(item, automatic, env.rules);
+
+  // The owning session's checks, for the instance of the worktree that runs
+  // its linked session: the update is still in the owner's inbox, monitoring
+  // there isn't paused, and the owner still targets the PR/MR there.
+  async function assertOwnerPending(item: FeedbackItem, ownerDirectory: string) {
+    const canceled = () => new Error('Review automation was canceled before the coding turn');
+    const state = (await ctx.storage.get(
+      `feedback-inbox/${encodeURIComponent(ownerDirectory)}`,
+    )) as InboxState | undefined;
+    if (
+      env.closing() ||
+      !state ||
+      state.paused ||
+      !state.items.some((entry) => sameUpdate(entry, item))
+    )
+      throw canceled();
+    let owner;
+    try {
+      owner = await ctx.session.get({ sessionID: item.sessionID });
+    } catch (error) {
+      if (env.missingSession(error)) throw canceled();
+      throw error;
+    }
+    if (owner.time.archived !== undefined || owner.location.directory !== ownerDirectory)
+      throw canceled();
+    const stored = (await ctx.storage.get(`sessions/${item.sessionID}`)) as
+      | { targets?: Target[] }
+      | undefined;
+    if (!includesRequest(stored?.targets ?? [], item.url)) throw canceled();
+  }
+
+  // Every non-archived session in the directory, subagents included, from
+  // every page.
+  const directorySessions = async (path: string): Promise<DirectorySession[]> => {
+    const sessions: DirectorySession[] = [];
+    let page = await ctx.session.list({ directory: path, archived: false, limit: 200 });
+    for (;;) {
+      for (const session of page.data as unknown as Array<
+        DirectorySession & { location: { directory: string } }
+      >)
+        if (session.location.directory === path) sessions.push(session);
+      const next = page.cursor.next;
+      if (!next) return sessions;
+      page = await ctx.session.list({ cursor: next, limit: 200 } as never);
+    }
+  };
+  const worktreeDeps = (): WorktreeDependencies => ({
+    exec: deps.exec,
+    claims,
+    projectID: ctx.location.project.id,
+    ownerDirectory: directory,
+    worktree: {
+      create: (input) => ctx.worktree.create(input),
+      list: (input) => ctx.worktree.list(input),
+      remove: (input) => ctx.worktree.remove(input),
+    },
+    sessions: directorySessions,
+    now,
+  });
+  const worktreeRequest = (url: string, source: ExecutionSource): WorktreeRequest => {
+    const ref = parseUrl(url)!;
+    return {
+      url,
+      host: ref.host,
+      iid: ref.iid,
+      sourceProject: source.sourceProject,
+      sourceBranch: source.sourceBranch,
+      headSha: source.head,
+    };
+  };
+  // What the first-request checks read from where the turn runs. In the
+  // owning session, they're this instance's. For a linked session, they're
+  // the owning instance's current rules and checks, so the turn never runs
+  // under the worktree's own configuration.
+  function startContext(record: AutomationRecord): StartContext {
+    const execution = record.execution;
+    if (!execution)
+      return {
+        pending: assertPending,
+        rules: async () => env.rules,
+        async check(item, automatic, configured) {
+          const { placement, rules } = await validateWith(item, automatic, configured);
+          if (placement !== 'session')
+            throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+          return rules;
+        },
+      };
+    if (execution.stage !== 'submitting') throw new Error('Review automation is no longer running');
+    if (execution.directory !== directory)
+      throw new Error("The linked session isn't in its worktree anymore");
+    return {
+      pending: (item) => assertOwnerPending(item, execution.ownerDirectory),
+      async rules() {
+        const owner = freshPresence(
+          await ctx.storage.get(presenceKey(execution.ownerDirectory)),
+          now(),
+        );
+        if (!owner)
+          throw new Error(
+            `Forgekeeper isn't running in ${execution.ownerDirectory}, which owns this turn, so its rules couldn't be checked.`,
+          );
+        return owner.rules;
+      },
+      async check(item, automatic, configured) {
+        const { ref, request, rules } = await resolvePolicy(
+          deps,
+          directory,
+          configured,
+          resolveAuthor,
+          item,
+          automatic,
+        );
+        if (!worktreeCheckout(rules, ref, item))
+          throw new Error('The automation rules no longer let this turn run in a worktree');
+        if (request.headSha !== execution.head)
+          throw new Error(
+            'The PR/MR has a newer head commit than the worktree. Retry feedback work.',
+          );
+        const mismatch = await worktreeMismatch(
+          deps.exec,
+          (path) => deps.forges.repository(path),
+          directory,
+          worktreeRequest(item.url, execution),
+        );
+        if (mismatch) throw new Error(mismatch);
+        const session = await ctx.session.get({ sessionID: execution.sessionID });
+        if (session.agent === 'plan' && !isJobFailure(item))
+          throw new Error('Switch the linked session to a coding agent before acting on feedback');
+        return rules;
+      },
+    };
+  }
+
+  async function notify(record: AutomationRecord, phase: 'started' | 'ended') {
+    const execution = record.execution;
+    if (!execution?.directory || !execution.sessionID) return;
+    const task = isJobFailure(record.item)
+      ? 'investigating the failed jobs of'
+      : 'preparing fixes for';
+    const push = execution.detached
+      ? `The worktree has a detached HEAD. To publish commits made there, run \`git push ${execution.remote ?? '<remote>'} HEAD:${execution.sourceBranch}\` in it.`
+      : `The worktree is on ${execution.sourceBranch}.`;
+    const lines =
+      phase === 'started'
+        ? [
+            `Forgekeeper is ${task} ${record.item.url} in a linked session, because this checkout isn't at the PR/MR's head commit.`,
+            `Worktree: ${execution.directory}`,
+            `Linked session: ${execution.sessionID}`,
+            push,
+          ]
+        : [
+            `Forgekeeper's linked session for ${record.item.url} ended: ${record.state}.${record.reason ? ` ${record.reason}` : ''}`,
+            `Worktree: ${execution.directory}`,
+            `Linked session: ${execution.sessionID}`,
+            `Uncommitted changes:\n${(await shortStatus(deps.exec, execution.directory).catch(() => undefined)) || 'None'}`,
+            push,
+          ];
+    await ctx.session.synthetic({
+      sessionID: record.item.sessionID,
+      text: boundedReport(lines.join('\n\n')),
+      description: `Forgekeeper worktree: ${record.item.url}`,
+      metadata: { forgekeeper: WORKTREE_NOTICE },
+      delivery: 'queue',
+      resume: false,
+    });
   }
 
   async function assertPending(item: FeedbackItem) {
@@ -522,6 +776,14 @@ export function createAutomationHost(
       !pipelineRunning(request.pipeline)
     );
   }
+
+  // The attempt with its turn started now, under `models`.
+  const startedRecord = (record: AutomationRecord, models: string[] | undefined) => {
+    const started: AutomationRecord = { ...record, startedAt: now() };
+    if (models) started.models = models;
+    else delete started.models;
+    return started;
+  };
 
   const sleep =
     env.sleep ??
@@ -578,11 +840,91 @@ export function createAutomationHost(
     wait: (sessionID) => ctx.session.wait({ sessionID }, { signal: env.signal }),
     sleep,
     claim: claims,
+    async provision(record, update) {
+      const request = await currentRequest(deps, directory, record.item.url);
+      const ref = parseUrl(record.item.url);
+      if (!ref || !request || request.state !== 'opened')
+        throw new Ineligible('The PR/MR is no longer open');
+      if (!request.headSha || !request.sourceProject || !request.sourceBranch)
+        throw new Ineligible(
+          "The forge didn't report the PR/MR's source branch and head commit, so no worktree can be prepared.",
+        );
+      const source: ExecutionSource = {
+        head: request.headSha,
+        sourceProject: request.sourceProject,
+        sourceBranch: request.sourceBranch,
+      };
+      let stored = await update({ stage: 'provisioning', ownerDirectory: directory, ...source });
+      const placement = await prepareWorktree(
+        worktreeDeps(),
+        worktreeRequest(record.item.url, source),
+        {
+          batch: stored.batch,
+          messageID: stored.messageID!,
+          url: stored.item.url,
+          at: now(),
+        },
+      );
+      stored = await update({
+        directory: placement.directory,
+        detached: placement.detached,
+        ...(placement.remote ? { remote: placement.remote } : {}),
+      });
+      const owner = await ctx.session.get({ sessionID: stored.item.sessionID });
+      const model = await modelOf(owner);
+      const session = await ctx.session.create({
+        location: { directory: placement.directory },
+        title: `Forgekeeper: ${isJobFailure(stored.item) ? 'investigate' : 'prepare fixes for'} ${stored.item.url}`,
+        ...(owner.agent ? { agent: owner.agent } : {}),
+        ...(model ? { model } : {}),
+        ...(owner.permissions ? { permissions: owner.permissions } : {}),
+        metadata: linkedMetadata(owner.id, stored.batch),
+      });
+      await ctx.session.update({
+        sessionID: session.id,
+        metadata: linkedMetadata(owner.id, stored.batch, session.id),
+      });
+      return update({ sessionID: session.id });
+    },
+    async verifyExecution(record) {
+      const { execution } = record;
+      const path = execution.directory;
+      // Listing the worktree's plugins starts its instance, which announces
+      // itself once Forgekeeper is running there.
+      const plugins = await ctx.plugin
+        .list({ location: { directory: path } })
+        .catch(() => undefined);
+      if (
+        plugins &&
+        !plugins.data.some((plugin) => plugin.id === PLUGIN_ID && plugin.state.status === 'active')
+      )
+        throw new Ineligible(
+          `Forgekeeper isn't enabled in ${path}, so the linked session's turn couldn't be checked.`,
+        );
+      for (let check = 0; ; check++) {
+        if (freshPresence(await ctx.storage.get(presenceKey(path)), now())) break;
+        if (check + 1 >= PRESENCE_CHECKS || env.closing())
+          throw new Error(
+            `Forgekeeper with PR/MR status isn't running in ${path}, so the linked session's turn couldn't be checked.`,
+          );
+        await sleep(PRESENCE_CHECK);
+      }
+      const mismatch = await worktreeMismatch(
+        deps.exec,
+        (dir) => deps.forges.repository(dir),
+        path,
+        worktreeRequest(record.item.url, execution),
+      );
+      if (mismatch) throw new Error(mismatch);
+      if (await worktreeBusy(worktreeDeps(), path, execution.sessionID))
+        throw new Error(`Another session is running in ${path}`);
+    },
+    notify,
     async submit(record, text) {
       await ctx.session.prompt({
-        sessionID: record.item.sessionID,
+        sessionID: runnerOf(record),
         id: record.messageID,
-        text,
+        text: record.execution ? linkedPlaceholder(record) : text,
         metadata: {
           forgekeeper: isJobFailure(record.item) ? 'job-investigate' : 'review-prepare',
           batch: record.batch,
@@ -616,9 +958,11 @@ export function createAutomationHost(
     // still run, that its prompt holds the current authorized findings, and
     // that the request's model may act on them. Records the start and the
     // allowed models, so the turn's later requests check only the model.
-    async authorizeStart(record: AutomationRecord, requested: string) {
+    // Returns the started attempt as stored.
+    async authorizeStart(record: AutomationRecord, requested: string): Promise<AutomationRecord> {
       if (record.state !== 'running') throw new Error('Review automation is no longer running');
-      await assertPending(record.item);
+      const start = startContext(record);
+      await start.pending(record.item);
       await assertSoleOwner(record.item);
       const ref = parseUrl(record.item.url);
       if (isJobFailure(record.item)) {
@@ -642,30 +986,31 @@ export function createAutomationHost(
             await sleep(RECHECK_INTERVAL);
             continue;
           }
-          if (!ref || (!current.manual && !investigatesJobs(env.rules, ref)))
+          const configured = await start.rules();
+          if (!ref || (!current.manual && !investigatesJobs(configured, ref)))
             throw new Error('The failed-job automation rule is no longer enabled');
-          const rules = await validate(current.item, !current.manual);
+          const rules = await start.check(current.item, !current.manual, configured);
           // The pipeline must still fail. Jobs that failed after the prompt
           // was written don't stop the turn, which reads the pipeline itself.
           await readFailures(deps, directory, current.item);
           const models = investigationModels(rules, ref);
           const refusal = modelRefusal(models, requested, 'retry');
           if (refusal) throw new Error(refusal);
-          await assertPending(current.item);
+          await start.pending(current.item);
           // Another session may have targeted the PR/MR during the wait.
           await assertSoleOwner(current.item);
-          const started: AutomationRecord = { ...current, startedAt: now() };
-          if (models) started.models = models;
-          if (await save(started, current)) return;
+          const started = startedRecord(current, models);
+          if (await save(started, current)) return started;
         }
       }
-      if (!ref || (!record.manual && ruleReviewers(record.item.url).length === 0))
+      const configured = await start.rules();
+      if (!ref || (!record.manual && automationReviewers(configured, ref).length === 0))
         throw new Error('The review automation rule is no longer enabled');
-      const rules = await validate(record.item, !record.manual);
+      const rules = await start.check(record.item, !record.manual, configured);
       const current = await findings(
         record.item,
         record.manual ? undefined : automationReviewers(rules, ref),
-        record.manual ? restrictedReviewers(env.rules, ref) : undefined,
+        record.manual ? restrictedReviewers(configured, ref) : undefined,
       );
       if (findingsDigest(current) !== record.digest)
         throw new Error(
@@ -674,11 +1019,11 @@ export function createAutomationHost(
       const models = allowedModelsFor(rules, ref, current);
       const refusal = modelRefusal(models, requested, 'retry');
       if (refusal) throw new Error(refusal);
-      await assertPending(record.item);
-      const started: AutomationRecord = { ...record, startedAt: now() };
-      if (models) started.models = models;
+      await start.pending(record.item);
+      const started = startedRecord(record, models);
       if (!(await save(started, record)))
         throw new Error('Review automation changed before the coding turn');
+      return started;
     },
 
     // The stored attempts this checkout's instance continues after a reload:
@@ -687,12 +1032,71 @@ export function createAutomationHost(
       const records: AutomationRecord[] = [];
       for (const record of await claims.records.list()) {
         if (!record.item || (record.state !== 'running' && record.state !== 'queued')) continue;
-        const session = await ctx.session
-          .get({ sessionID: record.item.sessionID })
-          .catch(() => undefined);
-        if (session?.location.directory === directory) records.push(record);
+        let session;
+        try {
+          session = await ctx.session.get({ sessionID: record.item.sessionID });
+        } catch (error) {
+          // A linked session's turn outlives its deleted owner, so the
+          // instance of the checkout the owner was in keeps watching it.
+          if (env.missingSession(error) && record.execution?.ownerDirectory === directory)
+            records.push(record);
+          continue;
+        }
+        if (session.location.directory === directory) records.push(record);
       }
       return records;
+    },
+
+    // Removes the worktrees Forgekeeper created for PRs/MRs that are over,
+    // when nothing in them would be lost. See `sweepWorktrees`.
+    async sweep(): Promise<string[]> {
+      if (env.closing() || !(ctx.location as { project?: { id?: string } }).project?.id) return [];
+      return sweepWorktrees({
+        ...worktreeDeps(),
+        request: (url) => currentRequest(deps, directory, url),
+        archive: async (sessionID) => {
+          await ctx.session.update({ sessionID, archived: true });
+        },
+      });
+    },
+
+    // Puts a linked session's task in place of the placeholder that its
+    // prompt shows, in every request of the session once the turn started,
+    // so later turns and compactions there still read the findings. When a
+    // compaction removed the placeholder, the task of `current`, the attempt
+    // whose turn the request continues, goes first instead.
+    async substitutePrompt(
+      event: { sessionID: string; messages: unknown[] },
+      current?: AutomationRecord,
+    ) {
+      const task = (record: AutomationRecord | undefined) =>
+        record?.execution?.stage === 'submitting' &&
+        record.startedAt !== undefined &&
+        record.execution.sessionID === event.sessionID
+          ? record.execution.prompt
+          : undefined;
+      let restored = false;
+      for (const message of event.messages as Array<{ role?: unknown; content?: unknown }>) {
+        if (message?.role !== 'user' || !Array.isArray(message.content)) continue;
+        const text = (message.content as Array<{ text?: unknown }>)
+          .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+          .join('\n');
+        const messageID = placeholderMessageID(text);
+        const batch = messageID && preparationBatch(messageID);
+        if (!batch) continue;
+        const record = await read(batch);
+        const prompt = record?.messageID === messageID ? task(record) : undefined;
+        if (!prompt) continue;
+        message.content = [{ type: 'text', text: prompt }];
+        if (record!.messageID === current?.messageID) restored = true;
+      }
+      const prompt = task(current);
+      if (prompt && !restored)
+        event.messages.unshift({
+          role: 'user',
+          content: [{ type: 'text', text: prompt }],
+          metadata: { forgekeeper: 'review-task' },
+        });
     },
   };
 }

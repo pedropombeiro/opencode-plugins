@@ -56,6 +56,10 @@ export interface LifecycleExecution {
 // trigger in `on`: review feedback, or a failed job.
 export type AutomationRule = ReviewAutomationRule | JobAutomationRule;
 
+// Where a turn runs when the owning session's checkout isn't at the PR/MR's
+// head commit: nowhere (`session`), or in a linked session in a worktree.
+export type CheckoutMode = 'session' | 'worktree';
+
 // Feedback from the listed reviewers starts a turn that prepares fixes. With
 // `allowedModels`, from the rule or its `allowedModelGroup`, only those
 // models, as `provider/model`, may act on that feedback. `authors` names
@@ -68,6 +72,7 @@ export interface ReviewAutomationRule {
   authors?: string[];
   action: 'prepare';
   allowedModels?: string[];
+  checkout?: CheckoutMode;
 }
 
 // A pipeline with failed jobs starts a turn that investigates them and
@@ -80,6 +85,7 @@ export interface JobAutomationRule {
   authors?: string[];
   action: 'investigate';
   allowedModels?: string[];
+  checkout?: CheckoutMode;
 }
 
 // Review bot usernames by host, both lowercase.
@@ -116,7 +122,9 @@ const RULE_KEYS = [
   'action',
   'allowedModels',
   'allowedModelGroup',
+  'checkout',
 ];
+const CHECKOUTS: readonly CheckoutMode[] = ['session', 'worktree'];
 const PROJECT = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
@@ -212,6 +220,15 @@ class Reader {
     return null;
   }
 
+  // A rule's checkout mode. Returns null when it's invalid, which drops the
+  // rule, so a typo never lets a turn run outside the owning checkout.
+  checkout(path: string, value: unknown): CheckoutMode | null {
+    if (value === undefined) return 'session';
+    if (CHECKOUTS.includes(value as CheckoutMode)) return value as CheckoutMode;
+    this.ignore(path, `checkout must be one of ${quoted(CHECKOUTS)}`, 'no rule');
+    return null;
+  }
+
   automation(value: unknown): { rules: AutomationRule[] } {
     const source = this.object('automation', value, ['rules', 'modelGroups']);
     const groups = this.modelGroups(source.modelGroups);
@@ -247,6 +264,8 @@ class Reader {
         const allowedModels = this.allowedModels(path, rule, groups);
         const authors = this.authors(path, rule);
         if (allowedModels === null || authors === null) return;
+        const checkout = this.checkout(path, rule.checkout);
+        if (checkout === null) return;
         rules.push({
           on: 'job-failed',
           host: (rule.host as string).toLowerCase(),
@@ -254,6 +273,7 @@ class Reader {
           ...(authors ? { authors } : {}),
           action: 'investigate',
           ...(allowedModels ? { allowedModels } : {}),
+          ...(checkout === 'worktree' ? { checkout } : {}),
         });
         return;
       }
@@ -273,6 +293,8 @@ class Reader {
       const allowedModels = this.allowedModels(path, rule, groups);
       const authors = this.authors(path, rule);
       if (allowedModels === null || authors === null) return;
+      const checkout = this.checkout(path, rule.checkout);
+      if (checkout === null) return;
       rules.push({
         on: 'review',
         host: (rule.host as string).toLowerCase(),
@@ -281,6 +303,7 @@ class Reader {
         ...(authors ? { authors } : {}),
         action: 'prepare',
         ...(allowedModels ? { allowedModels } : {}),
+        ...(checkout === 'worktree' ? { checkout } : {}),
       });
     });
     return { rules };

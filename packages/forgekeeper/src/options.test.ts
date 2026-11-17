@@ -104,6 +104,42 @@ describe('statusOptions', () => {
     ]);
   });
 
+  test('rules opt in to running in a worktree, and an invalid checkout drops the rule', () => {
+    const review = {
+      on: 'review',
+      host: 'gitlab.com',
+      projects: ['team/project'],
+      reviewers: ['gitlabduo'],
+      action: 'prepare',
+    };
+    const job = { on: 'job-failed', host: 'gitlab.com', projects: ['team/project'] };
+    const options = statusOptions({
+      automation: {
+        rules: [
+          { ...review, checkout: 'worktree' },
+          { ...review, checkout: 'session' },
+          { ...job, checkout: 'worktree' },
+        ],
+      },
+    });
+    expect(options.problems).toEqual([]);
+    expect(options.automation.rules).toEqual([
+      { ...review, checkout: 'worktree' },
+      review,
+      { ...job, action: 'investigate', checkout: 'worktree' },
+    ] as never);
+    for (const rule of [
+      { ...review, checkout: 'elsewhere' },
+      { ...job, checkout: true },
+    ]) {
+      const invalid = statusOptions({ automation: { rules: [rule] } });
+      expect(invalid.automation.rules).toEqual([]);
+      expect(invalid.problems).toEqual([
+        'automation.rules[0] checkout must be one of "session", "worktree"; using no rule',
+      ]);
+    }
+  });
+
   test('job-failed rules investigate exact projects, with an optional model list', () => {
     const job = { on: 'job-failed', host: 'GitLab.com', projects: ['gitlab-org/gitlab'] };
     const options = statusOptions({

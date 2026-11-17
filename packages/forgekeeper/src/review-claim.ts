@@ -10,6 +10,45 @@ export interface ExecutionClaim {
   batch: string;
 }
 
+// The attempt that runs in a checkout directory, so no two attempts, even of
+// different PRs/MRs, use one worktree at once.
+export interface CheckoutLock {
+  batch: string;
+  messageID: string;
+  url: string;
+  at: number;
+}
+
+// What holds a checkout directory: an attempt, or cleanup removing it.
+export type CheckoutHolder = CheckoutLock | { removal: string; at: number };
+
+interface WorktreeFields {
+  name: string;
+  url: string;
+  projectID: string;
+  at: number;
+}
+
+// The intent to create a worktree, recorded before OpenCode creates it, so a
+// crash can't leave an unknown worktree. Its key is `intent:` and the
+// requested name.
+export interface WorktreeIntent extends WorktreeFields {
+  key: string;
+  directory?: never;
+  state: 'creating';
+}
+
+// A worktree Forgekeeper created, keyed by its directory, while it's in use
+// or reusable (`ready`), or while cleanup removes it (`removing`).
+export interface RecordedWorktree extends WorktreeFields {
+  key: string;
+  directory: string;
+  state: 'ready' | 'removing';
+}
+
+// Only worktrees recorded here are ever removed.
+export type CreatedWorktree = WorktreeIntent | RecordedWorktree;
+
 export function createReviewClaims(
   root = join(
     process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'),
@@ -32,8 +71,40 @@ export function createReviewClaims(
     database.run(
       'CREATE TABLE IF NOT EXISTS attempts (batch TEXT PRIMARY KEY, value TEXT NOT NULL)',
     );
+    database.run(
+      'CREATE TABLE IF NOT EXISTS checkout_locks (directory TEXT PRIMARY KEY, holder TEXT NOT NULL, value TEXT NOT NULL)',
+    );
+    database.run(
+      'CREATE TABLE IF NOT EXISTS worktrees (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    );
     return database;
   };
+  const holderOf = (holder: { batch: string; messageID?: string }) =>
+    JSON.stringify([holder.batch, holder.messageID ?? null]);
+  // Frees the checkouts an attempt holds, with its PR/MR claim.
+  const releaseLocks = (holder: { batch: string; messageID?: string }) =>
+    db().query('DELETE FROM checkout_locks WHERE holder = ?').run(holderOf(holder));
+  // The lock holder of a removal, the same for every cleanup of a directory.
+  const removalHolder = (directory: string) => JSON.stringify(['removal', directory]);
+  const readWorktree = (key: string): CreatedWorktree | undefined => {
+    const row = db()
+      .query<{ value: string }, [string]>('SELECT value FROM worktrees WHERE key = ?')
+      .get(key);
+    return row ? JSON.parse(row.value) : undefined;
+  };
+  // Applies `write` to a reserved worktree's record and, if the reservation
+  // was still stored, frees its removal lock, in one transaction. A stale
+  // reservation's lock belongs to the cleanup that took it over.
+  const endRemoval = (removing: RecordedWorktree, write: () => { changes: number }) =>
+    db()
+      .transaction(() => {
+        if (write().changes !== 1) return false;
+        db()
+          .query('DELETE FROM checkout_locks WHERE directory = ? AND holder = ?')
+          .run(removing.directory, removalHolder(removing.directory));
+        return true;
+      })
+      .immediate();
   const readRecord = (batch: string): AutomationRecord | undefined => {
     const row = db()
       .query<{ value: string }, [string]>('SELECT value FROM attempts WHERE batch = ?')
@@ -55,10 +126,12 @@ export function createReviewClaims(
     db()
       .query('INSERT OR IGNORE INTO claims (target, value) VALUES (?, ?)')
       .run(target, JSON.stringify(claim)).changes === 1;
-  const release = (target: string, claim: ExecutionClaim) =>
-    db()
+  const release = (target: string, claim: ExecutionClaim) => {
+    const result = db()
       .query('DELETE FROM claims WHERE target = ? AND value = ?')
       .run(target, JSON.stringify(claim));
+    if (result.changes === 1) releaseLocks(claim);
+  };
   const claimOf = (record: AutomationRecord): ExecutionClaim => ({
     sessionID: record.item.sessionID,
     messageID: record.messageID!,
@@ -76,7 +149,148 @@ export function createReviewClaims(
       return row ? JSON.parse(row.value) : undefined;
     },
     async release(target: string, claim: ExecutionClaim) {
-      release(target, claim);
+      db()
+        .transaction(() => release(target, claim))
+        .immediate();
+    },
+    locks: {
+      // Takes the directory for the attempt, unless another attempt holds it
+      // or cleanup is removing it.
+      async acquire(directory: string, lock: CheckoutLock): Promise<boolean> {
+        return db()
+          .transaction(() => {
+            if (readWorktree(directory)?.state === 'removing') return false;
+            const current = db()
+              .query<
+                { holder: string },
+                [string]
+              >('SELECT holder FROM checkout_locks WHERE directory = ?')
+              .get(directory);
+            if (current) return current.holder === holderOf(lock);
+            return (
+              db()
+                .query(
+                  'INSERT OR IGNORE INTO checkout_locks (directory, holder, value) VALUES (?, ?, ?)',
+                )
+                .run(directory, holderOf(lock), JSON.stringify(lock)).changes === 1
+            );
+          })
+          .immediate();
+      },
+      async read(directory: string): Promise<CheckoutHolder | undefined> {
+        const row = db()
+          .query<
+            { value: string },
+            [string]
+          >('SELECT value FROM checkout_locks WHERE directory = ?')
+          .get(directory);
+        return row ? JSON.parse(row.value) : undefined;
+      },
+      async release(holder: { batch: string; messageID?: string }) {
+        releaseLocks(holder);
+      },
+    },
+    worktrees: {
+      async list(): Promise<CreatedWorktree[]> {
+        return db()
+          .query<{ value: string }, []>('SELECT value FROM worktrees')
+          .all()
+          .map((row) => JSON.parse(row.value));
+      },
+      // Stores the record if the stored one is still `expected`, or, without
+      // it, if there is none.
+      async save(record: CreatedWorktree, expected?: CreatedWorktree): Promise<boolean> {
+        const value = JSON.stringify(record);
+        const result = expected
+          ? db()
+              .query('UPDATE worktrees SET value = ? WHERE key = ? AND value = ?')
+              .run(value, record.key, JSON.stringify(expected))
+          : db()
+              .query('INSERT OR IGNORE INTO worktrees (key, value) VALUES (?, ?)')
+              .run(record.key, value);
+        return result.changes === 1;
+      },
+      // Replaces a creation intent with what OpenCode created.
+      async replace(intent: WorktreeIntent, records: RecordedWorktree[]): Promise<boolean> {
+        return db()
+          .transaction(() => {
+            const removed = db()
+              .query('DELETE FROM worktrees WHERE key = ? AND value = ?')
+              .run(intent.key, JSON.stringify(intent));
+            if (removed.changes !== 1) return false;
+            for (const record of records)
+              db()
+                .query('INSERT OR REPLACE INTO worktrees (key, value) VALUES (?, ?)')
+                .run(record.key, JSON.stringify(record));
+            return true;
+          })
+          .immediate();
+      },
+      async remove(record: CreatedWorktree): Promise<boolean> {
+        return (
+          db()
+            .query('DELETE FROM worktrees WHERE key = ? AND value = ?')
+            .run(record.key, JSON.stringify(record)).changes === 1
+        );
+      },
+      // Reserves the worktree for removal: marks it `removing` at `at` and
+      // takes its checkout lock, in one write, if the stored record is still
+      // `expected` and no attempt holds the lock. A removal left by a crash
+      // holds the lock under the same holder, so a later cleanup can take it
+      // over. Returns the reservation, or undefined when it wasn't made.
+      async reserveRemoval(
+        expected: RecordedWorktree,
+        at: number,
+      ): Promise<RecordedWorktree | undefined> {
+        const { directory } = expected;
+        const holder = removalHolder(directory);
+        const removing: RecordedWorktree = { ...expected, state: 'removing', at };
+        return db()
+          .transaction(() => {
+            if (JSON.stringify(readWorktree(expected.key)) !== JSON.stringify(expected))
+              return undefined;
+            const lock = db()
+              .query<
+                { holder: string },
+                [string]
+              >('SELECT holder FROM checkout_locks WHERE directory = ?')
+              .get(directory);
+            if (lock && lock.holder !== holder) return undefined;
+            db()
+              .query('UPDATE worktrees SET value = ? WHERE key = ?')
+              .run(JSON.stringify(removing), expected.key);
+            db()
+              .query(
+                'INSERT OR REPLACE INTO checkout_locks (directory, holder, value) VALUES (?, ?, ?)',
+              )
+              .run(directory, holder, JSON.stringify({ removal: directory, at }));
+            return removing;
+          })
+          .immediate();
+      },
+      // Makes a reserved worktree reusable again, and frees its lock.
+      // Returns false when the reservation was no longer stored, such as
+      // when another cleanup took it over.
+      async cancelRemoval(removing: RecordedWorktree): Promise<boolean> {
+        return endRemoval(removing, () =>
+          db()
+            .query('UPDATE worktrees SET value = ? WHERE key = ? AND value = ?')
+            .run(
+              JSON.stringify({ ...removing, state: 'ready' }),
+              removing.key,
+              JSON.stringify(removing),
+            ),
+        );
+      },
+      // Forgets a removed worktree, and frees its lock. Returns false when
+      // the reservation was no longer stored.
+      async completeRemoval(removing: RecordedWorktree): Promise<boolean> {
+        return endRemoval(removing, () =>
+          db()
+            .query('DELETE FROM worktrees WHERE key = ? AND value = ?')
+            .run(removing.key, JSON.stringify(removing)),
+        );
+      },
     },
     records: {
       async read(batch: string) {
@@ -110,6 +324,7 @@ export function createReviewClaims(
           .transaction(() => {
             if (!compareAndSet(record, expected)) return false;
             release(record.item.url, claimOf(record));
+            releaseLocks(record);
             return true;
           })
           .immediate();

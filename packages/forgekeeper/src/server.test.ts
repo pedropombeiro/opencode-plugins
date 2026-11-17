@@ -254,6 +254,7 @@ async function harness(options: Options = {}) {
   const entryWrites: string[] = [];
   let hook!: Hook;
   let promptHook: (event: { sessionID: string }) => Promise<void> = async () => {};
+  let compactionHook: Hook | undefined;
   let renames = 0;
   let handlers: Record<string, (input: unknown) => Promise<unknown>> = {};
   const emitted: Array<{ name: string; data: unknown }> = [];
@@ -385,6 +386,7 @@ async function harness(options: Options = {}) {
       },
       hook: async (name: string, callback: Hook) => {
         if (name === 'prompt') promptHook = callback as unknown as typeof promptHook;
+        else if (name === 'compaction') compactionHook = callback;
         else hook = callback;
       },
       synthetic: async (input: (typeof passive)[number]) => {
@@ -591,6 +593,13 @@ async function harness(options: Options = {}) {
         options: {} as Record<string, unknown>,
       };
       await hook(event as never);
+      return event;
+    },
+    // A compaction request through the compaction hook.
+    compact: async (sessionID = 'one', messages: unknown[] = []) => {
+      const event = { sessionID, system: [], messages, tools: {}, model, options: {} };
+      if (!compactionHook) throw new Error('No compaction hook');
+      await compactionHook(event as never);
       return event;
     },
     failContext: (fails: boolean) => void (contextFails = fails),
@@ -1052,6 +1061,16 @@ describe('session targets', () => {
   test('registers set_session_target as a direct tool', async () => {
     const app = await harness();
     expect(app.toolOptions()).toEqual({ codemode: false });
+    await app.cleanup();
+  });
+
+  test("leaves a compaction alone unless it summarizes a linked session's task", async () => {
+    const app = await harness();
+    const messages = [
+      new ProviderMessage({ role: 'user', content: [{ type: 'text', text: 'earlier work' }] }),
+    ];
+    const event = await app.compact('one', messages);
+    expect(event.messages).toEqual(messages);
     await app.cleanup();
   });
 

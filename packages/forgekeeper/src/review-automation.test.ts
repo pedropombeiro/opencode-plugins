@@ -105,7 +105,7 @@ function fixture(overrides: Partial<AutomationHost> = {}) {
     }),
     pipelineDone: async () => false,
     model: async () => 'gitlab/strong',
-    validate: async () => host.rules,
+    validate: async () => ({ placement: 'session', rules: host.rules }),
     redeliver: (entry) => void redelivered.push(entry.id),
     wait: async () => {},
     sleep: async () => {},
@@ -695,7 +695,7 @@ describe('review automation', () => {
       validate: async (_item, automatic) => {
         validations.push(automatic);
         if (automatic) throw new Ineligible('You did not write this PR/MR');
-        return [rule];
+        return { placement: 'session', rules: [rule] };
       },
     });
     expect(await f.automation.selectAutomatic(item)).toBe(false);
@@ -804,7 +804,10 @@ describe('review automation', () => {
     const listing = { ...rule, authors: ['service-bot'], allowedModels: ['gitlab/other'] };
     const f = fixture({
       rules: [listing, rule],
-      validate: async (_item, automatic) => (automatic ? [listing] : [listing, rule]),
+      validate: async (_item, automatic) => ({
+        placement: 'session',
+        rules: automatic ? [listing] : [listing, rule],
+      }),
       findings: async () => [{ ...finding, reviewer: 'gitlabduo' }],
     });
     expect(await f.automation.selectAutomatic(item)).toBe(false);
@@ -819,7 +822,10 @@ describe('review automation', () => {
     const read: Array<string[] | undefined> = [];
     const f = fixture({
       rules: [listing, other],
-      validate: async (_item, automatic) => (automatic ? [listing] : [listing, other]),
+      validate: async (_item, automatic) => ({
+        placement: 'session',
+        rules: automatic ? [listing] : [listing, other],
+      }),
       findings: async (_item, reviewers) => {
         read.push(reviewers);
         return [{ ...finding, reviewer: 'gitlabduo' }];
@@ -848,7 +854,7 @@ describe('review automation', () => {
       wait: () => gate.promise,
       validate: async () => {
         if (!eligible) throw new Ineligible('The checkout does not match');
-        return [rule];
+        return { placement: 'session', rules: [rule] };
       },
     });
     expect(await f.automation.selectAutomatic(item)).toBe(true);
@@ -1153,7 +1159,7 @@ describe('failed-job automation', () => {
     const listing = { ...jobRule, authors: ['service-bot'], allowedModels: ['gitlab/other'] };
     const f = jobFixture({
       rules: [listing, jobRule],
-      validate: async () => [listing],
+      validate: async () => ({ placement: 'session', rules: [listing] }),
     });
     const first = failure('f1', 1_000);
     f.setItems([first]);
@@ -1195,5 +1201,225 @@ describe('failed-job automation', () => {
     await f.settled();
     expect(f.records.get(batch)?.state).toBe('completed');
     expect(f.texts).toHaveLength(1);
+  });
+});
+
+describe('review automation in a worktree', () => {
+  const linked = {
+    stage: 'submitting' as const,
+    ownerDirectory: '/repo',
+    head: 'abc',
+    sourceProject: 'team/project',
+    sourceBranch: 'feature',
+    directory: '/worktree',
+    detached: false,
+    sessionID: 'linked',
+    prompt: 'task',
+  };
+
+  function worktreeFixture(overrides: Partial<AutomationHost> = {}) {
+    const waited: string[] = [];
+    const submitted: AutomationRecord[] = [];
+    const notices: Array<[string, AutomationState]> = [];
+    const f = fixture({
+      validate: async () => ({ placement: 'worktree', rules: [rule] }),
+      wait: async (sessionID) => void waited.push(sessionID),
+      async provision(record, update) {
+        await update({
+          stage: 'provisioning',
+          ownerDirectory: '/repo',
+          head: 'abc',
+          sourceProject: 'team/project',
+          sourceBranch: 'feature',
+        });
+        await update({ directory: '/worktree', detached: false });
+        return update({ sessionID: 'linked' });
+      },
+      verifyExecution: async () => {},
+      notify: async (record, phase) => void notices.push([phase, record.state]),
+      submit: async (record) => void submitted.push(structuredClone(record)),
+      ...overrides,
+    });
+    return { ...f, waited, submitted, notices };
+  }
+
+  test('runs a batch whose checkout is elsewhere in a linked session, for its owner', async () => {
+    const f = worktreeFixture();
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(f.submitted).toHaveLength(1);
+    const [record] = f.submitted;
+    expect(record.checkout).toBe('worktree');
+    expect(record.execution).toMatchObject({
+      stage: 'submitting',
+      sessionID: 'linked',
+      directory: '/worktree',
+    });
+    expect(record.execution?.stage === 'submitting' && record.execution.prompt).toContain(
+      'A finding',
+    );
+    // The owning session isn't waited for; the linked session runs the turn.
+    expect(f.waited).toEqual(['linked']);
+    expect(f.record()).toMatchObject({ state: 'completed', item: { sessionID: 'one' } });
+    expect(f.notices).toEqual([
+      ['started', 'running'],
+      ['ended', 'completed'],
+    ]);
+    expect(f.claim()).toBeUndefined();
+  });
+
+  test("a service account's batch reads and restricts by its author's rules in the worktree", async () => {
+    const listing = {
+      ...rule,
+      authors: ['service-bot'],
+      allowedModels: ['gitlab/strong'],
+      checkout: 'worktree' as const,
+    };
+    const other = { ...rule, reviewers: ['alice'], allowedModels: ['gitlab/other'] };
+    const read: Array<string[] | undefined> = [];
+    const f = worktreeFixture({
+      rules: [listing, other],
+      validate: async (_item, automatic) => ({
+        placement: 'worktree',
+        rules: automatic ? [listing] : [listing, other],
+      }),
+      findings: async (_item, reviewers) => {
+        read.push(reviewers);
+        return [{ ...finding, reviewer: 'gitlabduo' }];
+      },
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(read).toEqual([['gitlabduo'], ['gitlabduo']]);
+    expect(f.submitted[0]).toMatchObject({
+      checkout: 'worktree',
+      models: ['gitlab/strong'],
+      execution: { stage: 'submitting', sessionID: 'linked' },
+    });
+    expect(f.record()).toMatchObject({ state: 'completed' });
+  });
+
+  test('without the rules allowing it, a checkout elsewhere skips the batch', async () => {
+    const f = worktreeFixture({
+      validate: async () => {
+        throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+      },
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(false);
+    expect(f.record()).toMatchObject({ state: 'skipped' });
+    expect(f.submitted).toEqual([]);
+  });
+
+  test('a worktree that cannot be prepared ends the attempt before its turn', async () => {
+    const f = worktreeFixture({
+      provision: async () => {
+        throw new Ineligible('The head commit is not available');
+      },
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(f.submitted).toEqual([]);
+    expect(f.record()).toMatchObject({
+      state: 'failed',
+      reason: 'The head commit is not available',
+    });
+    expect(f.record().startedAt).toBeUndefined();
+    expect(f.claim()).toBeUndefined();
+    // Nothing ran, so the update gets its normal delivery.
+    expect(f.redelivered).toEqual([item.id]);
+  });
+
+  test('after a reload, an attempt stored while preparing its worktree ends unsubmitted', async () => {
+    const f = worktreeFixture();
+    const seeded = await f.seed('running');
+    const record: AutomationRecord = {
+      ...seeded,
+      checkout: 'worktree',
+      execution: { ...linked, stage: 'provisioning', sessionID: undefined },
+    };
+    f.records.set(record.batch, structuredClone(record));
+    f.automation.restore([record]);
+    await f.settled();
+    expect(f.record()).toMatchObject({ state: 'failed' });
+    expect(f.record().reason).toContain('before the turn was submitted');
+    expect(f.claim()).toBeUndefined();
+    expect(f.submitted).toEqual([]);
+  });
+
+  test('a reload keeps watching the linked session of a submitted attempt', async () => {
+    const outcomes: string[] = [];
+    const f = worktreeFixture({
+      outcome: async (claim) => {
+        outcomes.push(claim.sessionID);
+        return 'completed';
+      },
+    });
+    const seeded = await f.seed('running');
+    const record: AutomationRecord = { ...seeded, checkout: 'worktree', execution: linked };
+    f.records.set(record.batch, structuredClone(record));
+    f.automation.restore([record]);
+    await f.settled();
+    expect(f.waited).toEqual(['linked']);
+    expect(f.record()).toMatchObject({ state: 'completed' });
+    expect(f.notices).toEqual([['ended', 'completed']]);
+  });
+
+  test("deleting the owning session doesn't end a turn its linked session still runs", async () => {
+    const f = worktreeFixture({
+      exists: async (sessionID) => sessionID !== 'one',
+      outcome: async () => 'running',
+    });
+    const seeded = await f.seed('running');
+    f.records.set(seeded.batch, { ...seeded, checkout: 'worktree', execution: linked });
+    const other = { ...item, sessionID: 'two' };
+    await expect(f.automation.act(other)).rejects.toThrow('still running in its linked session');
+    expect(f.record().state).toBe('running');
+    expect(f.claim()).toBeDefined();
+  });
+
+  test('another session takes over once the linked turn of a deleted owner ended', async () => {
+    const f = worktreeFixture({
+      exists: async (sessionID) => sessionID !== 'one',
+      outcome: async () => 'completed',
+    });
+    const seeded = await f.seed('running');
+    f.records.set(seeded.batch, { ...seeded, checkout: 'worktree', execution: linked });
+    const other = { ...item, sessionID: 'two' };
+    await f.automation.act(other, true);
+    await f.settled();
+    // The ended turn was recorded, which freed the PR/MR for the new attempt.
+    expect(f.record()).toMatchObject({ attempt: 2, item: { sessionID: 'two' } });
+  });
+
+  test('an uncertain linked turn of a deleted owner needs an explicit retry', async () => {
+    const f = worktreeFixture({
+      exists: async (sessionID) => sessionID !== 'one',
+      outcome: async () => 'unknown',
+    });
+    const seeded = await f.seed('running');
+    f.records.set(seeded.batch, { ...seeded, checkout: 'worktree', execution: linked });
+    const other = { ...item, sessionID: 'two' };
+    await expect(f.automation.act(other)).rejects.toThrow('Use explicit retry');
+    expect(f.record()).toMatchObject({ state: 'failed', attempt: 1 });
+    expect(f.record().reason).toContain('uncertain');
+    expect(f.claim()).toBeDefined();
+    await f.automation.act(other, true);
+    await f.settled();
+    expect(f.record()).toMatchObject({ attempt: 2, item: { sessionID: 'two' } });
+  });
+
+  test("records the end of the linked session's turn, not the owner's", async () => {
+    const f = worktreeFixture();
+    const seeded = await f.seed('running');
+    f.records.set(seeded.batch, {
+      ...seeded,
+      startedAt: 50,
+      checkout: 'worktree',
+      execution: linked,
+    });
+    await f.automation.turnEnded('one', 'failed', 60);
+    expect(f.record().ended).toBeUndefined();
+    await f.automation.turnEnded('linked', 'succeeded', 70);
+    expect(f.record().ended).toEqual({ outcome: 'succeeded', at: 70 });
   });
 });

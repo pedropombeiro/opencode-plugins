@@ -153,3 +153,104 @@ describe('atomic review execution claims', () => {
     }
   });
 });
+
+describe('checkout locks', () => {
+  const item = { id: 'item', sessionID: 'one', url: 'target', title: 'Review', links: [], at: 1 };
+  const queued: AutomationRecord = {
+    batch: 'batch',
+    messageID: 'message',
+    state: 'queued',
+    attempt: 1,
+    at: 1,
+    item,
+  };
+  const lock = { batch: 'batch', messageID: 'message', url: 'target', at: 1 };
+
+  test('one attempt holds a directory until its outcome frees the PR/MR', async () => {
+    const claims = createReviewClaims(':memory:');
+    try {
+      await claims.records.save(queued);
+      const running: AutomationRecord = { ...queued, state: 'running' };
+      expect(await claims.records.start(running, queued)).toBe(true);
+      expect(await claims.locks.acquire('/wt', lock)).toBe(true);
+      // The holder may take it again; another attempt can't.
+      expect(await claims.locks.acquire('/wt', lock)).toBe(true);
+      expect(await claims.locks.acquire('/wt', { ...lock, batch: 'other' })).toBe(false);
+      expect(await claims.records.finish({ ...running, state: 'completed' }, running)).toBe(true);
+      expect(await claims.locks.read('/wt')).toBeUndefined();
+    } finally {
+      claims.close();
+    }
+  });
+
+  test('releasing a claim frees the directories its attempt holds', async () => {
+    const claims = createReviewClaims(':memory:');
+    try {
+      const claim = { sessionID: 'one', messageID: 'message', batch: 'batch' };
+      expect(await claims.acquire('target', claim)).toBe(true);
+      expect(await claims.locks.acquire('/wt', lock)).toBe(true);
+      // A stale release frees nothing.
+      await claims.release('target', { ...claim, messageID: 'stale' });
+      expect(await claims.locks.read('/wt')).toEqual(lock);
+      await claims.release('target', claim);
+      expect(await claims.locks.read('/wt')).toBeUndefined();
+    } finally {
+      claims.close();
+    }
+  });
+});
+
+describe('worktree removal reservations', () => {
+  const row = {
+    key: '/wt',
+    directory: '/wt',
+    name: 'forgekeeper-project-1',
+    url: 'target',
+    projectID: 'project',
+    state: 'ready' as const,
+    at: 1,
+  };
+  const lock = { batch: 'batch', messageID: 'message', url: 'target', at: 1 };
+
+  test('a reservation and an attempt never hold a worktree at once', async () => {
+    const claims = createReviewClaims(':memory:');
+    try {
+      await claims.worktrees.save(row);
+      expect(await claims.locks.acquire('/wt', lock)).toBe(true);
+      // An attempt holds it, so cleanup can't reserve it.
+      expect(await claims.worktrees.reserveRemoval(row, 2)).toBeUndefined();
+      await claims.locks.release(lock);
+      const removing = (await claims.worktrees.reserveRemoval(row, 2))!;
+      expect(removing).toEqual({ ...row, state: 'removing', at: 2 });
+      // Cleanup reserved it, so no attempt can take it.
+      expect(await claims.locks.acquire('/wt', lock)).toBe(false);
+      // A removal that didn't happen makes it reusable again.
+      expect(await claims.worktrees.cancelRemoval(removing)).toBe(true);
+      const ready = { ...removing, state: 'ready' as const };
+      expect(await claims.worktrees.list()).toEqual([ready]);
+      expect(await claims.locks.acquire('/wt', lock)).toBe(true);
+      await claims.locks.release(lock);
+      const again = (await claims.worktrees.reserveRemoval(ready, 3))!;
+      expect(await claims.worktrees.completeRemoval(again)).toBe(true);
+      expect(await claims.worktrees.list()).toEqual([]);
+      expect(await claims.locks.read('/wt')).toBeUndefined();
+    } finally {
+      claims.close();
+    }
+  });
+
+  test('a stale reservation leaves the lock of the cleanup that took it over', async () => {
+    const claims = createReviewClaims(':memory:');
+    try {
+      await claims.worktrees.save(row);
+      const crashed = (await claims.worktrees.reserveRemoval(row, 2))!;
+      const takeover = (await claims.worktrees.reserveRemoval(crashed, 3))!;
+      expect(await claims.worktrees.cancelRemoval(crashed)).toBe(false);
+      expect(await claims.locks.read('/wt')).toEqual({ removal: '/wt', at: 3 });
+      expect(await claims.worktrees.completeRemoval(takeover)).toBe(true);
+      expect(await claims.locks.read('/wt')).toBeUndefined();
+    } finally {
+      claims.close();
+    }
+  });
+});
