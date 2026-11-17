@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-4.0.0...opencode-forgekeeper-4.0.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **forgekeeper:** inherit session targets in forked sessions ([#153](https://github.com/pedropombeiro/opencode-plugins/issues/153)) ([b97be12](https://github.com/pedropombeiro/opencode-plugins/commit/b97be1263f642c71942243ea767038b334206e6e))
+* **forgekeeper:** target existing work the agent reviews or triages ([44d8885](https://github.com/pedropombeiro/opencode-plugins/commit/44d88858891909b01f9fbbd8ffbd5e5cc4847e08))
+
 ## [4.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-3.3.2...opencode-forgekeeper-4.0.0) (2026-11-15)
 
 
