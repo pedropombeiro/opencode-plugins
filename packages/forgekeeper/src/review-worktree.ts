@@ -280,6 +280,10 @@ async function createWorktree(
   if (!(await claims.locks.acquire(directory, holder)))
     throw new Error('The attempt ended, or another took the new worktree, while it was created');
   const state = await checkoutState(exec, directory);
+  if (!state)
+    throw new Error(
+      'The configured OpenCode worktree strategy did not create a compatible Git checkout',
+    );
   if (state?.head !== request.headSha)
     throw new Error("The new worktree isn't at the PR/MR's head commit");
   const detached = !(await switchToBranch(deps, directory, request, entries, remote));

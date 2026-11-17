@@ -80,6 +80,35 @@ export function createReviewClaims(
     database.run(
       'CREATE TABLE IF NOT EXISTS worktrees (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
     );
+    database
+      .transaction(() => {
+        for (const row of database!
+          .query<{ batch: string; value: string }, []>('SELECT batch, value FROM attempts')
+          .all()) {
+          const record = JSON.parse(row.value);
+          let changed = false;
+          if (record.checkout !== undefined) {
+            record.placement = record.checkout === 'worktree' ? 'environment' : 'session';
+            delete record.checkout;
+            changed = true;
+          }
+          if (record.execution && !record.execution.provider) {
+            const { directory, sessionID, remote, detached, ...source } = record.execution;
+            record.execution = {
+              ...source,
+              provider: 'local-worktree',
+              version: 1,
+              state: { directory, sessionID, remote, detached },
+            };
+            changed = true;
+          }
+          if (changed)
+            database!
+              .query('UPDATE attempts SET value = ? WHERE batch = ? AND value = ?')
+              .run(JSON.stringify(record), row.batch, row.value);
+        }
+      })
+      .immediate();
     return database;
   };
   const holderOf = (holder: { batch: string; messageID?: string }) =>

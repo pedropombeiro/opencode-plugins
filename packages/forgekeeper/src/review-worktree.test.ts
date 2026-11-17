@@ -8,6 +8,10 @@ import { resolveRepository } from './git';
 import { Ineligible, type AutomationRecord } from './review-automation';
 import { createReviewClaims, type CheckoutLock, type RecordedWorktree } from './review-claim';
 import { linkedMetadata, type DirectorySession } from './linked-session';
+import type { Plugin } from '@opencode/plugin';
+import { createLocalEnvironment } from './local-automation-environment';
+import type { UpdateExecution } from './automation-environment';
+import { PLUGIN_ID } from './plugin-id';
 import {
   CREATION_TIME,
   inCheckout,
@@ -153,6 +157,122 @@ function fixture(sessions: Record<string, DirectorySession[]> = {}) {
 }
 
 const NEW = /^forgekeeper-project-7-[0-9a-f]{8}$/;
+
+test('the local provider recovers a session created before its ID was saved and cleans up its worktree', async () => {
+  const listed: Record<string, DirectorySession[]> = {};
+  const f = fixture(listed);
+  await f.lock();
+  let record = (await f.claims.records.read('b1'))!;
+  const execution = {
+    stage: 'provisioning' as const,
+    provider: 'local-worktree',
+    version: 1,
+    state: {},
+  };
+  await f.claims.records.save({ ...record, execution }, record);
+  record = (await f.claims.records.read('b1'))!;
+  let creates = 0;
+  let interrupted = true;
+  let closed = false;
+  const archived: string[] = [];
+  const prompts: unknown[] = [];
+  const source = await request();
+  const ctx = {
+    location: { directory: main, project: { id: 'project' } },
+    worktree: f.deps.worktree,
+    plugin: { list: async () => ({ data: [{ id: PLUGIN_ID, state: { status: 'active' } }] }) },
+    session: {
+      get: async ({ sessionID }: { sessionID: string }) => ({
+        id: sessionID,
+        agent: 'build',
+        time: {},
+      }),
+      list: async () => ({
+        data: Object.entries(listed).flatMap(([directory, sessions]) =>
+          sessions.map((session) => ({ ...session, location: { directory } })),
+        ),
+        cursor: {},
+      }),
+      create: async (value: {
+        location: { directory: string };
+        metadata: Record<string, unknown>;
+      }) => {
+        creates++;
+        listed[value.location.directory] = [{ id: 'linked', time: {}, metadata: value.metadata }];
+        if (interrupted) throw new Error('Interrupted after session creation');
+        return { id: 'linked' };
+      },
+      update: async (value: {
+        sessionID: string;
+        archived?: boolean;
+        metadata?: Record<string, unknown>;
+      }) => {
+        if (value.archived) archived.push(value.sessionID);
+        for (const sessions of Object.values(listed))
+          for (const session of sessions)
+            if (session.id === value.sessionID && value.metadata) session.metadata = value.metadata;
+      },
+      prompt: async (value: unknown) => {
+        prompts.push(value);
+      },
+    },
+  } as unknown as Plugin.Context;
+  const make = () =>
+    createLocalEnvironment({
+      ctx,
+      deps: f.deps,
+      signal: new AbortController().signal,
+      closing: () => false,
+      request: async () => ({ state: closed ? 'closed' : 'opened', ...source }),
+      policy: async () => ({ agent: 'build', permissions: [] }),
+      exists: async () => true,
+      outcome: async () => 'completed',
+      startContext: () => ({
+        pending: async () => {},
+        rules: async () => [],
+        check: async () => [],
+      }),
+      pushNotice: () => 'push',
+    });
+  const update: UpdateExecution = async (patch) => {
+    const next = { ...record, execution: { ...record.execution!, ...patch } as typeof execution };
+    if (!(await f.claims.records.save(next, record))) throw new Error('Stale attempt');
+    record = next;
+    return record;
+  };
+  try {
+    await expect(make().provision(record, update)).rejects.toThrow('Interrupted');
+    expect(record.execution!.state.sessionCreating).toBe(true);
+    expect(f.created).toHaveLength(1);
+    const savedSessions = listed[f.created[0]];
+    listed[f.created[0]] = [];
+    await expect(make().recover(record)).rejects.toThrow('still unresolved');
+    await expect(make().outcome(record)).rejects.toThrow('still unresolved');
+    expect(creates).toBe(1);
+    listed[f.created[0]] = savedSessions;
+    interrupted = false;
+    const recovered = make();
+    await recovered.recover(record);
+    await recovered.provision(record, update);
+    expect(creates).toBe(1);
+    expect(f.created).toHaveLength(1);
+    expect(record.execution!.state).toMatchObject({ sessionID: 'linked', sessionCreating: false });
+    const ready = {
+      ...record,
+      execution: { ...record.execution!, stage: 'submitting' as const, prompt: 'task' },
+    };
+    await recovered.verify(ready);
+    await recovered.submit(ready);
+    expect(prompts).toHaveLength(1);
+    expect(await recovered.describe(ready, 'started')).toContain('Linked session: linked');
+    await f.claims.records.finish({ ...record, state: 'completed' }, record);
+    closed = true;
+    expect(await recovered.sweep()).toHaveLength(1);
+    expect(archived).toEqual(['linked']);
+  } finally {
+    f.claims.close();
+  }
+});
 
 const session = (id: string, extra: Partial<DirectorySession> = {}): DirectorySession => ({
   id,

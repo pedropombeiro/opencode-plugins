@@ -882,9 +882,9 @@ describe('worktree automation', () => {
   }
 
   test('a checkout elsewhere runs in a worktree only when every rule opts in', async () => {
-    const opted = { ...rule, checkout: 'worktree' as const };
+    const opted = { ...rule, execution: 'environment' as const };
     const cases: Array<[AutomationRule[], string]> = [
-      [[opted], 'worktree'],
+      [[opted], 'environment'],
       [[opted, { ...rule, reviewers: ['bot'] }], 'skip'],
       [[rule], 'skip'],
     ];
@@ -926,12 +926,13 @@ describe('worktree automation', () => {
     startedAt: undefined,
     execution: {
       stage: 'submitting',
+      provider: 'local-worktree',
+      version: 1,
       ownerDirectory: '/owner',
       head,
       sourceProject: 'group/project',
       sourceBranch: 'feature',
-      directory: '/repo',
-      sessionID: 'linked',
+      state: { directory: '/repo', sessionID: 'linked' },
       prompt: 'task',
     },
   });
@@ -977,7 +978,13 @@ describe('worktree automation', () => {
     // A turn that moved out of its worktree never starts.
     await expect(
       f.authorizeStart(
-        { ...attempt, execution: { ...attempt.execution!, directory: '/elsewhere' } },
+        {
+          ...attempt,
+          execution: {
+            ...attempt.execution!,
+            state: { ...attempt.execution.state, directory: '/elsewhere' },
+          },
+        },
         'gitlab/model',
       ),
     ).rejects.toThrow("isn't in its worktree anymore");
@@ -999,7 +1006,7 @@ describe('worktree automation', () => {
       ...job,
       authors: ['service-bot'],
       allowedModels: ['gitlab/strong'],
-      checkout: 'worktree',
+      execution: 'environment',
     };
     function investigation(rules: AutomationRule[], extra: Partial<Options> = {}) {
       let clock = at;
@@ -1042,14 +1049,14 @@ describe('worktree automation', () => {
 
     test("refuses once the owner's rules no longer let it run in a worktree", async () => {
       const done = { ...failure, at: at - INVESTIGATION_QUIET_TIME };
-      const inSession: AutomationRule = { ...listing, checkout: 'session' };
+      const inSession: AutomationRule = { ...listing, execution: 'session' };
       const { f } = investigation([inSession], {
         storage: ownerReady([inSession], at, done),
       });
       const attempt = linkedAttempt(done);
       await f.claims.records.save(attempt);
       await expect(f.authorizeStart(attempt, 'gitlab/strong')).rejects.toThrow(
-        'no longer let this turn run in a worktree',
+        'no longer let this turn run in an environment',
       );
       f.close();
     });
@@ -1128,7 +1135,7 @@ describe('worktree automation', () => {
   });
 
   test('a service account MR runs in a worktree only when the rules covering its author opt in', async () => {
-    const listing = { ...rule, authors: ['service-bot'], checkout: 'worktree' as const };
+    const listing = { ...rule, authors: ['service-bot'], execution: 'environment' as const };
     const other = { ...rule, reviewers: ['bot'] };
     const service = { viewer: 'me', accounts: { 'service-bot': 'svc' }, checkout: 'main' };
     const covered = hostFixture({
@@ -1138,11 +1145,11 @@ describe('worktree automation', () => {
     });
     // The rule without `checkout` doesn't cover the MR's author, so it doesn't count.
     expect(await covered.host.validate(review, true)).toEqual({
-      placement: 'worktree',
+      placement: 'environment',
       rules: [listing],
     });
     covered.close();
-    const inSession = { ...listing, checkout: 'session' as const };
+    const inSession = { ...listing, execution: 'session' as const };
     const kept = hostFixture({
       ...service,
       rules: [inSession, other],
@@ -1156,7 +1163,7 @@ describe('worktree automation', () => {
     // Listing plugins doesn't start an instance, so only the prompt can: no
     // presence is waited for before submitting.
     const f = hostFixture({ sessions: linkedSessions });
-    expect(await f.host.verifyExecution!(linkedAttempt())).toBeUndefined();
+    expect(await f.host.environments!.providers[0].verify(linkedAttempt())).toBeUndefined();
     f.close();
   });
 
@@ -1168,7 +1175,7 @@ describe('worktree automation', () => {
         pages,
         storage: { [presenceKey('/repo')]: { at, instance: 'here', rules: [] } },
       });
-      const result = await f.host.verifyExecution!(linkedAttempt()).then(
+      const result = await f.host.environments!.providers[0].verify(linkedAttempt()).then(
         () => 'free',
         (error: Error) => error.message,
       );
@@ -1199,7 +1206,7 @@ describe('worktree automation', () => {
         pages: [[{ id: 'nested', ...busy, location: { directory } }]],
         storage: { [presenceKey('/repo')]: { at, instance: 'here', rules: [] } },
       });
-      const result = await f.host.verifyExecution!(linkedAttempt()).then(
+      const result = await f.host.environments!.providers[0].verify(linkedAttempt()).then(
         () => 'free',
         (error: Error) => error.message,
       );
@@ -1233,7 +1240,7 @@ describe('worktree automation', () => {
           state: 'ready',
           at: 1,
         });
-      const result = await f.host.verifyExecution!(linkedAttempt()).then(
+      const result = await f.host.environments!.providers[0].verify(linkedAttempt()).then(
         () => 'free',
         (error: Error) => error.message,
       );
@@ -1310,8 +1317,9 @@ describe('worktree automation', () => {
         head,
         sourceProject: 'group/project',
         sourceBranch: 'feature',
-        directory: '/worktree',
-        sessionID: 'linked',
+        provider: 'local-worktree',
+        version: 1,
+        state: { directory: '/worktree', sessionID: 'linked' },
         prompt: 'the findings',
       },
     };
@@ -1345,8 +1353,9 @@ describe('worktree automation', () => {
         head,
         sourceProject: 'group/project',
         sourceBranch: 'feature',
-        directory: '/worktree',
-        sessionID: 'linked',
+        provider: 'local-worktree',
+        version: 1,
+        state: { directory: '/worktree', sessionID: 'linked' },
         prompt: 'the findings',
       },
     };
@@ -1391,8 +1400,9 @@ describe('worktree automation', () => {
         head,
         sourceProject: 'group/project',
         sourceBranch: 'feature',
-        directory: '/worktree',
-        sessionID: 'linked',
+        provider: 'local-worktree',
+        version: 1,
+        state: { directory: '/worktree', sessionID: 'linked' },
         prompt: 'the findings',
       },
     };

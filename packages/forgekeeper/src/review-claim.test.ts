@@ -7,6 +7,57 @@ import type { AutomationRecord } from './review-automation';
 import { Database } from 'bun:sqlite';
 
 describe('atomic review execution claims', () => {
+  test('migrates legacy worktree attempts without losing claims or compare-and-set semantics', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'forgekeeper-migration-'));
+    try {
+      const claims = createReviewClaims(root);
+      const legacy = {
+        batch: 'batch',
+        messageID: 'message',
+        state: 'running',
+        attempt: 1,
+        at: 1,
+        item: { id: 'item', sessionID: 'one', url: 'target', title: 'Review', links: [], at: 1 },
+        checkout: 'worktree',
+        execution: {
+          stage: 'submitting',
+          ownerDirectory: '/owner',
+          head: 'abc',
+          sourceProject: 'team/project',
+          sourceBranch: 'feature',
+          directory: '/worktree',
+          sessionID: 'linked',
+          detached: true,
+          prompt: 'task',
+        },
+      };
+      await claims.records.save(legacy as unknown as AutomationRecord);
+      await claims.acquire('target', { sessionID: 'one', messageID: 'message', batch: 'batch' });
+      claims.close();
+      const restored = createReviewClaims(root);
+      try {
+        const record = (await restored.records.read('batch'))!;
+        expect(record).toMatchObject({
+          placement: 'environment',
+          execution: {
+            provider: 'local-worktree',
+            version: 1,
+            stage: 'submitting',
+            prompt: 'task',
+            state: { directory: '/worktree', sessionID: 'linked', detached: true },
+          },
+        });
+        expect(record).not.toHaveProperty('checkout');
+        expect(await restored.read('target')).toBeDefined();
+        expect(await restored.records.finish({ ...record, state: 'completed' }, record)).toBe(true);
+        expect(await restored.read('target')).toBeUndefined();
+      } finally {
+        restored.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   test('a failed admission rolls back the claim and leaves a recoverable queued attempt', async () => {
     const root = await mkdtemp(join(tmpdir(), 'forgekeeper-rollback-'));
     const claims = createReviewClaims(root);

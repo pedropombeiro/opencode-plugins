@@ -104,7 +104,7 @@ describe('statusOptions', () => {
     ]);
   });
 
-  test('rules opt in to running in a worktree, and an invalid checkout drops the rule', () => {
+  test('rules opt in to environment execution, and an invalid mode drops the rule', () => {
     const review = {
       on: 'review',
       host: 'gitlab.com',
@@ -116,26 +116,33 @@ describe('statusOptions', () => {
     const options = statusOptions({
       automation: {
         rules: [
-          { ...review, checkout: 'worktree' },
-          { ...review, checkout: 'session' },
-          { ...job, checkout: 'worktree' },
+          { ...review, execution: 'environment' },
+          { ...review, execution: 'session' },
+          { ...job, execution: 'environment' },
         ],
       },
     });
     expect(options.problems).toEqual([]);
     expect(options.automation.rules).toEqual([
-      { ...review, checkout: 'worktree' },
+      { ...review, execution: 'environment' },
       review,
-      { ...job, action: 'investigate', checkout: 'worktree' },
+      { ...job, action: 'investigate', execution: 'environment' },
     ] as never);
     for (const rule of [
-      { ...review, checkout: 'elsewhere' },
-      { ...job, checkout: true },
+      { ...review, execution: 'elsewhere' },
+      { ...job, execution: true },
     ]) {
       const invalid = statusOptions({ automation: { rules: [rule] } });
       expect(invalid.automation.rules).toEqual([]);
       expect(invalid.problems).toEqual([
-        'automation.rules[0] checkout must be one of "session", "worktree"; using no rule',
+        'automation.rules[0] execution must be one of "session", "environment"; using no rule',
+      ]);
+    }
+    for (const rule of [review, job]) {
+      const invalid = statusOptions({ automation: { rules: [{ ...rule, checkout: 'worktree' }] } });
+      expect(invalid.automation.rules).toEqual([]);
+      expect(invalid.problems).toEqual([
+        'automation.rules[0] checkout was replaced by execution: "session" or "environment"; using no rule',
       ]);
     }
   });

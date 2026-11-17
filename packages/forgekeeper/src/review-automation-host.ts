@@ -29,8 +29,7 @@ import {
   modelRefusal,
   RECHECK_INTERVAL,
   restrictedReviewers,
-  runnerOf,
-  worktreeCheckout,
+  environmentExecution,
   type ReviewFinding,
   type AutomationHost,
   type AutomationRecord,
@@ -39,30 +38,20 @@ import {
   type PipelineFailures,
   type Placement,
   type Validation,
+  type LinkedRecord,
 } from './review-automation';
 import { createReviewClaims, type ExecutionClaim } from './review-claim';
 import { findingsDigest, PREPARATION_INSTRUCTIONS, preparationBatch } from './review-preparation';
 import { boundedReport, isForgekeeperInput, turnInput } from './review-summary';
-import { listWorktrees, shortStatus } from './git';
 import {
   freshPresence,
-  linkedMetadata,
   linkedOwner,
-  linkedPlaceholder,
   placeholderMessageID,
   presenceKey,
   type DirectorySession,
 } from './linked-session';
-import { PLUGIN_ID } from './plugin-id';
-import {
-  inCheckout,
-  prepareWorktree,
-  sweepWorktrees,
-  worktreeAdmission,
-  worktreeMismatch,
-  type WorktreeDependencies,
-  type WorktreeRequest,
-} from './review-worktree';
+import { environmentProvider, type StartContext } from './automation-environment';
+import { createLocalEnvironment, localRunnerOf as runnerOf } from './local-automation-environment';
 import { commentIDsOf, feedbackTarget, type SummaryDependencies } from './summary-delivery';
 import { includesRequest, type Target } from './target';
 
@@ -101,36 +90,11 @@ interface AutomationEnvironment {
 
 type Context = Plugin.Context;
 
-// What a turn's first-request checks read from where it runs; see
-// `startContext`.
-interface StartContext {
-  // Rejects unless the update is still pending for the owning session.
-  pending: (item: FeedbackItem) => Promise<void>;
-  // The configured rules the turn runs under, read anew on each call.
-  rules: () => Promise<readonly AutomationRule[]>;
-  // Checks that the checkout and `rules` still let the turn run there.
-  // Returns the rules that apply to the PR/MR's author.
-  check: (
-    item: FeedbackItem,
-    automatic: boolean,
-    rules: readonly AutomationRule[],
-  ) => Promise<readonly AutomationRule[]>;
-  // Rejects when the checkout can't take the turn now. Runs last, right
-  // before the start is recorded, after any wait.
-  admit: () => Promise<void>;
-}
-
-// The PR/MR's source and the commit a linked turn runs at.
-interface ExecutionSource {
-  head: string;
-  sourceProject: string;
-  sourceBranch: string;
-}
 type ModelRef = { providerID: string; id: string; variant?: string };
 
 // The metadata kind of the notices that tell an owning session about its
 // linked session's turn.
-export const WORKTREE_NOTICE = 'worktree-notice';
+export const ENVIRONMENT_NOTICE = 'environment-notice';
 
 type SessionInfo = Awaited<ReturnType<Context['session']['get']>>;
 
@@ -489,6 +453,7 @@ export async function transcriptOutcome(
   const attempt = record?.messageID === claim.messageID ? record : undefined;
   // A linked session runs the turn for the owning session, which holds the claim.
   const sessionID = attempt ? runnerOf(attempt) : claim.sessionID;
+  if (!sessionID) throw new Error('The execution has no local session');
   const messages = await ctx.session.context({ sessionID });
   // Input during the attempt's turn makes its outcome uncertain, but while
   // the session hasn't been idle since that input, the turn is still going.
@@ -614,8 +579,8 @@ export function createAutomationHost(
     const mismatch = await checkoutMismatch(deps, directory, policy, isJobFailure(item));
     let placement: Placement = 'session';
     if (mismatch) {
-      if (!worktreeCheckout(rules, policy.ref, item)) throw new Ineligible(mismatch);
-      placement = 'worktree';
+      if (!environmentExecution(rules, policy.ref, item)) throw new Ineligible(mismatch);
+      placement = 'environment';
     }
     // An investigation changes nothing, so a read-only agent may run it.
     if (session.agent === 'plan' && !isJobFailure(item))
@@ -655,57 +620,28 @@ export function createAutomationHost(
     if (!includesRequest(stored?.targets ?? [], item.url)) throw canceled();
   }
 
-  // Every non-archived session of the project in the checkout at `path`, in
-  // its directory or below it, subagents included, from every page.
-  // OpenCode lists a directory's sessions without those below it, so this
-  // lists the project's, and leaves out those in another checkout nested
-  // in this one. Without the repository's worktrees, none counts as nested,
-  // so more sessions count, never fewer.
-  const directorySessions = async (path: string): Promise<DirectorySession[]> => {
-    const checkouts = ((await listWorktrees(deps.exec, path)) ?? []).map(
-      (entry) => entry.directory,
-    );
-    const sessions: DirectorySession[] = [];
-    let page = await ctx.session.list({
-      project: ctx.location.project.id,
-      archived: false,
-      limit: 200,
-    });
-    for (;;) {
-      for (const session of page.data as unknown as Array<
-        DirectorySession & { location: { directory: string } }
-      >)
-        if (inCheckout(session.location.directory, path, checkouts)) sessions.push(session);
-      const next = page.cursor.next;
-      if (!next) return sessions;
-      page = await ctx.session.list({ cursor: next, limit: 200 } as never);
-    }
-  };
-  const worktreeDeps = (): WorktreeDependencies => ({
-    exec: deps.exec,
-    claims,
-    projectID: ctx.location.project.id,
-    ownerDirectory: directory,
-    worktree: {
-      create: (input) => ctx.worktree.create(input),
-      list: (input) => ctx.worktree.list(input),
-      remove: (input) => ctx.worktree.remove(input),
-    },
-    sessions: directorySessions,
-    repository: (path) => deps.forges.repository(path),
-    now,
+  const local = createLocalEnvironment({
+    ctx,
+    deps: { exec: deps.exec, claims, repository: (path) => deps.forges.repository(path), now },
+    signal: env.signal,
+    closing: env.closing,
+    request: (url) => currentRequest(deps, directory, url),
+    policy: async (owner) => ({ ...(await ownerPolicy(ctx, owner)), model: await modelOf(owner) }),
+    exists,
+    outcome: (record) =>
+      transcriptOutcome(
+        ctx,
+        {
+          sessionID: record.item.sessionID,
+          batch: record.batch,
+          messageID: record.messageID!,
+        },
+        record,
+      ),
+    startContext: linkedStartContext,
+    pushNotice,
   });
-  const worktreeRequest = (url: string, source: ExecutionSource): WorktreeRequest => {
-    const ref = parseUrl(url)!;
-    return {
-      url,
-      host: ref.host,
-      iid: ref.iid,
-      sourceProject: source.sourceProject,
-      sourceBranch: source.sourceBranch,
-      headSha: source.head,
-    };
-  };
+  const environments = { default: local.id, providers: [local] };
   // What the first-request checks read from where the turn runs. In the
   // owning session, they're this instance's. For a linked session, they're
   // the owning instance's current rules and checks, so the turn never runs
@@ -725,15 +661,23 @@ export function createAutomationHost(
         admit: async () => {},
       };
     if (execution.stage !== 'submitting') throw new Error('Review automation is no longer running');
-    if (execution.directory !== directory)
-      throw new Error("The linked session isn't in its worktree anymore");
+    return environmentProvider(environments, record).startContext(record as LinkedRecord);
+  }
+
+  function linkedStartContext(record: LinkedRecord): Omit<StartContext, 'admit'> {
+    const execution = record.execution;
+    if (
+      !execution.ownerDirectory ||
+      !execution.head ||
+      !execution.sourceBranch ||
+      !execution.sourceProject
+    )
+      throw new Error('The local execution source is unavailable');
+    const ownerDirectory = execution.ownerDirectory;
     return {
-      pending: (item) => assertOwnerPending(item, execution.ownerDirectory),
+      pending: (item) => assertOwnerPending(item, ownerDirectory),
       async rules() {
-        const owner = freshPresence(
-          await ctx.storage.get(presenceKey(execution.ownerDirectory)),
-          now(),
-        );
+        const owner = freshPresence(await ctx.storage.get(presenceKey(ownerDirectory)), now());
         if (!owner)
           throw new Error(
             `Forgekeeper isn't running in ${execution.ownerDirectory}, which owns this turn, so its rules couldn't be checked.`,
@@ -749,67 +693,39 @@ export function createAutomationHost(
           item,
           automatic,
         );
-        if (!worktreeCheckout(rules, ref, item))
-          throw new Error('The automation rules no longer let this turn run in a worktree');
+        if (!environmentExecution(rules, ref, item))
+          throw new Error('The automation rules no longer let this turn run in an environment');
         if (request.headSha !== execution.head)
           throw new Error(
             'The PR/MR has a newer head commit than the worktree. Retry feedback work.',
           );
-        const mismatch = await worktreeMismatch(
-          deps.exec,
-          (path) => deps.forges.repository(path),
-          directory,
-          worktreeRequest(item.url, execution),
-        );
-        if (mismatch) throw new Error(mismatch);
-        const session = await ctx.session.get({ sessionID: execution.sessionID });
-        if (session.agent === 'plan' && !isJobFailure(item))
-          throw new Error('Switch the linked session to a coding agent before acting on feedback');
         return rules;
-      },
-      // Another session may have started in the worktree, or left changes
-      // there, since the turn was submitted, such as during a quiet time.
-      async admit() {
-        const refusal = await worktreeAdmission(
-          worktreeDeps(),
-          directory,
-          record.item.url,
-          execution.sessionID,
-        );
-        if (refusal) throw new Error(refusal);
       },
     };
   }
 
   async function notify(record: AutomationRecord, phase: 'started' | 'ended') {
-    const execution = record.execution;
-    if (!execution?.directory || !execution.sessionID) return;
+    if (!record.execution) return;
+    const details = await environmentProvider(environments, record).describe(record, phase);
+    if (!details.length) return;
     const task = isJobFailure(record.item)
       ? 'investigating the failed jobs of'
       : 'preparing fixes for';
-    const push = execution.detached
-      ? pushNotice(execution.sourceBranch, execution.remote)
-      : `The worktree is on ${execution.sourceBranch}.`;
     const lines =
       phase === 'started'
         ? [
             `Forgekeeper is ${task} ${record.item.url} in a linked session, because this checkout isn't at the PR/MR's head commit.`,
-            `Worktree: ${execution.directory}`,
-            `Linked session: ${execution.sessionID}`,
-            push,
+            ...details,
           ]
         : [
             `Forgekeeper's linked session for ${record.item.url} ended: ${record.state}.${record.reason ? ` ${record.reason}` : ''}`,
-            `Worktree: ${execution.directory}`,
-            `Linked session: ${execution.sessionID}`,
-            `Uncommitted changes:\n${(await shortStatus(deps.exec, execution.directory).catch(() => undefined)) || 'None'}`,
-            push,
+            ...details,
           ];
     await ctx.session.synthetic({
       sessionID: record.item.sessionID,
       text: boundedReport(lines.join('\n\n')),
-      description: `Forgekeeper worktree: ${record.item.url}`,
-      metadata: { forgekeeper: WORKTREE_NOTICE },
+      description: `Forgekeeper environment: ${record.item.url}`,
+      metadata: { forgekeeper: ENVIRONMENT_NOTICE },
       delivery: 'queue',
       resume: false,
     });
@@ -866,6 +782,7 @@ export function createAutomationHost(
       }));
 
   const host: AutomationHost = {
+    environments,
     rules: env.rules,
     ref: parseUrl,
     read,
@@ -905,92 +822,12 @@ export function createAutomationHost(
     wait: (sessionID) => ctx.session.wait({ sessionID }, { signal: env.signal }),
     sleep,
     claim: claims,
-    async provision(record, update) {
-      const request = await currentRequest(deps, directory, record.item.url);
-      const ref = parseUrl(record.item.url);
-      if (!ref || !request || request.state !== 'opened')
-        throw new Ineligible('The PR/MR is no longer open');
-      if (!request.headSha || !request.sourceProject || !request.sourceBranch)
-        throw new Ineligible(
-          "The forge didn't report the PR/MR's source branch and head commit, so no worktree can be prepared.",
-        );
-      const source: ExecutionSource = {
-        head: request.headSha,
-        sourceProject: request.sourceProject,
-        sourceBranch: request.sourceBranch,
-      };
-      // Read before the worktree is prepared, so an owner whose permissions
-      // can't be given to the linked session leaves no worktree behind.
-      const owner = await ctx.session.get({ sessionID: record.item.sessionID });
-      const policy = await ownerPolicy(ctx, owner);
-      const model = await modelOf(owner);
-      let stored = await update({ stage: 'provisioning', ownerDirectory: directory, ...source });
-      const placement = await prepareWorktree(
-        worktreeDeps(),
-        worktreeRequest(record.item.url, source),
-        {
-          batch: stored.batch,
-          messageID: stored.messageID!,
-          url: stored.item.url,
-          at: now(),
-        },
-      );
-      stored = await update({
-        directory: placement.directory,
-        detached: placement.detached,
-        ...(placement.remote ? { remote: placement.remote } : {}),
-      });
-      const session = await ctx.session.create({
-        location: { directory: placement.directory },
-        title: `Forgekeeper: ${isJobFailure(stored.item) ? 'investigate' : 'prepare fixes for'} ${stored.item.url}`,
-        ...policy,
-        ...(model ? { model } : {}),
-        metadata: linkedMetadata(owner.id, stored.batch),
-      });
-      await ctx.session.update({
-        sessionID: session.id,
-        metadata: linkedMetadata(owner.id, stored.batch, session.id),
-      });
-      return update({ sessionID: session.id });
-    },
-    async verifyExecution(record) {
-      const { execution } = record;
-      const path = execution.directory;
-      // Listing a location's plugins doesn't start its instance, which starts
-      // with the linked session's prompt. So only the configuration is read
-      // here; the turn's first request decides whether Forgekeeper runs there,
-      // and a turn without a recorded start is a failure.
-      const plugins = await ctx.plugin
-        .list({ location: { directory: path } })
-        .catch(() => undefined);
-      if (
-        plugins &&
-        !plugins.data.some((plugin) => plugin.id === PLUGIN_ID && plugin.state.status === 'active')
-      )
-        throw new Ineligible(
-          `Forgekeeper isn't enabled in ${path}, so the linked session's turn couldn't be checked.`,
-        );
-      const mismatch = await worktreeMismatch(
-        deps.exec,
-        (dir) => deps.forges.repository(dir),
-        path,
-        worktreeRequest(record.item.url, execution),
-      );
-      if (mismatch) throw new Error(mismatch);
-      const refusal = await worktreeAdmission(
-        worktreeDeps(),
-        path,
-        record.item.url,
-        execution.sessionID,
-      );
-      if (refusal) throw new Error(refusal);
-    },
     notify,
     async submit(record, text) {
       await ctx.session.prompt({
-        sessionID: runnerOf(record),
+        sessionID: record.item.sessionID,
         id: record.messageID,
-        text: record.execution ? linkedPlaceholder(record) : text,
+        text,
         metadata: {
           forgekeeper: isJobFailure(record.item) ? 'job-investigate' : 'review-prepare',
           batch: record.batch,
@@ -1118,14 +955,7 @@ export function createAutomationHost(
     // Removes the worktrees Forgekeeper created for PRs/MRs that are over,
     // when nothing in them would be lost. See `sweepWorktrees`.
     async sweep(): Promise<string[]> {
-      if (env.closing() || !(ctx.location as { project?: { id?: string } }).project?.id) return [];
-      return sweepWorktrees({
-        ...worktreeDeps(),
-        request: (url) => currentRequest(deps, directory, url),
-        archive: async (sessionID) => {
-          await ctx.session.update({ sessionID, archived: true });
-        },
-      });
+      return (await Promise.all(environments.providers.map((provider) => provider.sweep()))).flat();
     },
 
     // Puts a linked session's task in place of the placeholder that its
@@ -1140,7 +970,7 @@ export function createAutomationHost(
       const task = (record: AutomationRecord | undefined) =>
         record?.execution?.stage === 'submitting' &&
         record.startedAt !== undefined &&
-        record.execution.sessionID === event.sessionID
+        runnerOf(record) === event.sessionID
           ? record.execution.prompt
           : undefined;
       let restored = false;

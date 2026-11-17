@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { findingsDigest } from './review-preparation';
+import { EnvironmentUncertain } from './automation-environment';
 import {
   ADMISSION_CHECKS,
   allowedModelsFor,
@@ -1208,35 +1210,67 @@ describe('failed-job automation', () => {
 describe('review automation in a worktree', () => {
   const linked = {
     stage: 'submitting' as const,
+    provider: 'fixture',
+    version: 1,
     ownerDirectory: '/repo',
     head: 'abc',
     sourceProject: 'team/project',
     sourceBranch: 'feature',
-    directory: '/worktree',
-    detached: false,
-    sessionID: 'linked',
+    state: { resource: 'box:123', session: 'linked' },
     prompt: 'task',
   };
 
-  function worktreeFixture(overrides: Partial<AutomationHost> = {}) {
+  function worktreeFixture(
+    overrides: Partial<AutomationHost> & {
+      provision?: import('./automation-environment').AutomationEnvironmentProvider['provision'];
+      verifyExecution?: import('./automation-environment').AutomationEnvironmentProvider['verify'];
+    } = {},
+  ) {
     const waited: string[] = [];
     const submitted: AutomationRecord[] = [];
     const notices: Array<[string, AutomationState]> = [];
     const f: ReturnType<typeof fixture> = fixture({
-      validate: async () => ({ placement: 'worktree', rules: [rule] }),
+      validate: async () => ({ placement: 'environment', rules: [rule] }),
       wait: async (sessionID) => void waited.push(sessionID),
-      async provision(record, update) {
-        await update({
-          stage: 'provisioning',
-          ownerDirectory: '/repo',
-          head: 'abc',
-          sourceProject: 'team/project',
-          sourceBranch: 'feature',
-        });
-        await update({ directory: '/worktree', detached: false });
-        return update({ sessionID: 'linked' });
+      environments: {
+        default: 'fixture',
+        providers: [
+          {
+            id: 'fixture',
+            version: 1,
+            recover: async () => {},
+            async provision(_record, update) {
+              await update({
+                stage: 'provisioning',
+                ownerDirectory: '/repo',
+                head: 'abc',
+                sourceProject: 'team/project',
+                sourceBranch: 'feature',
+              });
+              await update({ state: { resource: 'box:123' } });
+              return update({ state: linked.state });
+            },
+            verify: async () => {},
+            submit: (record) => f.host.submit(record, record.execution.prompt),
+            exists: (record) => f.host.exists(record.execution!.state.session as string),
+            wait: (record) => f.host.wait(record.execution!.state.session as string),
+            outcome: (record) =>
+              f.host.outcome({
+                batch: record.batch,
+                messageID: record.messageID!,
+                sessionID: record.item.sessionID,
+              }),
+            matchesSession: (record, sessionID) => record.execution!.state.session === sessionID,
+            startContext: () => {
+              throw new Error('Unused');
+            },
+            describe: async () => [],
+            sweep: async () => [],
+            ...(overrides.provision ? { provision: overrides.provision } : {}),
+            ...(overrides.verifyExecution ? { verify: overrides.verifyExecution } : {}),
+          },
+        ],
       },
-      verifyExecution: async () => {},
       notify: async (record, phase) => void notices.push([phase, record.state]),
       // The worktree's first request records the start of the turn.
       submit: async (record) => {
@@ -1254,11 +1288,10 @@ describe('review automation in a worktree', () => {
     await f.settled();
     expect(f.submitted).toHaveLength(1);
     const [record] = f.submitted;
-    expect(record.checkout).toBe('worktree');
+    expect(record.placement).toBe('environment');
     expect(record.execution).toMatchObject({
       stage: 'submitting',
-      sessionID: 'linked',
-      directory: '/worktree',
+      state: linked.state,
     });
     expect(record.execution?.stage === 'submitting' && record.execution.prompt).toContain(
       'A finding',
@@ -1278,14 +1311,14 @@ describe('review automation in a worktree', () => {
       ...rule,
       authors: ['service-bot'],
       allowedModels: ['gitlab/strong'],
-      checkout: 'worktree' as const,
+      execution: 'environment' as const,
     };
     const other = { ...rule, reviewers: ['alice'], allowedModels: ['gitlab/other'] };
     const read: Array<string[] | undefined> = [];
     const f = worktreeFixture({
       rules: [listing, other],
       validate: async (_item, automatic) => ({
-        placement: 'worktree',
+        placement: 'environment',
         rules: automatic ? [listing] : [listing, other],
       }),
       findings: async (_item, reviewers) => {
@@ -1297,9 +1330,9 @@ describe('review automation in a worktree', () => {
     await f.settled();
     expect(read).toEqual([['gitlabduo'], ['gitlabduo']]);
     expect(f.submitted[0]).toMatchObject({
-      checkout: 'worktree',
+      placement: 'environment',
       models: ['gitlab/strong'],
-      execution: { stage: 'submitting', sessionID: 'linked' },
+      execution: { stage: 'submitting', state: linked.state },
     });
     expect(f.record()).toMatchObject({ state: 'completed' });
   });
@@ -1334,21 +1367,34 @@ describe('review automation in a worktree', () => {
     expect(f.redelivered).toEqual([item.id]);
   });
 
-  test('after a reload, an attempt stored while preparing its worktree ends unsubmitted', async () => {
+  test('uncertain provisioning keeps its claim and never submits a task', async () => {
+    const f = worktreeFixture({
+      provision: async () => {
+        throw new EnvironmentUncertain('Creation cannot be confirmed');
+      },
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(f.record()).toMatchObject({ state: 'failed', reason: 'Creation cannot be confirmed' });
+    expect(f.claim()).toBeDefined();
+    expect(f.submitted).toEqual([]);
+  });
+
+  test('after a reload, provisioning resumes through its recorded provider', async () => {
     const f = worktreeFixture();
     const seeded = await f.seed('running');
     const record: AutomationRecord = {
       ...seeded,
-      checkout: 'worktree',
-      execution: { ...linked, stage: 'provisioning', sessionID: undefined },
+      digest: findingsDigest([finding]),
+      placement: 'environment',
+      execution: { ...linked, stage: 'provisioning', state: {} },
     };
     f.records.set(record.batch, structuredClone(record));
     f.automation.restore([record]);
     await f.settled();
-    expect(f.record()).toMatchObject({ state: 'failed' });
-    expect(f.record().reason).toContain('before the turn was submitted');
+    expect(f.record()).toMatchObject({ state: 'completed' });
     expect(f.claim()).toBeUndefined();
-    expect(f.submitted).toEqual([]);
+    expect(f.submitted).toHaveLength(1);
   });
 
   test('a reload keeps watching the linked session of a submitted attempt', async () => {
@@ -1363,7 +1409,7 @@ describe('review automation in a worktree', () => {
     const record: AutomationRecord = {
       ...seeded,
       startedAt: 50,
-      checkout: 'worktree',
+      placement: 'environment',
       execution: linked,
     };
     f.records.set(record.batch, structuredClone(record));
@@ -1372,6 +1418,94 @@ describe('review automation in a worktree', () => {
     expect(f.waited).toEqual(['linked']);
     expect(f.record()).toMatchObject({ state: 'completed' });
     expect(f.notices).toEqual([['ended', 'completed']]);
+  });
+
+  test('changing the default provider does not redirect a stored attempt', async () => {
+    const f = worktreeFixture();
+    const seeded = await f.seed('running');
+    const record: AutomationRecord = {
+      ...seeded,
+      startedAt: 50,
+      placement: 'environment',
+      execution: linked,
+    };
+    f.records.set(record.batch, record);
+    f.host.environments!.default = 'other';
+    f.automation.restore([record]);
+    await f.settled();
+    expect(f.record().state).toBe('completed');
+    expect(f.waited).toEqual(['linked']);
+    expect(f.submitted).toEqual([]);
+  });
+
+  test('recovery uses the pinned provider and retains unresolved provisioning', async () => {
+    const f = worktreeFixture();
+    const seeded = await f.seed('running');
+    const record: AutomationRecord = {
+      ...seeded,
+      digest: findingsDigest([finding]),
+      placement: 'environment',
+      execution: { ...linked, stage: 'provisioning', state: { resource: 'box:123' } },
+    };
+    f.records.set(record.batch, record);
+    f.host.environments!.default = 'other';
+    f.host.environments!.providers[0].recover = async () => {
+      throw new Error('Provisioning unresolved');
+    };
+    f.automation.restore([record]);
+    await f.settled();
+    expect(f.record()).toMatchObject({ state: 'failed', execution: { provider: 'fixture' } });
+    expect(f.claim()).toBeDefined();
+    expect(f.submitted).toEqual([]);
+  });
+
+  test('an unavailable provider or unsupported state version retains the claim', async () => {
+    for (const execution of [
+      { ...linked, provider: 'missing' },
+      { ...linked, version: 2 },
+    ]) {
+      const f = worktreeFixture();
+      const seeded = await f.seed('running');
+      const record: AutomationRecord = { ...seeded, execution };
+      f.records.set(record.batch, record);
+      f.automation.restore([record]);
+      await f.settled();
+      expect(f.record().state).toBe('failed');
+      expect(f.claim()).toBeDefined();
+      expect(f.submitted).toEqual([]);
+      await expect(f.automation.act(item, true)).rejects.toThrow('provider');
+      expect(f.claim()).toBeDefined();
+    }
+  });
+
+  test('a provider can monitor opaque identities without local session access', async () => {
+    const f = worktreeFixture();
+    const provider = f.host.environments!.providers[0];
+    provider.wait = async (record) => {
+      expect(record.execution!.state).toEqual(linked.state);
+    };
+    provider.exists = async () => true;
+    provider.outcome = async () => 'completed';
+    provider.submit = async (record) => {
+      f.records.set(record.batch, { ...record, startedAt: 100 });
+    };
+    f.host.wait = async () => {
+      throw new Error('Local wait must not run');
+    };
+    f.host.submit = async () => {
+      throw new Error('Local submission must not run');
+    };
+    f.host.outcome = async () => {
+      throw new Error('Local transcript must not be read');
+    };
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(f.record().state).toBe('completed');
+    expect(f.record().execution).toMatchObject({
+      provider: 'fixture',
+      version: 1,
+      state: linked.state,
+    });
   });
 
   test('a linked turn that ended without a recorded start failed, and says why', async () => {
@@ -1397,7 +1531,7 @@ describe('review automation in a worktree', () => {
       outcome: async () => 'running',
     });
     const seeded = await f.seed('running');
-    f.records.set(seeded.batch, { ...seeded, checkout: 'worktree', execution: linked });
+    f.records.set(seeded.batch, { ...seeded, placement: 'environment', execution: linked });
     const other = { ...item, sessionID: 'two' };
     await expect(f.automation.act(other)).rejects.toThrow('still running in its linked session');
     expect(f.record().state).toBe('running');
@@ -1410,7 +1544,7 @@ describe('review automation in a worktree', () => {
       outcome: async () => 'completed',
     });
     const seeded = await f.seed('running');
-    f.records.set(seeded.batch, { ...seeded, checkout: 'worktree', execution: linked });
+    f.records.set(seeded.batch, { ...seeded, placement: 'environment', execution: linked });
     const other = { ...item, sessionID: 'two' };
     await f.automation.act(other, true);
     await f.settled();
@@ -1424,7 +1558,7 @@ describe('review automation in a worktree', () => {
       outcome: async () => 'unknown',
     });
     const seeded = await f.seed('running');
-    f.records.set(seeded.batch, { ...seeded, checkout: 'worktree', execution: linked });
+    f.records.set(seeded.batch, { ...seeded, placement: 'environment', execution: linked });
     const other = { ...item, sessionID: 'two' };
     await expect(f.automation.act(other)).rejects.toThrow('Use explicit retry');
     expect(f.record()).toMatchObject({ state: 'failed', attempt: 1 });
@@ -1441,7 +1575,7 @@ describe('review automation in a worktree', () => {
     f.records.set(seeded.batch, {
       ...seeded,
       startedAt: 50,
-      checkout: 'worktree',
+      placement: 'environment',
       execution: linked,
     });
     await f.automation.turnEnded('one', 'failed', 60);
@@ -1458,11 +1592,15 @@ describe('review automation in a worktree', () => {
     await f.automation.act(item);
     await f.settled();
     expect(f.submitted).toHaveLength(1);
-    expect(f.record()).toMatchObject({ state: 'completed', manual: true, checkout: 'worktree' });
+    expect(f.record()).toMatchObject({
+      state: 'completed',
+      manual: true,
+      placement: 'environment',
+    });
     await f.automation.act(item, true);
     await f.settled();
     expect(f.submitted).toHaveLength(2);
-    expect(f.record()).toMatchObject({ state: 'completed', attempt: 2, checkout: 'worktree' });
+    expect(f.record()).toMatchObject({ state: 'completed', attempt: 2, placement: 'environment' });
   });
 
   test('a manual action in the owning session still waits for it', async () => {
@@ -1472,7 +1610,7 @@ describe('review automation in a worktree', () => {
     await f.settled();
     expect(waited[0]).toBe('one');
     expect(f.record()).toMatchObject({ state: 'completed', manual: true });
-    expect(f.record().checkout).toBeUndefined();
+    expect(f.record().placement).toBeUndefined();
   });
 
   describe('while the worktree is prepared', () => {
@@ -1511,9 +1649,9 @@ describe('review automation in a worktree', () => {
             sourceBranch: 'feature',
           });
           await during('worktree', f);
-          await update({ directory: '/worktree', detached: false });
+          await update({ state: { resource: 'box:123' } });
           await during('session', f);
-          return update({ sessionID: 'linked' });
+          return update({ state: linked.state });
         },
         verifyExecution: async () => void (await during('verification', f)),
       });
@@ -1534,7 +1672,7 @@ describe('review automation in a worktree', () => {
         expect(f.submitted).toHaveLength(1);
         expect(f.submitted[0]).toMatchObject({
           item: { id: 'f2' },
-          execution: { stage: 'submitting', sessionID: 'linked' },
+          execution: { stage: 'submitting', state: linked.state },
         });
         expect(f.records.get(batch)).toMatchObject({ state: 'completed', item: { id: 'f2' } });
       });

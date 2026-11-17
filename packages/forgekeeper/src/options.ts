@@ -56,9 +56,7 @@ export interface LifecycleExecution {
 // trigger in `on`: review feedback, or a failed job.
 export type AutomationRule = ReviewAutomationRule | JobAutomationRule;
 
-// Where a turn runs when the owning session's checkout isn't at the PR/MR's
-// head commit: nowhere (`session`), or in a linked session in a worktree.
-export type CheckoutMode = 'session' | 'worktree';
+export type AutomationExecutionMode = 'session' | 'environment';
 
 // Feedback from the listed reviewers starts a turn that prepares fixes. With
 // `allowedModels`, from the rule or its `allowedModelGroup`, only those
@@ -72,7 +70,7 @@ export interface ReviewAutomationRule {
   authors?: string[];
   action: 'prepare';
   allowedModels?: string[];
-  checkout?: CheckoutMode;
+  execution?: AutomationExecutionMode;
 }
 
 // A pipeline with failed jobs starts a turn that investigates them and
@@ -85,7 +83,7 @@ export interface JobAutomationRule {
   authors?: string[];
   action: 'investigate';
   allowedModels?: string[];
-  checkout?: CheckoutMode;
+  execution?: AutomationExecutionMode;
 }
 
 // Review bot usernames by host, both lowercase.
@@ -122,9 +120,9 @@ const RULE_KEYS = [
   'action',
   'allowedModels',
   'allowedModelGroup',
-  'checkout',
+  'execution',
 ];
-const CHECKOUTS: readonly CheckoutMode[] = ['session', 'worktree'];
+const EXECUTIONS: readonly AutomationExecutionMode[] = ['session', 'environment'];
 const PROJECT = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
@@ -220,12 +218,11 @@ class Reader {
     return null;
   }
 
-  // A rule's checkout mode. Returns null when it's invalid, which drops the
-  // rule, so a typo never lets a turn run outside the owning checkout.
-  checkout(path: string, value: unknown): CheckoutMode | null {
+  execution(path: string, value: unknown): AutomationExecutionMode | null {
     if (value === undefined) return 'session';
-    if (CHECKOUTS.includes(value as CheckoutMode)) return value as CheckoutMode;
-    this.ignore(path, `checkout must be one of ${quoted(CHECKOUTS)}`, 'no rule');
+    if (EXECUTIONS.includes(value as AutomationExecutionMode))
+      return value as AutomationExecutionMode;
+    this.ignore(path, `execution must be one of ${quoted(EXECUTIONS)}`, 'no rule');
     return null;
   }
 
@@ -242,6 +239,14 @@ class Reader {
       const path = `automation.rules[${index}]`;
       if (!isObject(rule) || (rule.on !== 'review' && rule.on !== 'job-failed')) {
         this.ignore(path, 'must set "on" to "review" or "job-failed"', 'no rule');
+        return;
+      }
+      if ('checkout' in rule) {
+        this.ignore(
+          path,
+          'checkout was replaced by execution: "session" or "environment"',
+          'no rule',
+        );
         return;
       }
       const exact =
@@ -264,8 +269,8 @@ class Reader {
         const allowedModels = this.allowedModels(path, rule, groups);
         const authors = this.authors(path, rule);
         if (allowedModels === null || authors === null) return;
-        const checkout = this.checkout(path, rule.checkout);
-        if (checkout === null) return;
+        const execution = this.execution(path, rule.execution);
+        if (execution === null) return;
         rules.push({
           on: 'job-failed',
           host: (rule.host as string).toLowerCase(),
@@ -273,7 +278,7 @@ class Reader {
           ...(authors ? { authors } : {}),
           action: 'investigate',
           ...(allowedModels ? { allowedModels } : {}),
-          ...(checkout === 'worktree' ? { checkout } : {}),
+          ...(execution === 'environment' ? { execution } : {}),
         });
         return;
       }
@@ -293,8 +298,8 @@ class Reader {
       const allowedModels = this.allowedModels(path, rule, groups);
       const authors = this.authors(path, rule);
       if (allowedModels === null || authors === null) return;
-      const checkout = this.checkout(path, rule.checkout);
-      if (checkout === null) return;
+      const execution = this.execution(path, rule.execution);
+      if (execution === null) return;
       rules.push({
         on: 'review',
         host: (rule.host as string).toLowerCase(),
@@ -303,7 +308,7 @@ class Reader {
         ...(authors ? { authors } : {}),
         action: 'prepare',
         ...(allowedModels ? { allowedModels } : {}),
-        ...(checkout === 'worktree' ? { checkout } : {}),
+        ...(execution === 'environment' ? { execution } : {}),
       });
     });
     return { rules };
