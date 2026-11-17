@@ -206,8 +206,9 @@ export interface AutomationHost {
   model: (sessionID: string) => Promise<string | undefined>;
   // Rejects with `Ineligible` when the batch can't run here. Automatic runs
   // also need the PR/MR to be the signed-in user's own, or for failed jobs,
-  // one they review.
-  validate: (item: FeedbackItem, automatic: boolean) => Promise<void>;
+  // one they review, or else a matching rule that lists its author. Returns
+  // the rules that apply to the PR/MR's author: for a manual run, all of them.
+  validate: (item: FeedbackItem, automatic: boolean) => Promise<readonly AutomationRule[]>;
   // Delivers the item as if automation hadn't selected it, such as with a summary.
   redeliver: (item: FeedbackItem) => void;
   wait: (sessionID: string) => Promise<void>;
@@ -267,24 +268,29 @@ export function createReviewAutomation(host: AutomationHost) {
     return !!ref && investigatesJobs(host.rules, ref);
   };
 
-  // An automatic run reads only the rules' reviewers' findings. A manual one
-  // reads everyone's, tagging the reviewers whose rules restrict models.
-  const readFindings = (item: FeedbackItem, manual: boolean) => {
-    if (!manual) return host.findings(item, ruleReviewers(item));
+  // An automatic run reads only the findings of the reviewers of `rules`,
+  // the rules that apply to the PR/MR's author. A manual one reads everyone's,
+  // tagging the reviewers whose rules restrict models.
+  const readFindings = (item: FeedbackItem, manual: boolean, rules: readonly AutomationRule[]) => {
     const ref = host.ref(item.url);
+    if (!manual) return host.findings(item, ref ? automationReviewers(rules, ref) : []);
     const tagged = ref ? restrictedReviewers(host.rules, ref) : [];
     return host.findings(item, undefined, tagged.length ? tagged : undefined);
   };
 
   // Rejects with `Ineligible` when the session's model may not act on the
-  // findings, or investigate the update's failed jobs.
-  async function assertAllowedModel(item: FeedbackItem, findings: readonly ReviewFinding[] = []) {
+  // findings, or investigate the update's failed jobs, under `rules`.
+  async function assertAllowedModel(
+    item: FeedbackItem,
+    rules: readonly AutomationRule[],
+    findings: readonly ReviewFinding[] = [],
+  ) {
     const ref = host.ref(item.url);
     const allowed =
       ref &&
       (isJobFailure(item)
-        ? investigationModels(host.rules, ref)
-        : allowedModelsFor(host.rules, ref, findings));
+        ? investigationModels(rules, ref)
+        : allowedModelsFor(rules, ref, findings));
     if (!allowed) return;
     const refusal = modelRefusal(allowed, await host.model(item.sessionID), 'act');
     if (refusal) throw new Ineligible(refusal);
@@ -429,25 +435,25 @@ export function createReviewAutomation(host: AutomationHost) {
     if (conflict) return { skip: conflict };
     if (!record.manual && !ruleCovers(record.item))
       return { skip: 'No automation rule matches this project now.' };
+    const rules = await host.validate(record.item, !record.manual);
     let prepared: PreparedExecution;
     if (isJobFailure(record.item)) {
       const failures = await host.failures(record.item);
-      await assertAllowedModel(record.item);
+      await assertAllowedModel(record.item, rules);
       prepared = {
         digest: failuresDigest(failures.jobs),
         text: investigationPrompt(record.item.url, failures),
       };
     } else {
-      const findings = await readFindings(record.item, !!record.manual);
+      const findings = await readFindings(record.item, !!record.manual, rules);
       if (!findings.length)
         return { skip: 'No current unresolved findings from authorized reviewers.' };
-      await assertAllowedModel(record.item, findings);
+      await assertAllowedModel(record.item, rules, findings);
       prepared = {
         digest: findingsDigest(findings),
         text: preparationPrompt(record.item.url, findings),
       };
     }
-    await host.validate(record.item, !record.manual);
     await assertPendingInboxItem(record.item);
     return prepared;
   }
@@ -690,22 +696,26 @@ export function createReviewAutomation(host: AutomationHost) {
           await startAttempt(item, undefined, { manual: false, skip: conflict });
           return false;
         }
+        // Checked before queuing, so a batch that can't run here, such as
+        // someone else's PR/MR, or one the session's model may not act on,
+        // gets its normal delivery right away. The rules that apply to the
+        // PR/MR's author decide whose findings count.
+        let rules: readonly AutomationRule[];
+        try {
+          rules = await host.validate(item, true);
+          if (isJobFailure(item)) await assertAllowedModel(item, rules);
+        } catch (error) {
+          if (!(error instanceof Ineligible)) throw error;
+          await startAttempt(item, undefined, { manual: false, skip: error.message });
+          return false;
+        }
         if (isJobFailure(item)) {
-          // Checked before queuing, like review batches below. The failed
-          // jobs are read once the pipeline goes quiet.
-          try {
-            await assertAllowedModel(item);
-            await host.validate(item, true);
-          } catch (error) {
-            if (!(error instanceof Ineligible)) throw error;
-            await startAttempt(item, undefined, { manual: false, skip: error.message });
-            return false;
-          }
+          // The failed jobs are read once the pipeline goes quiet.
           const record = await startAttempt(item, undefined, { manual: false });
           if (record) resume(record);
           return true;
         }
-        const findings = await readFindings(item, false);
+        const findings = await readFindings(item, false, rules);
         if (!findings.length) {
           await startAttempt(item, undefined, {
             manual: false,
@@ -713,12 +723,8 @@ export function createReviewAutomation(host: AutomationHost) {
           });
           return false;
         }
-        // Checked before queuing, so a batch that can't run here, such as
-        // someone else's PR/MR, or one the session's model may not act on,
-        // gets its normal delivery right away.
         try {
-          await assertAllowedModel(item, findings);
-          await host.validate(item, true);
+          await assertAllowedModel(item, rules, findings);
         } catch (error) {
           if (!(error instanceof Ineligible)) throw error;
           await startAttempt(item, undefined, { manual: false, skip: error.message });

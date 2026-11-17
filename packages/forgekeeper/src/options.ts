@@ -58,23 +58,26 @@ export type AutomationRule = ReviewAutomationRule | JobAutomationRule;
 
 // Feedback from the listed reviewers starts a turn that prepares fixes. With
 // `allowedModels`, from the rule or its `allowedModelGroup`, only those
-// models, as `provider/model`, may act on that feedback.
+// models, as `provider/model`, may act on that feedback. `authors` names
+// exact usernames whose PRs/MRs the rule also covers, besides your own.
 export interface ReviewAutomationRule {
   on: 'review';
   host: string;
   projects: string[];
   reviewers: string[];
+  authors?: string[];
   action: 'prepare';
   allowedModels?: string[];
 }
 
 // A pipeline with failed jobs starts a turn that investigates them and
-// recommends fixes, without changing anything. `allowedModels` works as for
-// review rules.
+// recommends fixes, without changing anything. `allowedModels` and `authors`
+// work as for review rules.
 export interface JobAutomationRule {
   on: 'job-failed';
   host: string;
   projects: string[];
+  authors?: string[];
   action: 'investigate';
   allowedModels?: string[];
 }
@@ -102,9 +105,18 @@ const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
 
 const HOST = /^[a-z0-9.-]+(:\d+)?$/;
 const USERNAME = /^[a-z0-9_.[\]-]+$/;
+const ACCOUNT = /^[a-zA-Z0-9_.[\]-]+$/;
 const MODEL = /^[^/\s]+\/\S+$/;
 const GROUP = /^[a-zA-Z0-9_-]+$/;
-const RULE_KEYS = ['on', 'host', 'projects', 'action', 'allowedModels', 'allowedModelGroup'];
+const RULE_KEYS = [
+  'on',
+  'host',
+  'projects',
+  'authors',
+  'action',
+  'allowedModels',
+  'allowedModelGroup',
+];
 const PROJECT = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
@@ -190,6 +202,16 @@ class Reader {
     return null;
   }
 
+  // A rule's extra authors, lowercase, or undefined for none. Returns null
+  // when they're invalid, which drops the rule, so a mistake never widens it.
+  authors(path: string, rule: Source): string[] | undefined | null {
+    if (rule.authors === undefined) return undefined;
+    if (exactList(rule.authors, ACCOUNT))
+      return [...new Set(rule.authors.map((name) => name.toLowerCase()))];
+    this.ignore(path, 'authors must be a nonempty list of exact usernames', 'no rule');
+    return null;
+  }
+
   automation(value: unknown): { rules: AutomationRule[] } {
     const source = this.object('automation', value, ['rules', 'modelGroups']);
     const groups = this.modelGroups(source.modelGroups);
@@ -223,11 +245,13 @@ class Reader {
           return;
         }
         const allowedModels = this.allowedModels(path, rule, groups);
-        if (allowedModels === null) return;
+        const authors = this.authors(path, rule);
+        if (allowedModels === null || authors === null) return;
         rules.push({
           on: 'job-failed',
           host: (rule.host as string).toLowerCase(),
           projects: [...new Set(rule.projects as string[])],
+          ...(authors ? { authors } : {}),
           action: 'investigate',
           ...(allowedModels ? { allowedModels } : {}),
         });
@@ -236,7 +260,7 @@ class Reader {
       if (
         Object.keys(rule).some((key) => ![...RULE_KEYS, 'reviewers'].includes(key)) ||
         !exact ||
-        !exactList(rule.reviewers, /^[a-zA-Z0-9_.[\]-]+$/) ||
+        !exactList(rule.reviewers, ACCOUNT) ||
         rule.action !== 'prepare'
       ) {
         this.ignore(
@@ -247,12 +271,14 @@ class Reader {
         return;
       }
       const allowedModels = this.allowedModels(path, rule, groups);
-      if (allowedModels === null) return;
+      const authors = this.authors(path, rule);
+      if (allowedModels === null || authors === null) return;
       rules.push({
         on: 'review',
         host: (rule.host as string).toLowerCase(),
         projects: [...new Set(rule.projects as string[])],
         reviewers: [...new Set(rule.reviewers.map((name) => name.toLowerCase()))],
+        ...(authors ? { authors } : {}),
         action: 'prepare',
         ...(allowedModels ? { allowedModels } : {}),
       });

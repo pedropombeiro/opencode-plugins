@@ -105,7 +105,7 @@ function fixture(overrides: Partial<AutomationHost> = {}) {
     }),
     pipelineDone: async () => false,
     model: async () => 'gitlab/strong',
-    validate: async () => {},
+    validate: async () => host.rules,
     redeliver: (entry) => void redelivered.push(entry.id),
     wait: async () => {},
     sleep: async () => {},
@@ -695,6 +695,7 @@ describe('review automation', () => {
       validate: async (_item, automatic) => {
         validations.push(automatic);
         if (automatic) throw new Ineligible('You did not write this PR/MR');
+        return [rule];
       },
     });
     expect(await f.automation.selectAutomatic(item)).toBe(false);
@@ -799,6 +800,37 @@ describe('review automation', () => {
     expect(f.redelivered).toEqual([item.id]);
   });
 
+  test("restricts models by the rules that cover the PR/MR's author, not the others", async () => {
+    const listing = { ...rule, authors: ['service-bot'], allowedModels: ['gitlab/other'] };
+    const f = fixture({
+      rules: [listing, rule],
+      validate: async (_item, automatic) => (automatic ? [listing] : [listing, rule]),
+      findings: async () => [{ ...finding, reviewer: 'gitlabduo' }],
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(false);
+    expect(f.record()).toMatchObject({ state: 'skipped' });
+    expect(f.record().reason).toContain('needs one of these models: gitlab/other');
+    expect(f.submits()).toBe(0);
+  });
+
+  test("reads findings from the reviewers of the rules that cover the PR/MR's author", async () => {
+    const listing = { ...rule, authors: ['service-bot'] };
+    const other = { ...rule, reviewers: ['alice'], allowedModels: ['gitlab/other'] };
+    const read: Array<string[] | undefined> = [];
+    const f = fixture({
+      rules: [listing, other],
+      validate: async (_item, automatic) => (automatic ? [listing] : [listing, other]),
+      findings: async (_item, reviewers) => {
+        read.push(reviewers);
+        return [{ ...finding, reviewer: 'gitlabduo' }];
+      },
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(read).toEqual([['gitlabduo'], ['gitlabduo']]);
+    expect(f.record()).toMatchObject({ state: 'completed' });
+  });
+
   test('a check that fails to run before queuing is retried, not skipped', async () => {
     const f = fixture({
       validate: async () => {
@@ -816,6 +848,7 @@ describe('review automation', () => {
       wait: () => gate.promise,
       validate: async () => {
         if (!eligible) throw new Ineligible('The checkout does not match');
+        return [rule];
       },
     });
     expect(await f.automation.selectAutomatic(item)).toBe(true);
@@ -1110,6 +1143,18 @@ describe('failed-job automation', () => {
 
   test('refuses a model the rule does not allow', async () => {
     const f = jobFixture({ rules: [{ ...jobRule, allowedModels: ['gitlab/other'] }] });
+    const first = failure('f1', 1_000);
+    f.setItems([first]);
+    expect(await f.automation.selectAutomatic(first)).toBe(false);
+    expect(f.records.get(automationBatch(first))?.reason).toContain('gitlab/other');
+  });
+
+  test("restricts models by the job rules that cover the PR/MR's author", async () => {
+    const listing = { ...jobRule, authors: ['service-bot'], allowedModels: ['gitlab/other'] };
+    const f = jobFixture({
+      rules: [listing, jobRule],
+      validate: async () => [listing],
+    });
     const first = failure('f1', 1_000);
     f.setItems([first]);
     expect(await f.automation.selectAutomatic(first)).toBe(false);

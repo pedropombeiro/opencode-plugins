@@ -5,10 +5,11 @@ import {
   readVerifiedFindings,
   type AutomationDependencies,
 } from './review-automation-host';
-import type { AutomationRecord } from './review-automation';
+import type { AutomationRule } from './options';
+import { automationReviewers, type AutomationRecord } from './review-automation';
 import { createReviewClaims } from './review-claim';
 import { INVESTIGATION_QUIET_TIME } from './job-investigation';
-import { preparationMessageID } from './review-preparation';
+import { findingsDigest, preparationMessageID } from './review-preparation';
 
 type Message = Awaited<ReturnType<Plugin.Context['session']['context']>>[number];
 const batch = 'a'.repeat(64);
@@ -331,8 +332,23 @@ describe('failed-job checks', () => {
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
       sessions?: () => string[];
+      rules?: AutomationRule[];
+      accounts?: Record<string, string | Error>;
+      warn?: (message: string) => void;
+      // The author ID of the one review comment that feedback reads return.
+      commenter?: string;
     } = {},
   ) {
+    const comment = overrides.commenter && {
+      id: '1',
+      order: 1,
+      url: `${url}#note_1`,
+      editedAt: 0,
+      resolved: false,
+      bot: false,
+      authorID: overrides.commenter,
+      username: overrides.commenter,
+    };
     const request = {
       forge: 'gitlab',
       url,
@@ -363,6 +379,15 @@ describe('failed-job checks', () => {
         }),
       },
       viewerID: async () => overrides.viewer ?? 'author',
+      reviewerID: async (_ref: unknown, name: string) => {
+        const account = overrides.accounts?.[name];
+        if (account instanceof Error) throw account;
+        return account;
+      },
+      details: async () =>
+        comment
+          ? [{ id: '1', url: comment.url, username: 'x', authorID: comment.authorID, body: 'Fix' }]
+          : [],
       ...(overrides.now ? { now: overrides.now } : {}),
     } as unknown as AutomationDependencies;
     const ctx = {
@@ -380,14 +405,15 @@ describe('failed-job checks', () => {
       ctx,
       { ...deps, reviewClaims: claims },
       {
-        rules: [],
+        rules: overrides.rules ?? [],
         closing: () => false,
         inbox: {
           list: async () => ({ items: [failure, review], paused: false }),
           automation: async () => {},
         },
         deliverable: async () => true,
-        readFeedback: async () => undefined,
+        readFeedback: async () =>
+          comment ? ({ complete: true, comments: [comment] } as never) : undefined,
         scan: async () =>
           (overrides.sessions?.() ?? ['one']).map((id) => ({
             key: `sessions/${id}`,
@@ -396,6 +422,7 @@ describe('failed-job checks', () => {
         missingSession: () => false,
         redeliver: () => {},
         report: () => {},
+        ...(overrides.warn ? { warn: overrides.warn } : {}),
         signal: new AbortController().signal,
         ...(overrides.sleep ? { sleep: overrides.sleep } : {}),
       },
@@ -420,6 +447,152 @@ describe('failed-job checks', () => {
     const reviewer = jobHost({ viewer: 'reviewer' });
     await expect(reviewer.host.validate(review, true)).rejects.toThrow('You did not write');
     reviewer.close();
+  });
+
+  describe('rule authors', () => {
+    const ref = {
+      forge: 'gitlab' as const,
+      host: 'gitlab.com',
+      project: 'group/project',
+      iid: '1',
+    };
+    const reviewRule = (reviewers: string[], authors?: string[]): AutomationRule => ({
+      on: 'review',
+      host: 'gitlab.com',
+      projects: ['group/project'],
+      reviewers,
+      action: 'prepare',
+      ...(authors ? { authors } : {}),
+    });
+    const jobRule = (authors?: string[]): AutomationRule => ({
+      on: 'job-failed',
+      host: 'gitlab.com',
+      projects: ['group/project'],
+      action: 'investigate',
+      ...(authors ? { authors } : {}),
+    });
+    const serviceHost = (rules: AutomationRule[], extra: Parameters<typeof jobHost>[0] = {}) => {
+      const f = jobHost({ viewer: 'me', rules, accounts: { 'service-bot': 'svc' }, ...extra });
+      f.request.authorID = 'svc';
+      return f;
+    };
+
+    test("cover a listed author's PR/MR for review rules, matching by account ID", async () => {
+      const covered = serviceHost([reviewRule(['gitlabduo'], ['service-bot'])]);
+      expect(await covered.host.validate(review, true)).toEqual(covered.host.rules);
+      covered.close();
+      const unlisted = serviceHost([reviewRule(['gitlabduo'])]);
+      await expect(unlisted.host.validate(review, true)).rejects.toThrow(
+        'You did not write this PR/MR, and no automation rule lists its author',
+      );
+      unlisted.close();
+      // The username alone doesn't count: its account must be the author.
+      const impostor = serviceHost([reviewRule(['gitlabduo'], ['service-bot'])], {
+        accounts: { 'service-bot': 'someone-else' },
+      });
+      await expect(impostor.host.validate(review, true)).rejects.toThrow('You did not write');
+      impostor.close();
+    });
+
+    test("cover a listed author's PR/MR for job-failed rules", async () => {
+      const covered = serviceHost([jobRule(['service-bot'])]);
+      expect(await covered.host.validate(failure, true)).toEqual(covered.host.rules);
+      covered.close();
+      const unlisted = serviceHost([jobRule()]);
+      await expect(unlisted.host.validate(failure, true)).rejects.toThrow(
+        'You neither wrote nor review this PR/MR, and no automation rule lists its author',
+      );
+      unlisted.close();
+    });
+
+    test('only rules that list the author apply to it, so only their reviewers count', async () => {
+      const listing = reviewRule(['gitlabduo'], ['service-bot']);
+      const other = reviewRule(['alice']);
+      const job = jobRule();
+      const elsewhere = { ...reviewRule(['bob']), projects: ['group/other'] };
+      const f = serviceHost([listing, other, job, elsewhere]);
+      const rules = await f.host.validate(review, true);
+      expect(rules).toEqual([listing, job, elsewhere]);
+      expect(automationReviewers(rules, ref)).toEqual(['gitlabduo']);
+      // A job rule without authors doesn't cover the service account's MR.
+      await expect(f.host.validate(failure, true)).rejects.toThrow('no automation rule');
+      f.close();
+      // Your own PR/MR keeps every rule.
+      const own = jobHost({ rules: [listing, other, job] });
+      expect(await own.host.validate(review, true)).toEqual([listing, other, job]);
+      own.close();
+    });
+
+    test('ignore an author that does not resolve, reporting it once', async () => {
+      const warnings: string[] = [];
+      const f = serviceHost([reviewRule(['gitlabduo'], ['ghost', 'broken', 'service-bot'])], {
+        accounts: { 'service-bot': 'svc', broken: new Error('GitLab is unavailable') },
+        warn: (message) => void warnings.push(message),
+      });
+      await f.host.validate(review, true);
+      await f.host.validate(review, true);
+      expect(warnings.sort()).toEqual([
+        'Forgekeeper ignores automation author @broken on gitlab.com: GitLab is unavailable',
+        'Forgekeeper ignores automation author @ghost on gitlab.com: the forge has no such account',
+      ]);
+      f.close();
+      const unresolved = serviceHost([reviewRule(['gitlabduo'], ['ghost'])], {
+        warn: (message) => void warnings.push(message),
+      });
+      await expect(unresolved.host.validate(review, true)).rejects.toThrow('You did not write');
+      unresolved.close();
+    });
+
+    test("the first model request allows only the author's rules' models", async () => {
+      const at = 1_000_000;
+      const started = (batch: string, entry: typeof review, digest?: string) => ({
+        batch,
+        item: { ...entry, at: at - INVESTIGATION_QUIET_TIME },
+        messageID: preparationMessageID(batch, 1),
+        state: 'running' as const,
+        attempt: 1,
+        at,
+        ...(digest ? { digest } : {}),
+      });
+      const strict = ['gitlab/strong'];
+      const job = serviceHost([{ ...jobRule(['service-bot']), allowedModels: strict }, jobRule()], {
+        now: () => at,
+      });
+      const investigation = started('e'.repeat(64), failure);
+      await job.claims.records.save(investigation);
+      await expect(job.automation.authorizeStart(investigation, 'gitlab/any')).rejects.toThrow(
+        'needs one of these models: gitlab/strong',
+      );
+      await job.automation.authorizeStart(investigation, 'gitlab/strong');
+      job.close();
+
+      const entry = { ...review, commentIDs: ['1'] };
+      const prep = serviceHost(
+        [
+          { ...reviewRule(['gitlabduo'], ['service-bot']), allowedModels: strict },
+          reviewRule(['gitlabduo']),
+        ],
+        { accounts: { 'service-bot': 'svc', gitlabduo: 'duo' }, commenter: 'duo' },
+      );
+      const findings = [
+        { id: '1', url: `${url}#note_1`, username: 'x', authorID: 'duo', body: 'Fix' },
+      ];
+      const preparation = started('f'.repeat(64), entry, findingsDigest(findings));
+      await prep.claims.records.save(preparation);
+      await expect(prep.automation.authorizeStart(preparation, 'gitlab/any')).rejects.toThrow(
+        'needs one of these models: gitlab/strong',
+      );
+      await prep.automation.authorizeStart(preparation, 'gitlab/strong');
+      prep.close();
+    });
+
+    test('leave a manual action unchanged', async () => {
+      const rules = [reviewRule(['gitlabduo']), jobRule()];
+      const f = serviceHost(rules);
+      expect(await f.host.validate(review, false)).toEqual(rules);
+      expect(await f.host.validate(failure, false)).toEqual(rules);
+      f.close();
+    });
   });
 
   test('skips a checkout that is not at the failing pipeline commit, naming it', async () => {

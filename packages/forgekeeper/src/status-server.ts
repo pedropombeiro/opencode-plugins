@@ -313,6 +313,7 @@ export async function setupStatus(
     redeliver: () => void notifyPending(),
     report: (error) =>
       reportOnce('review-automation', 'Could not coordinate review automation', error),
+    warn: (message) => notice({ message, variant: 'error' }),
     signal: automationController.signal,
   });
   const automation = createReviewAutomation(automationHost.host);
