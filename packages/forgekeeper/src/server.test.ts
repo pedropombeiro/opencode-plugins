@@ -82,7 +82,12 @@ interface Options {
   // Shared with another instance, such as one for another checkout.
   sessions?: Map<
     string,
-    { title: string; location: { directory: string }; parentID: string | undefined }
+    {
+      title: string;
+      location: { directory: string };
+      parentID: string | undefined;
+      fork?: { sessionID: string };
+    }
   >;
   // The instance's checkout. Defaults to /repo.
   directory?: string;
@@ -172,6 +177,7 @@ const defaultSessions = () =>
         title: '[#123, !45] Review changes',
         location: { directory: '/repo' },
         parentID: undefined as string | undefined,
+        fork: undefined as { sessionID: string } | undefined,
       },
     ],
     [
@@ -1139,6 +1145,74 @@ describe('session targets', () => {
     await second.set({ target: nextMr });
     expect(second.renames()).toBe(1);
     await second.cleanup();
+  });
+
+  describe('forked sessions', () => {
+    // Forks of 'one' that copied its title, like OpenCode does.
+    const forked = () => {
+      const sessions = defaultSessions();
+      sessions.set('fork', {
+        title: '[!456] Review changes (fork #1)',
+        location: { directory: '/repo' },
+        parentID: undefined,
+        fork: { sessionID: 'one' },
+      });
+      sessions.set('nested', {
+        title: '[!456] Review changes (fork #1) (fork #1)',
+        location: { directory: '/repo' },
+        parentID: undefined,
+        fork: { sessionID: 'fork' },
+      });
+      return sessions;
+    };
+
+    test('inherits the source session targets and owned prefix', async () => {
+      const app = await harness({ sessions: forked() });
+      await app.set({ target: mr });
+      expect(await app.context('fork')).toContain(mr);
+      expect(await app.target('fork')).toEqual(await app.target());
+      app.emit({ type: 'session.renamed', data: { sessionID: 'fork' } });
+      await settle();
+      expect(app.sessions.get('fork')?.title).toBe('[!456] Review changes (fork #1)');
+      expect(app.storage.get('sessions/fork')).toEqual(app.storage.get('sessions/one'));
+      await app.cleanup();
+    });
+
+    test('inherits through a fork of a fork', async () => {
+      const app = await harness({ sessions: forked() });
+      await app.set({ target: mr });
+      expect(await app.context('nested')).toContain(mr);
+      await app.cleanup();
+    });
+
+    test('keeps its own targets once it has set them', async () => {
+      const app = await harness({ sessions: forked() });
+      await app.set({ target: mr });
+      await app.set({ target: nextMr }, 'fork');
+      expect(app.sessions.get('fork')?.title).toBe('[!789] Review changes (fork #1)');
+      expect(await app.context('fork')).toContain(nextMr);
+      expect(await app.context('fork')).not.toContain(mr);
+      expect(await app.context()).toContain(mr);
+      await app.cleanup();
+    });
+
+    test('keeps the inherited targets when the source changes later', async () => {
+      const app = await harness({ sessions: forked() });
+      await app.set({ target: mr });
+      app.emit({ type: 'session.renamed', data: { sessionID: 'fork' } });
+      await settle();
+      await app.set({ target: nextMr });
+      expect(await app.context('fork')).toContain(mr);
+      expect(await app.context('fork')).not.toContain(nextMr);
+      await app.cleanup();
+    });
+
+    test('leaves sessions that are not forks on the checked-out branch', async () => {
+      const app = await harness({ sessions: forked() });
+      await app.set({ target: mr });
+      expect(await app.context('two')).toContain('checked-out branch (automatic)');
+      await app.cleanup();
+    });
   });
 
   test('reset removes the prefix on main and restores automatic context', async () => {

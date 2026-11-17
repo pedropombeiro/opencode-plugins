@@ -51,6 +51,8 @@ type StoredState = { targets?: Target[]; prefix?: string };
 type SessionState = { targets: Target[]; prefix?: string };
 
 const TARGET_KEY = 'forgekeeper-session-target';
+// How many forks back a session without targets looks for inherited ones.
+const MAX_FORK_DEPTH = 5;
 
 const GUIDANCE = [
   'When the user establishes or changes the primary issue, PR, or MR for this session, call set_session_target with its full URL before starting that work.',
@@ -123,9 +125,38 @@ export async function setupServer(
   const revision = (sessionID: string) => revisions.get(sessionID) ?? 0;
   const bump = (sessionID: string) => revisions.set(sessionID, revision(sessionID) + 1);
 
+  // The session each session was forked from, or null. Fork metadata never
+  // changes, so one read per session is enough.
+  const forkSources = new Map<string, string | null>();
+  const forkSource = async (sessionID: string) => {
+    if (forkSources.has(sessionID)) return forkSources.get(sessionID);
+    try {
+      const session = await ctx.session.get({ sessionID });
+      const source = session?.fork?.sessionID ?? null;
+      forkSources.set(sessionID, source);
+      return source;
+    } catch {
+      return null;
+    }
+  };
+
+  // A fork without a record of its own reads the nearest ancestor's record.
+  // Its next update saves that state as its own, inside the keyed queue, so
+  // nothing here can overwrite a concurrent target change.
+  const storedState = async (sessionID: string): Promise<StoredState> => {
+    let current = sessionID;
+    for (let depth = 0; depth <= MAX_FORK_DEPTH; depth++) {
+      const stored = (await ctx.storage.get(`sessions/${current}`)) as StoredState | undefined;
+      if (stored) return stored;
+      const source = await forkSource(current);
+      if (!source) break;
+      current = source;
+    }
+    return {};
+  };
+
   const readState = async (sessionID: string) => {
-    const stored =
-      ((await ctx.storage.get(`sessions/${sessionID}`)) as StoredState | undefined) ?? {};
+    const stored = await storedState(sessionID);
     return {
       targets: Array.isArray(stored.targets) ? stored.targets : [],
       ...(stored.prefix ? { prefix: stored.prefix } : {}),
