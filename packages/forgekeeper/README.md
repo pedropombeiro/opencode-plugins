@@ -58,11 +58,11 @@ For example, this footer tracks four MRs, with one conflict and two already merg
 
 ![Forgekeeper status dialog within an OpenCode session, showing pipeline results, unresolved threads, conflicts, and review requirements.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/review-and-ci-status.png)
 
-| Command | Action |
-| --- | --- |
-| `/forge-status` | Show detailed status and refresh it. Aliases: `/mr-status`, `/pr-status`. |
-| `/forge-open` | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`. |
-| `/forge-feedback` | Browse pending review feedback and PR/MR updates. |
+| Command           | Action                                                                    |
+| ----------------- | ------------------------------------------------------------------------- |
+| `/forge-status`   | Show detailed status and refresh it. Aliases: `/mr-status`, `/pr-status`. |
+| `/forge-open`     | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`.          |
+| `/forge-feedback` | Browse pending review feedback and PR/MR updates.                         |
 
 In OpenCode Desktop, a pill above the composer shows the same status, and the commands
 above open side panels for the status and the inbox. Server notices appear as toasts and
@@ -77,10 +77,10 @@ Conflicts appear in both the composer pill and the status panel:
 The OpenCode web app loads neither the terminal nor the desktop part, but it offers two
 commands that answer in the conversation:
 
-| Command | Action |
-| --- | --- |
-| `/forge-report` | Show the PR/MR status of the session. |
-| `/forge-inbox` | List the session's pending updates. `ack <number>` or `ack all` acknowledges them, and `summarize <number>` summarizes one. |
+| Command         | Action                                                                                                                      |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `/forge-report` | Show the PR/MR status of the session.                                                                                       |
+| `/forge-inbox`  | List the session's pending updates. `ack <number>` or `ack all` acknowledges them, and `summarize <number>` summarizes one. |
 
 Each answer is a short tool-free model turn that shows a report written from forge data.
 Those apps don't display the text of messages that plugins add, so the model shows it.
@@ -152,11 +152,12 @@ checkout at the head commit the pipeline tested. See
 [Investigate failed jobs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#investigate-failed-jobs).
 
 A session that tracks several PRs/MRs is on at most one of their branches. With
-`"checkout": "worktree"` on a rule, a batch whose checkout is elsewhere runs in a linked session,
-in a worktree at the PR/MR's head commit, and the owning session gets a notice with its path.
+`"execution": "environment"` on a rule, a batch whose checkout is elsewhere runs through the
+environment provider. The current local provider runs a linked session in a worktree at the
+PR/MR's head commit, and the owning session gets a notice with its path.
 Forgekeeper removes the worktrees it created once their PR/MR is over and nothing in them would
 be lost. See
-[Run automation in a worktree](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#run-automation-in-a-worktree).
+[Run automation in an execution environment](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#run-automation-in-an-execution-environment).
 
 See [review detection and summaries](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications),
 [review requests](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-requests),
@@ -169,23 +170,23 @@ See [review detection and summaries](https://github.com/pedropombeiro/opencode-p
 Set options in the object form of the plugin entry in `opencode.json`, as in the example above.
 Only specify values you want to change. The terminal part has no separate options.
 
-| Option | Default | Purpose |
-| --- | --- | --- |
-| `status` | `true` | Set to `false` to keep only session targets and titles, without polling or notifications. |
-| `hosts` | `["gitlab.com"]` | Additional recognized GitLab hosts, besides hosts named `gitlab.*`. |
-| `githubHosts` | `["github.com"]` | Recognized GitHub hosts, including Enterprise. |
-| `pollSeconds` | `120` | Normal status polling interval. |
-| `watch.humanReviews` | `true` | Monitor human review feedback. |
-| `watch.automatedReviews` | `true` | Monitor GitLab Duo and GitHub Copilot review feedback. |
-| `watch.reviewBots` | `true` | Monitor configured review-bot accounts. |
-| `watch.lifecycle` | `true` | Monitor conflicts, failed jobs, and merges. |
-| `watch.reviewRequests` | `true` | Monitor requests for your review on GitLab MRs, including repeated ones. |
-| `reviewBots` | GitLab.com security reviewers | Exact bot usernames by host. Your list replaces the defaults. |
-| `delivery.reviews` | `"inbox"` | Review delivery: `inbox`, `passive`, or `summary`. |
-| `delivery.lifecycle` | `"inbox"` | Conflict, job-failure, and merge delivery. |
-| `lifecycleExecution.parentMerged` | `{ "mode": "notify" }` | Optionally prepare retarget proposals for tracked dependents. |
-| `automation.rules` | No rules | Reviewers whose feedback starts a coding turn that prepares fixes, or projects whose failed jobs start an investigation, optionally limited to allowed models, and optionally run in a worktree with `"checkout": "worktree"`. |
-| `automation.modelGroups` | No groups | Named lists of `provider/model` IDs that rules reference in `allowedModelGroup`. |
+| Option                            | Default                       | Purpose                                                                                                                                                                                                                                                                               |
+| --------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                          | `true`                        | Set to `false` to keep only session targets and titles, without polling or notifications.                                                                                                                                                                                             |
+| `hosts`                           | `["gitlab.com"]`              | Additional recognized GitLab hosts, besides hosts named `gitlab.*`.                                                                                                                                                                                                                   |
+| `githubHosts`                     | `["github.com"]`              | Recognized GitHub hosts, including Enterprise.                                                                                                                                                                                                                                        |
+| `pollSeconds`                     | `120`                         | Normal status polling interval.                                                                                                                                                                                                                                                       |
+| `watch.humanReviews`              | `true`                        | Monitor human review feedback.                                                                                                                                                                                                                                                        |
+| `watch.automatedReviews`          | `true`                        | Monitor GitLab Duo and GitHub Copilot review feedback.                                                                                                                                                                                                                                |
+| `watch.reviewBots`                | `true`                        | Monitor configured review-bot accounts.                                                                                                                                                                                                                                               |
+| `watch.lifecycle`                 | `true`                        | Monitor conflicts, failed jobs, and merges.                                                                                                                                                                                                                                           |
+| `watch.reviewRequests`            | `true`                        | Monitor requests for your review on GitLab MRs, including repeated ones.                                                                                                                                                                                                              |
+| `reviewBots`                      | GitLab.com security reviewers | Exact bot usernames by host. Your list replaces the defaults.                                                                                                                                                                                                                         |
+| `delivery.reviews`                | `"inbox"`                     | Review delivery: `inbox`, `passive`, or `summary`.                                                                                                                                                                                                                                    |
+| `delivery.lifecycle`              | `"inbox"`                     | Conflict, job-failure, and merge delivery.                                                                                                                                                                                                                                            |
+| `lifecycleExecution.parentMerged` | `{ "mode": "notify" }`        | Optionally prepare retarget proposals for tracked dependents.                                                                                                                                                                                                                         |
+| `automation.rules`                | No rules                      | Reviewers whose feedback starts a coding turn that prepares fixes, or projects whose failed jobs start an investigation, optionally limited to allowed models. Set `"execution": "environment"` to permit the configured environment provider when the owning checkout doesn't match. |
+| `automation.modelGroups`          | No groups                     | Named lists of `provider/model` IDs that rules reference in `allowedModelGroup`.                                                                                                                                                                                                      |
 
 See the [configuration reference](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#options) for validation behavior and
 [review-bot configuration](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications) for account matching.
