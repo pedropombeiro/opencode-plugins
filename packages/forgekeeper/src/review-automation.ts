@@ -753,6 +753,18 @@ export function createReviewAutomation(host: AutomationHost) {
       );
       return 'over';
     }
+    // A linked turn's first request records its start, in the worktree's
+    // instance. Without one, Forgekeeper wasn't running there, so the turn
+    // never got its task.
+    if (outcome === 'completed' && current.execution && current.startedAt === undefined) {
+      await transitionAttempt(
+        record,
+        'failed',
+        "The linked session's turn ended before Forgekeeper checked it, so it never got its task. Check that Forgekeeper runs in the worktree, then retry.",
+        { release: true },
+      );
+      return 'over';
+    }
     await transitionAttempt(
       record,
       outcome,

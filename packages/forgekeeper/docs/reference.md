@@ -1122,6 +1122,9 @@ uncommitted changes appeared there. These checks cover the start of the turn: Fo
 can't keep another session from starting in the worktree afterward. The linked session's
 prompt doesn't hold the findings: Forgekeeper adds them to its requests, so without
 Forgekeeper in the worktree, the model reads only a note that the task couldn't start.
+A worktree's instance starts with the linked session's prompt, so Forgekeeper can't wait for
+it beforehand. A turn that ends without that first check having recorded its start fails,
+with a reason that says so, instead of counting as completed.
 
 **Act on feedback** and **Retry feedback work** don't wait for the owning session when the
 turn runs in a worktree. A failed job that joins a failed-job batch while its worktree is

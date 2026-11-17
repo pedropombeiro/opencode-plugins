@@ -131,10 +131,6 @@ type ModelRef = { providerID: string; id: string; variant?: string };
 // The metadata kind of the notices that tell an owning session about its
 // linked session's turn.
 export const WORKTREE_NOTICE = 'worktree-notice';
-// How often, and how many times, a turn waits for Forgekeeper to announce
-// itself in a worktree before it gives up.
-const PRESENCE_CHECK = 2_000;
-const PRESENCE_CHECKS = 10;
 
 type SessionInfo = Awaited<ReturnType<Context['session']['get']>>;
 
@@ -960,8 +956,10 @@ export function createAutomationHost(
     async verifyExecution(record) {
       const { execution } = record;
       const path = execution.directory;
-      // Listing the worktree's plugins starts its instance, which announces
-      // itself once Forgekeeper is running there.
+      // Listing a location's plugins doesn't start its instance, which starts
+      // with the linked session's prompt. So only the configuration is read
+      // here; the turn's first request decides whether Forgekeeper runs there,
+      // and a turn without a recorded start is a failure.
       const plugins = await ctx.plugin
         .list({ location: { directory: path } })
         .catch(() => undefined);
@@ -972,14 +970,6 @@ export function createAutomationHost(
         throw new Ineligible(
           `Forgekeeper isn't enabled in ${path}, so the linked session's turn couldn't be checked.`,
         );
-      for (let check = 0; ; check++) {
-        if (freshPresence(await ctx.storage.get(presenceKey(path)), now())) break;
-        if (check + 1 >= PRESENCE_CHECKS || env.closing())
-          throw new Error(
-            `Forgekeeper with PR/MR status isn't running in ${path}, so the linked session's turn couldn't be checked.`,
-          );
-        await sleep(PRESENCE_CHECK);
-      }
       const mismatch = await worktreeMismatch(
         deps.exec,
         (dir) => deps.forges.repository(dir),

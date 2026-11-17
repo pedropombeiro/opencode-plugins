@@ -1152,6 +1152,14 @@ describe('worktree automation', () => {
     kept.close();
   });
 
+  test("a worktree whose instance hasn't started yet is checked by the turn's first request", async () => {
+    // Listing plugins doesn't start an instance, so only the prompt can: no
+    // presence is waited for before submitting.
+    const f = hostFixture({ sessions: linkedSessions });
+    expect(await f.host.verifyExecution!(linkedAttempt())).toBeUndefined();
+    f.close();
+  });
+
   test('a busy subagent, or a busy session on a later page, keeps the worktree from the turn', async () => {
     const at = Date.now();
     const verify = async (pages: Array<Array<Record<string, unknown>>>) => {

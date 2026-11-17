@@ -1222,7 +1222,7 @@ describe('review automation in a worktree', () => {
     const waited: string[] = [];
     const submitted: AutomationRecord[] = [];
     const notices: Array<[string, AutomationState]> = [];
-    const f = fixture({
+    const f: ReturnType<typeof fixture> = fixture({
       validate: async () => ({ placement: 'worktree', rules: [rule] }),
       wait: async (sessionID) => void waited.push(sessionID),
       async provision(record, update) {
@@ -1238,7 +1238,11 @@ describe('review automation in a worktree', () => {
       },
       verifyExecution: async () => {},
       notify: async (record, phase) => void notices.push([phase, record.state]),
-      submit: async (record) => void submitted.push(structuredClone(record)),
+      // The worktree's first request records the start of the turn.
+      submit: async (record) => {
+        submitted.push(structuredClone(record));
+        f.records.set(record.batch, { ...f.records.get(record.batch)!, startedAt: 100 });
+      },
       ...overrides,
     });
     return { ...f, waited, submitted, notices };
@@ -1356,13 +1360,35 @@ describe('review automation in a worktree', () => {
       },
     });
     const seeded = await f.seed('running');
-    const record: AutomationRecord = { ...seeded, checkout: 'worktree', execution: linked };
+    const record: AutomationRecord = {
+      ...seeded,
+      startedAt: 50,
+      checkout: 'worktree',
+      execution: linked,
+    };
     f.records.set(record.batch, structuredClone(record));
     f.automation.restore([record]);
     await f.settled();
     expect(f.waited).toEqual(['linked']);
     expect(f.record()).toMatchObject({ state: 'completed' });
     expect(f.notices).toEqual([['ended', 'completed']]);
+  });
+
+  test('a linked turn that ended without a recorded start failed, and says why', async () => {
+    // Forgekeeper wasn't running in the worktree, so its first request
+    // wasn't checked, and the session only saw the placeholder.
+    const f = worktreeFixture({
+      submit: async (record) => void structuredClone(record),
+    });
+    expect(await f.automation.selectAutomatic(item)).toBe(true);
+    await f.settled();
+    expect(f.record()).toMatchObject({ state: 'failed' });
+    expect(f.record().reason).toContain('never got its task');
+    expect(f.claim()).toBeUndefined();
+    expect(f.notices).toEqual([
+      ['started', 'running'],
+      ['ended', 'failed'],
+    ]);
   });
 
   test("deleting the owning session doesn't end a turn its linked session still runs", async () => {
