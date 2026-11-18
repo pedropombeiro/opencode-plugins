@@ -8,10 +8,11 @@ import { exec, execWithTimeout } from './exec';
 import { Forges, hostsFrom } from './forges';
 import { CONCURRENCY, limitExec } from './limit';
 import { createTitleLookups } from './lookups';
+import { PLUGIN_ID } from './plugin-id';
 import { setupServer } from './server';
 
 export default {
-  id: 'opencode-forgekeeper',
+  id: PLUGIN_ID,
   async setup(ctx) {
     const hosts = hostsFrom((ctx.options ?? {}) as Record<string, unknown>);
     // Status polling and feedback fetches share one limit across sessions,

@@ -20,6 +20,13 @@ import {
   modelRefusal,
 } from './review-automation';
 import { createAutomationHost, type AutomationDependencies } from './review-automation-host';
+import {
+  linkedOwner,
+  PRESENCE_INTERVAL,
+  presenceKey,
+  type DirectorySession,
+  type Presence,
+} from './linked-session';
 import type { FeedbackSnapshot, ReviewRequest, ReviewRequestHistory } from './forge';
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
@@ -198,6 +205,8 @@ export async function setupStatus(
     }
     if (!session || session.time?.archived !== undefined) return false;
     if (session.location.directory !== directory) return false;
+    // A linked session runs turns for its owner, which gets the updates.
+    if (linkedOwner(session as DirectorySession)) return false;
     if (settled(item)) return false;
     const targets = (await host.state(item.sessionID)).targets;
     if (closing) throw new Error('The plugin stopped');
@@ -538,7 +547,36 @@ export async function setupStatus(
       return discovery.refresh();
     })
     .catch((error) => reportOnce('discovery', 'Could not restore feedback monitoring', error));
-  const discoveryTimer = setInterval(() => void discovery.refresh(), DISCOVERY_INTERVAL);
+  // Announces that this checkout's instance checks the turns of linked
+  // sessions here, so an owning session's instance submits them only then.
+  // The rules let a worktree's instance check a linked turn under the rules
+  // of the instance that owns it.
+  const instance = crypto.randomUUID();
+  const announce = () => {
+    if (closing) return;
+    const presence: Presence = {
+      at: (deps.now ?? Date.now)(),
+      instance,
+      rules: automationRules,
+    };
+    void ctx.storage.set(presenceKey(directory), presence as never).catch(() => {});
+  };
+  announce();
+  const presenceTimer = setInterval(announce, PRESENCE_INTERVAL);
+  // Removes the worktrees Forgekeeper created once their PRs/MRs are over.
+  const sweep = () => {
+    if (closing) return;
+    void tracked(
+      automationHost
+        .sweep()
+        .catch((error) => reportOnce('worktree-cleanup', 'Could not clean up worktrees', error)),
+    );
+  };
+  sweep();
+  const discoveryTimer = setInterval(() => {
+    void discovery.refresh();
+    sweep();
+  }, DISCOVERY_INTERVAL);
   const notificationTimer = setInterval(() => {
     if (closing) return;
     void notifyPending();
@@ -574,12 +612,18 @@ export async function setupStatus(
         readonly model: { providerID: string; id: string };
       },
     ): Promise<boolean> {
+      // A failed substitution in a later turn leaves the placeholder, which
+      // holds no task.
       const record = await automationHost.preparationFor(event.sessionID);
-      if (!record) return false;
+      if (!record) {
+        await automationHost.substitutePrompt(event).catch(() => {});
+        return false;
+      }
       const model = modelKey(event.model);
+      let started = record;
       if (record.startedAt === undefined) {
         try {
-          await automationHost.authorizeStart(record, model);
+          started = await automationHost.authorizeStart(record, model);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           await automation.abandon(record, reason).catch(() => {});
@@ -589,8 +633,16 @@ export async function setupStatus(
         const refusal = modelRefusal(record.models, model, 'inspect');
         if (refusal) throw new Error(refusal);
       }
-      event.system.push({ type: 'text', text: automationHost.instructions(record) });
+      event.system.push({ type: 'text', text: automationHost.instructions(started) });
+      // The linked session's turn can't go on without its task.
+      await automationHost.substitutePrompt(event, started);
       return true;
+    },
+    // Keeps a linked session's task in its compaction, so the summary, and
+    // the requests after it, still have the findings to act on.
+    async prepareCompaction(event: { sessionID: string; messages: unknown[] }) {
+      const record = await automationHost.preparationFor(event.sessionID).catch(() => undefined);
+      await automationHost.substitutePrompt(event, record);
     },
     prepareSummary: summaries.prepare,
     // Shows a report, such as a command's answer, in a tool-free turn.
@@ -744,6 +796,16 @@ export async function setupStatus(
     async dispose() {
       closing = true;
       automationController.abort();
+      clearInterval(presenceTimer);
+      // The replacement instance may have announced itself already.
+      await ctx.storage
+        .get(presenceKey(directory))
+        .then((value) =>
+          (value as { instance?: string } | undefined)?.instance === instance
+            ? ctx.storage.remove(presenceKey(directory))
+            : undefined,
+        )
+        .catch(() => {});
       subscriptions.dispose();
       for (const timer of feedbackEvents.values()) clearTimeout(timer);
       feedbackEvents.clear();

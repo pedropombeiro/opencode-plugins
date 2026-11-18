@@ -56,6 +56,8 @@ export interface LifecycleExecution {
 // trigger in `on`: review feedback, or a failed job.
 export type AutomationRule = ReviewAutomationRule | JobAutomationRule;
 
+export type AutomationExecutionMode = 'session' | 'environment';
+
 // Feedback from the listed reviewers starts a turn that prepares fixes. With
 // `allowedModels`, from the rule or its `allowedModelGroup`, only those
 // models, as `provider/model`, may act on that feedback. `authors` names
@@ -68,6 +70,7 @@ export interface ReviewAutomationRule {
   authors?: string[];
   action: 'prepare';
   allowedModels?: string[];
+  execution?: AutomationExecutionMode;
 }
 
 // A pipeline with failed jobs starts a turn that investigates them and
@@ -80,6 +83,7 @@ export interface JobAutomationRule {
   authors?: string[];
   action: 'investigate';
   allowedModels?: string[];
+  execution?: AutomationExecutionMode;
 }
 
 // Review bot usernames by host, both lowercase.
@@ -100,7 +104,7 @@ const DEFAULT_WATCH: Watch = {
   lifecycle: true,
   reviewRequests: true,
 };
-const DEFAULT_DELIVERY: Delivery = { reviews: 'inbox', lifecycle: 'inbox' };
+const DEFAULT_DELIVERY: Delivery = { reviews: 'summary', lifecycle: 'inbox' };
 const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
 
 const HOST = /^[a-z0-9.-]+(:\d+)?$/;
@@ -116,7 +120,9 @@ const RULE_KEYS = [
   'action',
   'allowedModels',
   'allowedModelGroup',
+  'execution',
 ];
+const EXECUTIONS: readonly AutomationExecutionMode[] = ['session', 'environment'];
 const PROJECT = /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+$/;
 const DELIVERIES: readonly FeedbackDelivery[] = ['inbox', 'passive', 'summary'];
 const MODES: readonly ExecutionMode[] = ['notify', 'prepare'];
@@ -212,6 +218,14 @@ class Reader {
     return null;
   }
 
+  execution(path: string, value: unknown): AutomationExecutionMode | null {
+    if (value === undefined) return 'session';
+    if (EXECUTIONS.includes(value as AutomationExecutionMode))
+      return value as AutomationExecutionMode;
+    this.ignore(path, `execution must be one of ${quoted(EXECUTIONS)}`, 'no rule');
+    return null;
+  }
+
   automation(value: unknown): { rules: AutomationRule[] } {
     const source = this.object('automation', value, ['rules', 'modelGroups']);
     const groups = this.modelGroups(source.modelGroups);
@@ -225,6 +239,14 @@ class Reader {
       const path = `automation.rules[${index}]`;
       if (!isObject(rule) || (rule.on !== 'review' && rule.on !== 'job-failed')) {
         this.ignore(path, 'must set "on" to "review" or "job-failed"', 'no rule');
+        return;
+      }
+      if ('checkout' in rule) {
+        this.ignore(
+          path,
+          'checkout was replaced by execution: "session" or "environment"',
+          'no rule',
+        );
         return;
       }
       const exact =
@@ -247,6 +269,8 @@ class Reader {
         const allowedModels = this.allowedModels(path, rule, groups);
         const authors = this.authors(path, rule);
         if (allowedModels === null || authors === null) return;
+        const execution = this.execution(path, rule.execution);
+        if (execution === null) return;
         rules.push({
           on: 'job-failed',
           host: (rule.host as string).toLowerCase(),
@@ -254,6 +278,7 @@ class Reader {
           ...(authors ? { authors } : {}),
           action: 'investigate',
           ...(allowedModels ? { allowedModels } : {}),
+          ...(execution === 'environment' ? { execution } : {}),
         });
         return;
       }
@@ -273,6 +298,8 @@ class Reader {
       const allowedModels = this.allowedModels(path, rule, groups);
       const authors = this.authors(path, rule);
       if (allowedModels === null || authors === null) return;
+      const execution = this.execution(path, rule.execution);
+      if (execution === null) return;
       rules.push({
         on: 'review',
         host: (rule.host as string).toLowerCase(),
@@ -281,6 +308,7 @@ class Reader {
         ...(authors ? { authors } : {}),
         action: 'prepare',
         ...(allowedModels ? { allowedModels } : {}),
+        ...(execution === 'environment' ? { execution } : {}),
       });
     });
     return { rules };

@@ -26,6 +26,7 @@ import {
 import { PREPARE_PREFIX } from './review-preparation';
 import { storedPreparation } from './review-automation-host';
 import { createReviewClaims } from './review-claim';
+import { linkedOwner, type DirectorySession } from './linked-session';
 import { ForgeSessionRpc, implement } from './rpc';
 import { setupStatus, type Status, type StatusDependencies } from './status-server';
 import { summaryPrefix } from './summary-delivery';
@@ -355,6 +356,11 @@ export async function setupServer(
           if (session.parentID || session.location.directory !== ctx.location.directory) {
             throw new Error('Session targets can only be set in the current root session.');
           }
+          // A target would make the linked session a second owner of the PR/MR.
+          if (linkedOwner(session as DirectorySession))
+            throw new Error(
+              'This session runs a Forgekeeper task for another session, which keeps the targets. Set targets there.',
+            );
           const state = await stateFor(sessionID);
           result = applyTargetChange(state.targets, change);
           await inferIssues(result.targets, state.targets);
@@ -535,6 +541,13 @@ export async function setupServer(
     }
   });
 
+  // A compaction summarizes the stored transcript, where a linked session's
+  // task is only a placeholder. A failure fails the compaction, so the
+  // summary never stands in for a task it doesn't hold.
+  await ctx.session.hook('compaction', async (event) => {
+    await watcher?.prepareCompaction(event);
+  });
+
   // OpenCode reads instruction entries before a step's request reaches the
   // context hook, and announces later changes in another step. Writing the
   // entry when a prompt is admitted makes it part of the first step's
@@ -548,9 +561,14 @@ export async function setupServer(
     }
   });
 
+  // Linked sessions get no target guidance: their owner keeps the targets.
   async function ownsSession(sessionID: string): Promise<boolean> {
     const session = await ctx.session.get({ sessionID });
-    return !session.parentID && session.location.directory === ctx.location.directory;
+    return (
+      !session.parentID &&
+      session.location.directory === ctx.location.directory &&
+      !linkedOwner(session as DirectorySession)
+    );
   }
 
   // Backstops for a summary turn whose request still reached tools, such as

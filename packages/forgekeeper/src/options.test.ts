@@ -104,6 +104,49 @@ describe('statusOptions', () => {
     ]);
   });
 
+  test('rules opt in to environment execution, and an invalid mode drops the rule', () => {
+    const review = {
+      on: 'review',
+      host: 'gitlab.com',
+      projects: ['team/project'],
+      reviewers: ['gitlabduo'],
+      action: 'prepare',
+    };
+    const job = { on: 'job-failed', host: 'gitlab.com', projects: ['team/project'] };
+    const options = statusOptions({
+      automation: {
+        rules: [
+          { ...review, execution: 'environment' },
+          { ...review, execution: 'session' },
+          { ...job, execution: 'environment' },
+        ],
+      },
+    });
+    expect(options.problems).toEqual([]);
+    expect(options.automation.rules).toEqual([
+      { ...review, execution: 'environment' },
+      review,
+      { ...job, action: 'investigate', execution: 'environment' },
+    ] as never);
+    for (const rule of [
+      { ...review, execution: 'elsewhere' },
+      { ...job, execution: true },
+    ]) {
+      const invalid = statusOptions({ automation: { rules: [rule] } });
+      expect(invalid.automation.rules).toEqual([]);
+      expect(invalid.problems).toEqual([
+        'automation.rules[0] execution must be one of "session", "environment"; using no rule',
+      ]);
+    }
+    for (const rule of [review, job]) {
+      const invalid = statusOptions({ automation: { rules: [{ ...rule, checkout: 'worktree' }] } });
+      expect(invalid.automation.rules).toEqual([]);
+      expect(invalid.problems).toEqual([
+        'automation.rules[0] checkout was replaced by execution: "session" or "environment"; using no rule',
+      ]);
+    }
+  });
+
   test('job-failed rules investigate exact projects, with an optional model list', () => {
     const job = { on: 'job-failed', host: 'GitLab.com', projects: ['gitlab-org/gitlab'] };
     const options = statusOptions({
@@ -173,7 +216,7 @@ describe('statusOptions', () => {
       }
   });
 
-  test('watches everything and delivers only to the inbox by default', () => {
+  test('watches everything and defaults to review summaries and lifecycle inbox delivery', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
       pollSeconds: 120,
@@ -185,7 +228,7 @@ describe('statusOptions', () => {
         reviewRequests: true,
       },
       reviewBots: DEFAULT_REVIEW_BOTS,
-      delivery: { reviews: 'inbox', lifecycle: 'inbox' },
+      delivery: { reviews: 'summary', lifecycle: 'inbox' },
       lifecycleExecution: { parentMerged: notify },
       automation: { rules: [] },
       problems: [],
@@ -201,7 +244,7 @@ describe('statusOptions', () => {
         status: false,
         pollSeconds: 45,
         watch: { humanReviews: false, lifecycle: false, reviewRequests: false },
-        delivery: { reviews: 'summary' },
+        delivery: { reviews: 'inbox' },
         hosts: ['gitlab.example.com'],
         githubHosts: [],
       }),
@@ -215,11 +258,11 @@ describe('statusOptions', () => {
         lifecycle: false,
         reviewRequests: false,
       },
-      delivery: { reviews: 'summary', lifecycle: 'inbox' },
+      delivery: { reviews: 'inbox', lifecycle: 'inbox' },
       problems: [],
     });
     expect(statusOptions({ delivery: { lifecycle: 'passive' } }).delivery).toEqual({
-      reviews: 'inbox',
+      reviews: 'summary',
       lifecycle: 'passive',
     });
   });
@@ -233,7 +276,7 @@ describe('statusOptions', () => {
       [{ watch: ['lifecycle'] }, 'watch must be an object; using the defaults'],
       [
         { delivery: { reviews: 'summmary' } },
-        'delivery.reviews must be one of "inbox", "passive", "summary"; using "inbox"',
+        'delivery.reviews must be one of "inbox", "passive", "summary"; using "summary"',
       ],
       [{ delivery: 'summary' }, 'delivery must be an object; using the defaults'],
       [{ hosts: 'gitlab.example.com' }, 'hosts must be a list of host names'],
@@ -242,7 +285,7 @@ describe('statusOptions', () => {
     }
     const invalid = statusOptions({ watch: { lifecycle: 'false' }, delivery: { reviews: 'x' } });
     expect(invalid.watch.lifecycle).toBe(true);
-    expect(invalid.delivery.reviews).toBe('inbox');
+    expect(invalid.delivery.reviews).toBe('summary');
   });
 
   test('reports unknown options, at every level, without failing the others', () => {

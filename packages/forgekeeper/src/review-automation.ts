@@ -17,6 +17,12 @@ import {
 import { createKeyedQueue } from './keyed-queue';
 import type { AutomationRule, ReviewAutomationRule } from './options';
 import type { ExecutionClaim } from './review-claim';
+import {
+  environmentProvider,
+  EnvironmentUncertain,
+  type AutomationEnvironments,
+  type ExecutionSource,
+} from './automation-environment';
 import { findingsDigest, preparationMessageID, preparationPrompt } from './review-preparation';
 
 export type AutomationState = 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -30,9 +36,43 @@ export interface AutomationStatus {
   manual?: boolean;
 }
 
+export type Placement = 'session' | 'environment';
+
+// What lets a batch run: where its turn runs, and the rules that apply to
+// the PR/MR's author.
+export interface Validation {
+  placement: Placement;
+  rules: readonly AutomationRule[];
+}
+
+// A turn in a linked session. The owning session keeps the target, the
+// inbox update, and the claim; the linked session runs the turn.
+
+export interface ProvisioningExecution extends Partial<ExecutionSource> {
+  stage: 'provisioning';
+  ownerDirectory?: string;
+  provider: string;
+  version: number;
+  state: Record<string, unknown>;
+}
+
+// Once the prompt may have been submitted to the linked session.
+export interface SubmittingExecution extends Omit<ProvisioningExecution, 'stage'> {
+  stage: 'submitting';
+  // The task, which only Forgekeeper adds to the linked session's requests.
+  prompt: string;
+}
+
+export type Execution = ProvisioningExecution | SubmittingExecution;
+
+// An attempt whose turn the linked session may have received.
+export type LinkedRecord = AutomationRecord & { execution: SubmittingExecution };
+
 export interface AutomationRecord extends AutomationStatus {
   batch: string;
   item: FeedbackItem;
+  placement?: Placement;
+  execution?: Execution;
   // When the coding turn's first model request passed its checks.
   startedAt?: number;
   // The findings the turn's prompt holds; see `findingsDigest`.
@@ -99,6 +139,18 @@ const reviewRules = (rules: readonly AutomationRule[], ref: ReviewRef) =>
     (rule): rule is ReviewAutomationRule =>
       rule.on === 'review' && rule.host === ref.host && rule.projects.includes(ref.project),
   );
+
+export function environmentExecution(
+  rules: readonly AutomationRule[],
+  ref: ReviewRef,
+  item: Pick<FeedbackItem, 'kind'>,
+): boolean {
+  const on = isJobFailure(item) ? 'job-failed' : 'review';
+  const covering = rules.filter(
+    (rule) => rule.on === on && rule.host === ref.host && rule.projects.includes(ref.project),
+  );
+  return covering.length > 0 && covering.every((rule) => rule.execution === 'environment');
+}
 
 export function automationReviewers(rules: readonly AutomationRule[], ref: ReviewRef): string[] {
   return [...new Set(reviewRules(rules, ref).flatMap((rule) => rule.reviewers))];
@@ -175,6 +227,7 @@ export interface PipelineFailures {
 }
 
 export interface AutomationHost {
+  environments?: AutomationEnvironments;
   rules: readonly AutomationRule[];
   ref: (url: string) => ReviewRef | undefined;
   read: (batch: string) => Promise<AutomationRecord | undefined>;
@@ -204,11 +257,9 @@ export interface AutomationHost {
   pipelineDone: (item: FeedbackItem) => Promise<boolean>;
   // The model the session's next turn uses, as `provider/model`.
   model: (sessionID: string) => Promise<string | undefined>;
-  // Rejects with `Ineligible` when the batch can't run here. Automatic runs
-  // also need the PR/MR to be the signed-in user's own, or for failed jobs,
-  // one they review, or else a matching rule that lists its author. Returns
-  // the rules that apply to the PR/MR's author: for a manual run, all of them.
-  validate: (item: FeedbackItem, automatic: boolean) => Promise<readonly AutomationRule[]>;
+  validate: (item: FeedbackItem, automatic: boolean) => Promise<Validation>;
+  // Tells the owning session about a linked session's turn.
+  notify?: (record: AutomationRecord, phase: 'started' | 'ended') => Promise<void>;
   // Delivers the item as if automation hadn't selected it, such as with a summary.
   redeliver: (item: FeedbackItem) => void;
   wait: (sessionID: string) => Promise<void>;
@@ -249,12 +300,24 @@ interface PreparedExecution {
   // Identifies the data the prompt holds; see `findingsDigest`.
   digest: string;
   text: string;
+  placement: Placement;
+  // The models that may run the turn, or undefined for any.
+  models?: string[];
 }
 
 export function createReviewAutomation(host: AutomationHost) {
   const queue = createKeyedQueue();
   const tasks = new Map<string, Promise<void>>();
   const now = host.now ?? Date.now;
+  const providerOf = (record: AutomationRecord) => environmentProvider(host.environments, record);
+  const executionExists = (record: AutomationRecord) =>
+    record.execution ? providerOf(record).exists(record) : host.exists(record.item.sessionID);
+  const outcomeOf = async (claim: ExecutionClaim) => {
+    const record = await host.read(claim.batch);
+    return record?.execution && sameAttempt(claim, record)
+      ? providerOf(record).outcome(record)
+      : host.outcome(claim);
+  };
 
   const ruleReviewers = (item: FeedbackItem) => {
     const ref = host.ref(item.url);
@@ -268,32 +331,43 @@ export function createReviewAutomation(host: AutomationHost) {
     return !!ref && investigatesJobs(host.rules, ref);
   };
 
-  // An automatic run reads only the findings of the reviewers of `rules`,
-  // the rules that apply to the PR/MR's author. A manual one reads everyone's,
-  // tagging the reviewers whose rules restrict models.
-  const readFindings = (item: FeedbackItem, manual: boolean, rules: readonly AutomationRule[]) => {
+  // The reviewers whose findings count, and those whose findings name their
+  // reviewer. An automatic run reads only the findings of the reviewers of
+  // `rules`, the rules that apply to the PR/MR's author. A manual one reads
+  // everyone's, tagging the reviewers whose rules restrict models.
+  const findingsPolicy = (
+    item: FeedbackItem,
+    manual: boolean,
+    rules: readonly AutomationRule[],
+  ): { reviewers?: string[]; tagged?: string[] } => {
     const ref = host.ref(item.url);
-    if (!manual) return host.findings(item, ref ? automationReviewers(rules, ref) : []);
+    if (!manual) return { reviewers: ref ? automationReviewers(rules, ref) : [] };
     const tagged = ref ? restrictedReviewers(host.rules, ref) : [];
-    return host.findings(item, undefined, tagged.length ? tagged : undefined);
+    return tagged.length ? { tagged } : {};
+  };
+  const readFindings = (item: FeedbackItem, manual: boolean, rules: readonly AutomationRule[]) => {
+    const policy = findingsPolicy(item, manual, rules);
+    return host.findings(item, policy.reviewers, policy.tagged);
   };
 
   // Rejects with `Ineligible` when the session's model may not act on the
   // findings, or investigate the update's failed jobs, under `rules`.
+  // Returns the models that may, or undefined for any.
   async function assertAllowedModel(
     item: FeedbackItem,
     rules: readonly AutomationRule[],
     findings: readonly ReviewFinding[] = [],
-  ) {
+  ): Promise<string[] | undefined> {
     const ref = host.ref(item.url);
     const allowed =
       ref &&
       (isJobFailure(item)
         ? investigationModels(rules, ref)
         : allowedModelsFor(rules, ref, findings));
-    if (!allowed) return;
+    if (!allowed) return undefined;
     const refusal = modelRefusal(allowed, await host.model(item.sessionID), 'act');
     if (refusal) throw new Ineligible(refusal);
+    return allowed;
   }
 
   async function persistAutomationStatus(record: AutomationRecord, expected?: AutomationRecord) {
@@ -343,10 +417,24 @@ export function createReviewAutomation(host: AutomationHost) {
     await transitionAttempt(record, state, reason, { from: 'queued' });
   }
 
-  // Ends a queued or running attempt whose session was deleted, freeing its claim.
+  // Ends a queued or running attempt whose session was deleted, freeing its
+  // claim. A linked session's turn outlives its owner, so its transcript
+  // says how the attempt ended. Rejects while that turn is still going.
   async function settleOrphan(record: AutomationRecord) {
-    if (record.state === 'queued' || record.state === 'running')
-      await transitionAttempt(record, 'failed', ORPHANED, { release: true });
+    if (record.state !== 'queued' && record.state !== 'running') return;
+    const linked = record.execution;
+    if (
+      record.state === 'running' &&
+      linked?.stage === 'submitting' &&
+      (await executionExists(record))
+    ) {
+      // Without more checks to wait for, an outcome that's still pending
+      // becomes uncertain, which an explicit retry can clear.
+      if ((await checkExecution(record, ADMISSION_CHECKS)) === 'running')
+        throw new Error('This batch is still running in its linked session; inspect it first');
+      return;
+    }
+    await transitionAttempt(record, 'failed', ORPHANED, { release: true });
   }
 
   // Frees the PR/MR's claim once the attempt holding it can't run anymore:
@@ -360,13 +448,15 @@ export function createReviewAutomation(host: AutomationHost) {
     const owner = await host.read(claim.batch);
     const attempt = sameAttempt(claim, owner) ? owner : undefined;
     // A deleted session runs nothing, so its attempt ends and its claim goes.
-    if (!(await host.exists(claim.sessionID))) {
-      if (attempt) await settleOrphan(attempt);
+    // A linked session runs the turn, so it's the one that counts.
+    if (!(await (attempt ? executionExists(attempt) : host.exists(claim.sessionID)))) {
+      if (attempt && (attempt.state === 'queued' || attempt.state === 'running'))
+        await transitionAttempt(attempt, 'failed', ORPHANED, { release: true });
       await host.claim.release(url, claim);
       return 'free';
     }
     if (attempt?.state === 'queued' || attempt?.state === 'running') return 'live';
-    const outcome = await host.outcome(claim);
+    const outcome = await outcomeOf(claim);
     if (outcome === 'running') return 'running';
     const unstarted = attempt?.state === 'failed' && attempt.startedAt === undefined;
     if (
@@ -405,7 +495,7 @@ export function createReviewAutomation(host: AutomationHost) {
   async function startAttempt(
     item: FeedbackItem,
     previous: AutomationRecord | undefined,
-    options: { manual: boolean; skip?: string },
+    options: { manual: boolean; skip?: string; placement?: Placement | void },
   ): Promise<AutomationRecord | undefined> {
     const batch = automationBatch(item);
     const attempt = (previous?.attempt ?? 0) + 1;
@@ -420,6 +510,7 @@ export function createReviewAutomation(host: AutomationHost) {
         messageID,
         ...(options.skip ? { reason: options.skip } : {}),
         ...(options.manual ? { manual: true } : {}),
+        ...(options.placement === 'environment' ? { placement: options.placement } : {}),
       },
       previous,
     );
@@ -435,27 +526,30 @@ export function createReviewAutomation(host: AutomationHost) {
     if (conflict) return { skip: conflict };
     if (!record.manual && !ruleCovers(record.item))
       return { skip: 'No automation rule matches this project now.' };
-    const rules = await host.validate(record.item, !record.manual);
-    let prepared: PreparedExecution;
+    const { placement, rules } = await host.validate(record.item, !record.manual);
+    let prepared: Omit<PreparedExecution, 'placement'>;
     if (isJobFailure(record.item)) {
       const failures = await host.failures(record.item);
-      await assertAllowedModel(record.item, rules);
+      const models = await assertAllowedModel(record.item, rules);
       prepared = {
         digest: failuresDigest(failures.jobs),
         text: investigationPrompt(record.item.url, failures),
+        ...(models ? { models } : {}),
       };
     } else {
-      const findings = await readFindings(record.item, !!record.manual, rules);
+      const policy = findingsPolicy(record.item, !!record.manual, rules);
+      const findings = await host.findings(record.item, policy.reviewers, policy.tagged);
       if (!findings.length)
         return { skip: 'No current unresolved findings from authorized reviewers.' };
-      await assertAllowedModel(record.item, rules, findings);
+      const models = await assertAllowedModel(record.item, rules, findings);
       prepared = {
         digest: findingsDigest(findings),
         text: preparationPrompt(record.item.url, findings),
+        ...(models ? { models } : {}),
       };
     }
     await assertPendingInboxItem(record.item);
-    return prepared;
+    return { ...prepared, placement };
   }
 
   // Waits until a failed-job batch's pipeline has had no new failure for the
@@ -491,7 +585,9 @@ export function createReviewAutomation(host: AutomationHost) {
       await transitionAttempt(record, 'skipped', conflict);
       return undefined;
     }
-    await host.validate(record.item, !record.manual);
+    const { placement } = await host.validate(record.item, !record.manual);
+    // The owning checkout moved, so the attempt waits where it now runs.
+    if (placement !== prepared.placement) return 'replaced';
     await assertPendingInboxItem(record.item);
     // A claim left by a finished attempt, such as one whose monitoring
     // failed, mustn't keep later feedback from running.
@@ -504,7 +600,17 @@ export function createReviewAutomation(host: AutomationHost) {
       state: 'running',
       at: now(),
       digest: prepared.digest,
+      ...(placement === 'environment' ? { placement } : {}),
     };
+    if (placement === 'environment') {
+      const provider = environmentProvider(host.environments);
+      running.execution = {
+        stage: 'provisioning',
+        provider: provider.id,
+        version: provider.version,
+        state: {},
+      };
+    }
     if (!(await host.start(running, current))) {
       // The stored attempt changed, rather than another execution holding
       // the PR/MR: a later failure replaced its update.
@@ -522,10 +628,96 @@ export function createReviewAutomation(host: AutomationHost) {
       );
       return undefined;
     }
+    if (placement === 'environment') return submitLinked(running, prepared, admitting);
     admitting();
     await host.status(running.item, running);
     await host.submit(running, prepared.text);
     return running;
+  }
+
+  async function submitLinked(
+    running: AutomationRecord,
+    prepared: PreparedExecution,
+    admitting: () => void,
+  ): Promise<AutomationRecord | undefined> {
+    let stored = running;
+    const provider = environmentProvider(
+      host.environments,
+      running.execution ? running : undefined,
+    );
+    // Stores `change` of the attempt as stored now. A later failure of a
+    // failed-job batch replaces its update meanwhile, which the change
+    // keeps, since the first model request waits out its quiet time. Any
+    // other change, such as the attempt ending, stops the preparation.
+    const save = async (change: (current: AutomationRecord) => AutomationRecord) => {
+      for (let retry = 0; retry < 3; retry++) {
+        const current = await host.read(stored.batch);
+        if (
+          !current ||
+          JSON.stringify({ ...current, item: stored.item }) !== JSON.stringify(stored) ||
+          (current.item.id !== stored.item.id &&
+            !(isJobFailure(current.item) && sameUpdate(current.item, stored.item)))
+        )
+          throw new Error('Review automation changed while preparing its environment');
+        const next = change(current);
+        if (await host.save(next, current)) return (stored = next);
+      }
+      throw new Error('Review automation changed repeatedly while preparing its environment');
+    };
+    const update = (patch: Partial<ProvisioningExecution>) => {
+      if (stored.execution?.stage === 'submitting')
+        throw new Error('Review automation submitted its turn already');
+      if (
+        (patch.provider !== undefined && patch.provider !== provider.id) ||
+        (patch.version !== undefined && patch.version !== provider.version)
+      )
+        throw new Error('An attempt cannot change its execution provider');
+      return save((current) => ({
+        ...current,
+        execution: { ...current.execution!, ...patch } as ProvisioningExecution,
+      }));
+    };
+    try {
+      await host.status(stored.item, stored);
+      if (!stored.execution)
+        await update({
+          stage: 'provisioning',
+          provider: provider.id,
+          version: provider.version,
+          state: {},
+        });
+      stored = await provider.provision(stored, update);
+      const { execution } = stored;
+      if (execution?.stage !== 'provisioning')
+        throw new Error("The execution environment wasn't prepared");
+      const next: LinkedRecord = {
+        ...stored,
+        execution: {
+          ...execution,
+          stage: 'submitting',
+          prompt: prepared.text,
+        },
+      };
+      if (prepared.models) next.models = prepared.models;
+      await providerOf(next).verify(next);
+      const latest = await host.read(stored.batch);
+      await assertPendingInboxItem(latest?.item ?? stored.item);
+      const conflict = await ownershipConflictReason(stored.item);
+      if (conflict) throw new Error(conflict);
+      await save((current) => ({ ...next, item: current.item }));
+    } catch (error) {
+      if (host.closing()) return undefined;
+      await transitionAttempt(stored, 'failed', message(error), {
+        release: !(error instanceof EnvironmentUncertain),
+      });
+      const ended = await host.read(stored.batch).catch(() => undefined);
+      if (ended?.execution) await host.notify?.(ended, 'ended').catch(() => {});
+      return undefined;
+    }
+    admitting();
+    await providerOf(stored).submit(stored as LinkedRecord);
+    await host.notify?.(stored, 'started').catch(() => {});
+    return stored;
   }
 
   // Records the outcome of a running attempt, from its transcript, and frees
@@ -546,7 +738,7 @@ export function createReviewAutomation(host: AutomationHost) {
       );
       return 'over';
     }
-    const outcome = await host.outcome(claim);
+    const outcome = await outcomeOf(claim);
     if (outcome === 'running') return 'running';
     if (outcome === 'pending' && pending < ADMISSION_CHECKS) return 'pending';
     if (outcome === 'pending' || outcome === 'unknown') {
@@ -554,6 +746,18 @@ export function createReviewAutomation(host: AutomationHost) {
         record,
         'failed',
         'The execution outcome is uncertain. Inspect the session and explicitly retry.',
+      );
+      return 'over';
+    }
+    // A linked turn's first request records its start, in the worktree's
+    // instance. Without one, Forgekeeper wasn't running there, so the turn
+    // never got its task.
+    if (outcome === 'completed' && current.execution && current.startedAt === undefined) {
+      await transitionAttempt(
+        record,
+        'failed',
+        "The linked session's turn ended before Forgekeeper checked it, so it never got its task. Check that Forgekeeper runs in the execution environment, then retry.",
+        { release: true },
       );
       return 'over';
     }
@@ -570,18 +774,69 @@ export function createReviewAutomation(host: AutomationHost) {
     return 'over';
   }
 
+  // Reports a linked session's attempt that ended. The worktree's instance
+  // may have ended it, such as when its first request was refused, and it
+  // can't reach the owning session's inbox, so the owner's instance does.
+  async function linkedEnded(record: AutomationRecord) {
+    const ended = await host.read(record.batch);
+    if (!ended || ended.messageID !== record.messageID || !ended.execution) return;
+    if (ended.state === 'queued' || ended.state === 'running') return;
+    await host.status(ended.item, ended);
+    if (!ended.manual && !handlesDelivery(ended)) host.redeliver(ended.item);
+    await host.notify?.(ended, 'ended').catch(() => {});
+  }
+
   // Waits for a running attempt's turn to end. It depends only on the stored
   // record, not the inbox update, so acknowledging the update doesn't stop it.
   // A check that fails, such as a transcript that can't be read for a moment,
   // is retried a few times before the attempt fails.
   async function monitorExecution(record: AutomationRecord) {
+    const stored = await host.read(record.batch);
+    if (
+      stored?.state === 'running' &&
+      stored.messageID === record.messageID &&
+      stored.execution?.stage === 'provisioning'
+    ) {
+      await providerOf(stored).recover(stored);
+      const prepared = await prepareExecution(stored);
+      if ('skip' in prepared) {
+        await transitionAttempt(stored, 'failed', prepared.skip, { release: true });
+        return;
+      }
+      if (prepared.placement !== 'environment') {
+        await transitionAttempt(
+          stored,
+          'failed',
+          'The execution placement changed during provisioning. Retry feedback work.',
+          { release: true },
+        );
+        return;
+      }
+      if (prepared.digest !== stored.digest) {
+        await transitionAttempt(
+          stored,
+          'failed',
+          'The task changed during interrupted provisioning. Retry feedback work.',
+          { release: true },
+        );
+        return;
+      }
+      const resumed = await submitLinked(stored, prepared, () => {});
+      if (resumed) await monitorExecution(resumed);
+      return;
+    }
+    if (stored && stored.messageID === record.messageID && stored.execution) record = stored;
     for (let check = 0, pending = 0, errors = 0; ; check++) {
       if (check > 0) await host.sleep(RECHECK_INTERVAL);
       try {
-        await host.wait(record.item.sessionID);
+        if (record.execution) await providerOf(record).wait(record);
+        else await host.wait(record.item.sessionID);
         if (host.closing()) return;
         const state = await checkExecution(record, pending);
-        if (state === 'over') return;
+        if (state === 'over') {
+          if (record.execution) await linkedEnded(record);
+          return;
+        }
         pending = state === 'pending' ? pending + 1 : 0;
         errors = 0;
       } catch (error) {
@@ -591,10 +846,23 @@ export function createReviewAutomation(host: AutomationHost) {
     }
   }
 
+  // Records where a manual attempt runs, which its selection didn't, so a
+  // turn in a worktree doesn't wait for the owning session. A check that
+  // fails leaves it to the checks before the turn. Returns the attempt as
+  // stored.
+  async function placeManual(record: AutomationRecord): Promise<AutomationRecord> {
+    if (!record.manual || record.placement) return record;
+    const validation = await host.validate(record.item, false).catch(() => undefined);
+    if (validation?.placement !== 'environment') return record;
+    const placed: AutomationRecord = { ...record, placement: 'environment' };
+    return (await host.save(placed, record)) ? placed : record;
+  }
+
   async function execute(queued: AutomationRecord) {
     let admitted = false;
     let record = queued;
     try {
+      record = await placeManual(record);
       // A later failure that replaces a failed-job batch's update before the
       // turn starts restarts its quiet time, even while the session is busy.
       for (;;) {
@@ -603,7 +871,8 @@ export function createReviewAutomation(host: AutomationHost) {
           if (!quiet) return;
           record = quiet;
         }
-        await host.wait(record.item.sessionID);
+        // A turn in a worktree doesn't wait for the owning session.
+        if (record.placement !== 'environment') await host.wait(record.item.sessionID);
         const current = await host.read(record.batch);
         if (current?.state !== 'queued' || current.messageID !== record.messageID) return;
         const replaced = current.item.id !== record.item.id;
@@ -613,6 +882,13 @@ export function createReviewAutomation(host: AutomationHost) {
         if ('skip' in prepared) {
           await settleUnclaimed(record, 'skipped', prepared.skip);
           return;
+        }
+        if (prepared.placement !== (record.placement ?? 'session')) {
+          const moved: AutomationRecord = { ...record, placement: prepared.placement };
+          if (prepared.placement === 'session') delete moved.placement;
+          if (!(await host.save(moved, record))) return;
+          record = moved;
+          continue;
         }
         const running = await submitExecution(record, prepared, () => (admitted = true));
         if (running === 'replaced') continue;
@@ -700,18 +976,19 @@ export function createReviewAutomation(host: AutomationHost) {
         // someone else's PR/MR, or one the session's model may not act on,
         // gets its normal delivery right away. The rules that apply to the
         // PR/MR's author decide whose findings count.
-        let rules: readonly AutomationRule[];
+        let validation: Validation;
         try {
-          rules = await host.validate(item, true);
-          if (isJobFailure(item)) await assertAllowedModel(item, rules);
+          validation = await host.validate(item, true);
+          if (isJobFailure(item)) await assertAllowedModel(item, validation.rules);
         } catch (error) {
           if (!(error instanceof Ineligible)) throw error;
           await startAttempt(item, undefined, { manual: false, skip: error.message });
           return false;
         }
+        const { rules, placement } = validation;
         if (isJobFailure(item)) {
           // The failed jobs are read once the pipeline goes quiet.
-          const record = await startAttempt(item, undefined, { manual: false });
+          const record = await startAttempt(item, undefined, { manual: false, placement });
           if (record) resume(record);
           return true;
         }
@@ -730,7 +1007,7 @@ export function createReviewAutomation(host: AutomationHost) {
           await startAttempt(item, undefined, { manual: false, skip: error.message });
           return false;
         }
-        const record = await startAttempt(item, undefined, { manual: false });
+        const record = await startAttempt(item, undefined, { manual: false, placement });
         if (record) resume(record);
         return true;
       });
@@ -789,13 +1066,19 @@ export function createReviewAutomation(host: AutomationHost) {
     async turnEnded(sessionID: string, outcome: 'succeeded' | 'failed', at: number) {
       for (const record of await host.list()) {
         if (
-          record.item.sessionID !== sessionID ||
           record.state !== 'running' ||
           record.startedAt === undefined ||
           record.ended ||
           at < record.startedAt
         )
           continue;
+        if (record.execution) {
+          const provider = host.environments?.providers.find(
+            (entry) =>
+              entry.id === record.execution?.provider && entry.version === record.execution.version,
+          );
+          if (!provider?.matchesSession(record, sessionID)) continue;
+        } else if (record.item.sessionID !== sessionID) continue;
         await host.save({ ...record, ended: { outcome, at } }, record);
       }
     },

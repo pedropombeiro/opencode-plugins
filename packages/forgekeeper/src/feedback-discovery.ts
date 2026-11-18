@@ -1,10 +1,14 @@
 import { mapLimit, CONCURRENCY } from './limit';
+import { linkedOwner } from './linked-session';
 
 export const RECENT_ACTIVITY = 3 * 24 * 60 * 60_000;
 export const DISCOVERY_INTERVAL = 5 * 60_000;
 
 export interface DiscoverySession {
+  id?: string;
   parentID?: string;
+  fork?: unknown;
+  metadata?: Record<string, unknown>;
   time: { archived?: number };
   location: { directory: string };
 }
@@ -37,7 +41,8 @@ export function createFeedbackDiscovery(options: {
           if (
             session.parentID ||
             session.time.archived !== undefined ||
-            session.location.directory !== options.directory
+            session.location.directory !== options.directory ||
+            linkedOwner({ ...session, id: session.id ?? id })
           )
             return;
           const activity = await options.activity(id);

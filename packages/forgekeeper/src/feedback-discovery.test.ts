@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { createFeedbackDiscovery, RECENT_ACTIVITY } from './feedback-discovery';
+import { linkedMetadata } from './linked-session';
 import { deferred } from './testing';
 
 describe('feedback discovery', () => {
-  test('discovers only recent non-archived root sessions in its checkout', async () => {
+  test('discovers only recent non-archived root sessions in its checkout, without linked ones', async () => {
     const watched: string[][] = [];
     const at = 10 * RECENT_ACTIVITY;
     let paused = false;
@@ -18,11 +19,13 @@ describe('feedback discovery', () => {
         'archived',
         'foreign',
         'empty',
+        'linked',
       ],
       session: async (id) => ({
         parentID: id === 'child' ? 'parent' : undefined,
         time: { archived: id === 'archived' ? at : undefined },
         location: { directory: id === 'foreign' ? '/elsewhere' : '/repo' },
+        ...(id === 'linked' ? { metadata: linkedMetadata('recent', 'batch', 'linked') } : {}),
       }),
       activity: async (id) =>
         id === 'empty'
