@@ -1,6 +1,6 @@
 {
   "name": "opencode-session-finder",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Search previous OpenCode sessions from the desktop or terminal command palette, or ask the agent to search",
   "author": {
     "name": "Pedro Pombeiro",
