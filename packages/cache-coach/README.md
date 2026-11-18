@@ -44,14 +44,14 @@ The prompt footer shows the cache state of the session on screen:
 
 ![Animated Cache Coach footer showing the cache countdown and state indicators.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/cache-countdown.gif)
 
-| Footer                                 | Meaning                                                                  |
-| -------------------------------------- | ------------------------------------------------------------------------ |
-| `● cache 3:42`                         | Warm. The next message reads the context from the cache.                 |
-| `◐ cache 0:45`                         | Warm, with less than a minute left.                                      |
-| `● cache`                              | A request is running and using the cache.                                |
-| `○ cache cold · rewrite ~180K ($0.90)` | Expired, or another model is selected. The next message writes it again. |
-| `○ cache cold · … · GPT-6.1 Sol $0.45` | As above, and compacting on your `compactionModel` costs less.           |
-| `● cache 3:42 · warming?`              | Warm, in a session that OpenCode warms. See [Warming](#warming).         |
+| Footer                                 | Meaning                                                                            |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| `● cache 3:42`                         | Likely warm. Estimated time left for cache reuse.                                  |
+| `◐ cache 0:45`                         | Likely warm, with less than a minute left in the estimate.                         |
+| `● cache`                              | A request is running. Cache reuse is not yet confirmed.                            |
+| `○ cache cold · rewrite ~180K ($0.90)` | Estimated lifetime elapsed, or another model is selected. A rewrite may be needed. |
+| `○ cache cold · … · GPT-6.1 Sol $0.45` | As above, and compacting on your `compactionModel` costs less.                     |
+| `● cache 3:42 · warming?`              | Likely warm, in a session that OpenCode warms. See [Warming](#warming).            |
 
 The footer stays empty until the session has a request whose provider reports cache tokens. Click
 the indicator, or run `/cache`, to see the last request's cache hit rate, what the next message
@@ -59,7 +59,9 @@ costs, and the session's cost so far.
 
 The countdown starts when the last request started, and uses the cache lifetime from the plugin's
 [`ttl`](#options) option, the model's or provider's `cache.ttl` setting, or 5 minutes. Providers can
-evict a cache earlier, so a warm indicator means the cache is likely warm.
+evict a cache earlier or retain it longer, so both the warm and cold states are estimates.
+OpenCode doesn't expose the actual cache expiry to the plugin. A configured lifetime can also be
+ignored by a provider or proxy. Run `/cache` to see the assumed lifetime and its limitations.
 
 OpenCode also sends the model's `cache.ttl` to the provider. To change only the countdown, set the
 plugin's `ttl` option. A string such as `"1h"` applies to every model. To set the lifetime for some
@@ -105,7 +107,7 @@ Shortly before the cache of a large context expires, the plugin adds a message t
 it's the last thing you see when you come back:
 
 ```text
-◈ Prompt cache expires at 14:32. After that, the next message writes ~225K tokens to the cache
+◈ Estimated prompt cache expiry: 14:32. If the cache expires, the next message writes ~225K tokens to the cache
   again (~$1.13 on Claude Opus 5.5). To compact, switch to GPT-6.1 Sol first (~$0.56), run
   /compact, then switch back.
 ```

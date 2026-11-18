@@ -80,7 +80,7 @@ describe('expiryNotice', () => {
     expect(
       expiryNotice({ ...notice, choice: { ref: sol.ref, name: 'GPT-6.1 Sol', cost: 0.5625 } }),
     ).toBe(
-      'Prompt cache expires at 14:32. After that, the next message writes ~225K tokens to the cache again (~$1.13 on Opus 5.5). To compact, switch to GPT-6.1 Sol first (~$0.56), run /compact, then switch back.',
+      'Estimated prompt cache expiry: 14:32. If the cache expires, the next message writes ~225K tokens to the cache again (~$1.13 on Opus 5.5). To compact, switch to GPT-6.1 Sol first (~$0.56), run /compact, then switch back.',
     );
   });
 
@@ -97,7 +97,7 @@ describe('expiryNotice', () => {
 
   test('leaves the cost out without prices', () => {
     expect(expiryNotice({ ...notice, from: { name: 'A' } })).toStartWith(
-      'Prompt cache expires at 14:32. After that, the next message writes ~225K tokens to the cache again. ',
+      'Estimated prompt cache expiry: 14:32. If the cache expires, the next message writes ~225K tokens to the cache again. ',
     );
   });
 });

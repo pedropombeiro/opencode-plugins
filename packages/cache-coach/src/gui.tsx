@@ -117,11 +117,11 @@ export default Plugin.define({
     function deliver(server: ServerRef, notice: Notice) {
       if (!visible(server, notice.sessionID)) return;
       toast(server, notice.sessionID, {
-        title: 'Prompt cache expires soon',
+        title: 'Prompt cache may expire soon',
         message: notice.description,
       });
       void ctx.attention.notify({
-        title: 'Prompt cache expires soon',
+        title: 'Prompt cache may expire soon',
         message: notice.description,
         session: { server: server.id, id: notice.sessionID },
         id: `cache-coach:${server.id}:${notice.stepID}`,

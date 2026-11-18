@@ -295,7 +295,7 @@ test('nextCost reads while warm and writes while cold', () => {
   ).toBeUndefined();
 });
 
-test('details describe the last request and the next one', () => {
+test('details describe estimated cache retention and the last request', () => {
   const lines = details({
     state: {
       kind: 'warm',
@@ -309,13 +309,27 @@ test('details describe the last request and the next one', () => {
     sessionCost: 3.21,
   });
   expect(lines).toEqual([
-    'Cache: warm, about 3:42 left',
-    'Cache lifetime: 5m after each request',
+    'Cache: likely warm, about 3:42 left in the estimate',
+    'Estimated cache lifetime: 5m from the start of each request',
+    'Based on plugin or model/provider configuration, or a 5-minute fallback. The provider may ignore the requested lifetime or retain the cache for a different duration. Cache Coach cannot verify the actual expiry, and its ttl option does not change server retention.',
     'Warming: off',
     '',
     'Last request on Claude Opus 5.5: 200K prompt tokens, 95% read from the cache',
     'Read 190K · written 10K · uncached 0 · output 2K',
-    'Next message: reads ~202K tokens from the cache (~$0.04)',
+    'Next message estimate: reads ~202K tokens from the cache (~$0.04)',
     'Session cost so far: $3.21',
   ]);
+});
+
+test('details do not claim that expiry or cache reuse is confirmed', () => {
+  const value = step(tokens(100_000, 0));
+  const input = { ttl: 300_000, next: { tokens: 100_000 } };
+  const cold = details({
+    ...input,
+    state: { kind: 'cold', step: value, reason: 'expired' },
+  });
+  expect(cold[0]).toBe('Cache: assumed cold, estimated lifetime elapsed');
+  expect(cold).toContain('Next message estimate: writes ~100K tokens to a new cache');
+  const running = details({ ...input, state: { kind: 'running', step: value } });
+  expect(running[0]).toBe('Cache: request running, cache reuse not yet confirmed');
 });

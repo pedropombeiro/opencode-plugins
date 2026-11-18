@@ -64,5 +64,5 @@ export function expiryNotice(input: {
   const advice = choice
     ? `To compact, switch to ${choice.name} first (${aboutUsd(choice.cost)}), run /compact, then switch back.`
     : 'Compacting on a cheaper model costs less.';
-  return `Prompt cache expires at ${input.time}. After that, the next message writes ~${formatTokens(tokens)} tokens to the cache again${cost}. ${advice}`;
+  return `Estimated prompt cache expiry: ${input.time}. If the cache expires, the next message writes ~${formatTokens(tokens)} tokens to the cache again${cost}. ${advice}`;
 }
