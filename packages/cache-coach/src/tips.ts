@@ -1,4 +1,5 @@
 import { aboutUsd, formatTokens, usd, type Ceiling, type Price } from './cache';
+import type { Finding, IncidentRecord, Status, Summary, Window } from './health';
 import type { Warming } from './warming';
 
 export interface Tip {
@@ -6,6 +7,7 @@ export interface Tip {
   title: string;
   message: string;
   variant: 'info' | 'warning';
+  attention?: boolean;
 }
 
 export interface PricedModel {
@@ -124,6 +126,81 @@ export function warmingTip(input: {
     variant: 'warning',
     message: `Warming didn't keep the cache this time: this request wrote ~${formatTokens(written)} tokens again${cost} after ${away} away. Warming requests also cost money, so consider turning warming off for ${input.model}.`,
   };
+}
+
+export const formatShare = (share: number) =>
+  share > 0 && share < 0.01 ? 'under 1%' : `${Math.round(share * 100)}%`;
+
+const across = (window: Window) =>
+  `${formatShare(window.share)} of ${formatTokens(window.input)} input tokens came from the cache across the last ${window.requests} requests`;
+
+const missed = (lost: number, extra?: number) =>
+  `an estimated ~${formatTokens(lost)} tokens from earlier prompts weren't read from the cache${extra === undefined ? '' : ` (${aboutUsd(extra)} extra)`}`;
+
+const patternOf = (record: IncidentRecord) =>
+  record.pattern === 'partial'
+    ? `only about ${formatShare(record.partialShare ?? 0)} of each prompt was read from the cache`
+    : 'little or nothing was read from the cache';
+
+export function healthTip(finding: Finding, model: string): Tip | undefined {
+  if (finding.type === 'low') return undefined;
+  const { record } = finding;
+  if (finding.type === 'recovered') {
+    if (!finding.notified) return undefined;
+    return {
+      key: `cache-health-recovered:${finding.key}:${record.opened}`,
+      title: 'Cache reuse recovered',
+      variant: 'info',
+      message: `Cache reuse recovered for ${model}: ${across(finding.window)}. Over ${record.requests} requests, ${missed(record.lost, record.extra)}.`,
+      attention: true,
+    };
+  }
+  const earlier =
+    finding.baseline === undefined
+      ? ''
+      : `, down from ${formatShare(finding.baseline)} earlier in this session`;
+  return {
+    key: `cache-health:${finding.key}:${record.opened}`,
+    title: 'Cache reuse still low',
+    variant: 'warning',
+    message: `Cache reuse is still low for ${model}: ${across(finding.window)}${earlier}. In most of the missed requests, ${patternOf(record)}. Over ${record.requests} requests, ${missed(record.lost, record.extra)}. Each missed request processes the context again, so compacting makes misses cheaper. Possible causes include prompt-prefix changes, cache configuration, or provider-side misses. Run /cache for details to include in a report.`,
+    attention: true,
+  };
+}
+
+export function healthLines(status: Status, summary: Summary): string[] {
+  const lines: string[] = [];
+  if (status.kind === 'waiting')
+    lines.push('Cache health: waiting for more requests on this model');
+  else if (status.kind === 'ok')
+    lines.push(
+      `Cache health: ${formatShare(status.window.share)} of ${formatTokens(status.window.input)} input tokens read from the cache across the last ${status.window.requests} requests`,
+    );
+  else if (status.kind === 'low') {
+    const earlier =
+      status.baseline === undefined ? '' : `, down from ${formatShare(status.baseline)}`;
+    lines.push(
+      `Cache health: reuse unexpectedly low, ${formatShare(status.window.share)} of ${formatTokens(status.window.input)} input tokens read from the cache across the last ${status.window.requests} requests${earlier}`,
+    );
+  }
+  const { last } = summary;
+  if (!last) return lines;
+  const count = (value: number) => `${value} ${value === 1 ? 'incident' : 'incidents'}`;
+  if (summary.incidents) {
+    const ongoing = summary.open ? `, ${summary.open} ongoing` : '';
+    lines.push(
+      `Cache misses this session: ${count(summary.incidents)}${ongoing}. In total, ${missed(summary.lost, summary.extra)}.`,
+    );
+  }
+  const assumed = last.assumed ? ', assumed' : '';
+  lines.push(
+    `Last incident on ${last.key}: ${last.requests} requests, ${last.open ? 'ongoing' : 'ended'}${assumed}. In most of the missed requests, ${patternOf(last)}.`,
+  );
+  if (summary.assumed)
+    lines.push(
+      `${count(summary.assumed)} assumed caching from the model's cache prices, because the provider hasn't reported cache use for that model in this session. They may not be real misses, so they aren't in the totals and don't show a warning.`,
+    );
+  return lines;
 }
 
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4);

@@ -179,7 +179,11 @@ export default {
       context.data.on('session.tool.success', (event) => {
         if (shows(event)) showTip(event.data.sessionID, coach.toolOutput(event.data));
       }),
-      context.data.on('session.compaction.ended', (event) => gate.compacted(event.data.sessionID)),
+      context.data.on('session.step.failed', (event) => coach.stepFailed(event.data)),
+      context.data.on('session.compaction.ended', (event) => {
+        gate.compacted(event.data.sessionID);
+        coach.compacted(event.data.sessionID);
+      }),
     ];
 
     return () => {

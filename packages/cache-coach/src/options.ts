@@ -3,6 +3,7 @@ import { parseTtl, type ModelRef } from './cache';
 export interface Settings {
   tips: boolean;
   notices: boolean;
+  health: boolean;
   compactionModels: ModelRef[];
   ttl?: number;
   contextCeiling?: number;
@@ -15,6 +16,7 @@ export interface Settings {
 export const DEFAULTS: Settings = {
   tips: true,
   notices: true,
+  health: true,
   compactionModels: [],
   contextRatio: 0.8,
   minTokens: 50_000,
@@ -43,6 +45,7 @@ export function parseOptions(options: Readonly<Record<string, unknown>> | undefi
   return {
     tips: value['tips'] !== false,
     notices: value['notices'] !== false,
+    health: value['health'] !== false,
     compactionModels: modelRefs(value['compactionModel']),
     ttl: parseTtl(value['ttl']),
     contextCeiling: isPositive(value['contextCeiling']) ? value['contextCeiling'] : undefined,
