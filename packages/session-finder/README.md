@@ -1,13 +1,28 @@
 # opencode-session-finder
 
 An [OpenCode](https://opencode.ai) plugin that searches the text of previous sessions. It adds
-a **Search sessions** command to the terminal interface, and gives the agent a `search_sessions`
-tool to find sessions and an `open_session` tool to switch to them.
+a **Search sessions** command to OpenCode Desktop and the terminal interface. The agent can also
+search with `search_sessions` and switch terminal sessions with `open_session`.
 
 The OpenCode session list matches titles only. This plugin reads the messages of every session
 in the local database.
 
-Requires OpenCode 2.
+Requires OpenCode 2.3 or later.
+
+## Search from OpenCode Desktop
+
+1. Choose **Search sessions** from the command palette or enter `/search-session` in the composer.
+2. Enter a keyword or sentence and select **Search**. To search immediately, enter
+   `/search-session <keyword or sentence>`.
+3. Select a result's title to open the session in a tab.
+
+Title matches appear first, followed by message matches. Results show the last match date and an
+excerpt. The search excludes the current session on the desktop app's own server and shows up to
+30 sessions. When viewing a remote session, the command still searches the desktop app's own
+server, not the remote server.
+
+OpenCode Web doesn't load third-party GUI plugins. To search from Web, ask the agent to use
+`search_sessions` on a server where the plugin is installed.
 
 ## Search from the terminal
 
@@ -87,8 +102,8 @@ must match the case of the query.
 opencode plugin add opencode-session-finder
 ```
 
-This adds the plugin to `~/.config/opencode/opencode.json`. OpenCode loads the terminal
-interface part along with it:
+This adds the plugin to `~/.config/opencode/opencode.json`. OpenCode loads the Desktop and
+terminal interfaces from the same package:
 
 ```json
 {
