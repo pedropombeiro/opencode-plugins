@@ -1,5 +1,16 @@
 # Changelog
 
+## [5.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-4.1.0...opencode-forgekeeper-5.0.0) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forgekeeper:** Inbox commands now take update IDs instead of list positions. New checkouts start with monitoring off unless enabled or configured for automation. Set delivery.reviews to summary to retain automatic review summaries.
+
+### Features
+
+* **forgekeeper:** make feedback monitoring opt-in and track unread updates ([b48ce9d](https://github.com/pedropombeiro/opencode-plugins/commit/b48ce9d58a233cbc2e5e993595f8ecefc4d16555))
+
 ## [4.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-4.0.1...opencode-forgekeeper-4.1.0) (2026-11-18)
 
 
