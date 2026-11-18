@@ -97,6 +97,18 @@ describe('createCoach', () => {
     expect(coach.view('one', 6 * MINUTE).state).toMatchObject({ kind: 'cold', reason: 'expired' });
   });
 
+  test('uses the lifetime of the matching ttl key, or falls back to the default', () => {
+    const matched = harness({ settings: { ttl: [{ pattern: 'anthropic/*', ttl: 30 * MINUTE }] } });
+    matched.step('a', 0, 100_000);
+    expect(matched.coach.view('one', 20 * MINUTE).state).toMatchObject({
+      kind: 'warm',
+      remaining: 10 * MINUTE,
+    });
+    const other = harness({ settings: { ttl: [{ pattern: 'gitlab/*', ttl: 30 * MINUTE }] } });
+    other.step('a', 0, 100_000);
+    expect(other.coach.view('one', 6 * MINUTE).state).toMatchObject({ kind: 'cold' });
+  });
+
   test('offers a cheaper compaction model once the cache is cold', () => {
     const { coach, step } = harness({
       settings: { compactionModels: [{ providerID: 'openai', id: 'cheap' }] },
