@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.5.1...opencode-cache-coach-0.6.0) (2026-11-18)
+
+
+### Features
+
+* **cache-coach:** warn before automatic compaction ([ede6b3f](https://github.com/pedropombeiro/opencode-plugins/commit/ede6b3f4555408fad8744eefeddb2def777cead6))
+
 ## [0.5.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.5.0...opencode-cache-coach-0.5.1) (2026-11-18)
 
 
