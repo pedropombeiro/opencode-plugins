@@ -401,7 +401,13 @@ export function createHealth(
     const key = contextKey(input.model, input.agent);
     const track = trackOf(state, key);
     if (track.last !== undefined && input.started < track.last) return skip('late');
-    if (tokens.cache.read + tokens.cache.write > 0) track.telemetry = true;
+    const reported = tokens.cache.read + tokens.cache.write > 0;
+    if (reported && !track.telemetry && track.incident?.assumed) {
+      close(track.incident);
+      track.incident = undefined;
+      track.recent = [];
+    }
+    if (reported) track.telemetry = true;
     track.assumed = !track.telemetry && input.cachePriced;
     const previous = track.prompt;
     track.prompt = prompt;

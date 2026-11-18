@@ -302,6 +302,17 @@ describe('createHealth', () => {
     expect(health.summary('s').last).toMatchObject({ assumed: true, open: true });
   });
 
+  test('replaces an assumed incident once the provider reports cache use', () => {
+    const { findings, repeat, health } = driver();
+    repeat(5, { input: 100_000, priced: true });
+    expect(findings).toMatchObject([{ type: 'low', assumed: true, incident: 1 }]);
+    repeat(4, { ...miss, priced: true });
+    expect(findings[1]).toMatchObject({ type: 'low', assumed: false, incident: 2 });
+    expect(health.summary('s')).toMatchObject({ incidents: 1, open: 1, assumed: 1 });
+    repeat(3, { ...miss, priced: true });
+    expect(findings.map((finding) => finding.type)).toEqual(['low', 'low', 'persistent']);
+  });
+
   test('keeps session totals beyond the bounded history', () => {
     const { step, repeat, health } = driver();
     const incidents = THRESHOLDS.history + 1;

@@ -173,7 +173,9 @@ blame the model. The plugin only counts requests that could have read the cache:
 - OpenCode reports missing cache counts as 0. So requests without cache reads or writes only count
   as misses after the provider reported cache use for that model in the session, or when the model
   has cache prices. Some providers don't report cache use at all, so incidents from the second case
-  appear in `/cache` marked as assumed, stay out of its totals, and never show a warning.
+  appear in `/cache` marked as assumed, stay out of its totals, and never show a warning. When the
+  provider later reports cache use, the assumed incident ends, and detection starts again from
+  that request.
 - Each session has its own history, so requests in other sessions or subagents don't affect it.
   Subagent sessions get no warnings.
 - A single missed request doesn't open an incident, so `/cache` doesn't count isolated misses.

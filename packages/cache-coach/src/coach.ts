@@ -256,12 +256,14 @@ export function createCoach(options: CoachOptions) {
 
   function describe(sessionID: string, time: number) {
     const lines = details({ ...view(sessionID, time), sessionCost: data.session.cost(sessionID) });
-    const step = settings.health ? stepOf(sessionID) : undefined;
+    if (!settings.health) return lines;
+    const step = stepOf(sessionID);
     const message = step && data.session.message.get(sessionID, step.id);
     const agent = message?.type === 'assistant' ? message.agent : undefined;
-    const extra = step
-      ? healthLines(health.status(sessionID, step.model, agent), health.summary(sessionID))
-      : [];
+    const status = step
+      ? health.status(sessionID, step.model, agent)
+      : ({ kind: 'unknown' } as const);
+    const extra = healthLines(status, health.summary(sessionID));
     return extra.length ? [...lines, '', ...extra] : lines;
   }
 

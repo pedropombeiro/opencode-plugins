@@ -205,7 +205,7 @@ describe('cache health', () => {
       );
     };
     const keys = (result: ReturnType<typeof send>) => (result?.tips ?? []).map((tip) => tip.key);
-    return { coach, send, keys };
+    return { coach, messages, send, keys };
   }
 
   const cold = usage(0, 100_000);
@@ -323,6 +323,17 @@ describe('cache health', () => {
     repeat(7, () => send(cold));
     coach.compacted('one');
     for (let index = 0; index < 7; index += 1) expect(keys(send(cold))).toEqual([]);
+  });
+
+  test('keeps the session incidents in the details after compaction', () => {
+    const { coach, messages, send } = run();
+    repeat(5, () => send(cold));
+    messages.push({ type: 'compaction', id: 'c', status: 'completed', time: { created: 200_000 } });
+    coach.compacted('one');
+    const lines = coach.describe('one', 210_000).join('\n');
+    expect(lines).toContain('Cache misses this session: 1 incident.');
+    expect(lines).toContain('Last incident on anthropic/opus: 4 requests, ended.');
+    expect(lines).not.toContain('Cache health:');
   });
 
   test('ignores failed steps', () => {
