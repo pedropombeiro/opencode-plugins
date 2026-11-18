@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.4.0...opencode-cache-coach-0.5.0) (2026-11-18)
+
+
+### Features
+
+* **cache-coach:** set the cache lifetime per model in the ttl option ([#163](https://github.com/pedropombeiro/opencode-plugins/issues/163)) ([70f36fc](https://github.com/pedropombeiro/opencode-plugins/commit/70f36fcd4ea3d2172d853ba48fa485d2a1fd80c6))
+
 ## [0.4.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.3.0...opencode-cache-coach-0.4.0) (2026-11-18)
 
 
