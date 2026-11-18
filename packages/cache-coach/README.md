@@ -57,9 +57,35 @@ The footer stays empty until the session has a request whose provider reports ca
 the indicator, or run `/cache`, to see the last request's cache hit rate, what the next message
 costs, and the session's cost so far.
 
-The countdown starts when the last request started, and uses the cache lifetime from the model's
-or provider's `cache.ttl` setting, or 5 minutes. Providers can evict a cache earlier, so a warm
-indicator means the cache is likely warm.
+The countdown starts when the last request started, and uses the cache lifetime from the plugin's
+[`ttl`](#options) option, the model's or provider's `cache.ttl` setting, or 5 minutes. Providers can
+evict a cache earlier, so a warm indicator means the cache is likely warm.
+
+OpenCode also sends the model's `cache.ttl` to the provider. To change only the countdown, set the
+plugin's `ttl` option. A string such as `"1h"` applies to every model. To set the lifetime for some
+models, map `providerID/modelID` patterns to lifetimes:
+
+```jsonc
+{
+  "package": "opencode-cache-coach",
+  "options": {
+    "ttl": {
+      "gitlab/*-sol": "30m",
+      "gitlab/*-astra": "30m",
+      "anthropic/*": "1h",
+    },
+  },
+}
+```
+
+- `*` matches any run of characters, including `/`. Matching is case-sensitive.
+- A key without `*` that equals the model wins. Otherwise, the matching pattern with the most
+  characters other than `*` wins, and ties go to the key listed first.
+- Models that no key matches use the model's or provider's `cache.ttl`, or 5 minutes. A `"*"` key
+  sets a default for the plugin only.
+- The plugin ignores keys whose lifetime it can't read.
+
+The lifetime also applies to expiry notices, the model-switch tip, and [cache health](#cache-health).
 
 ### Warming
 
@@ -225,7 +251,7 @@ form of the package entry. OpenCode still loads the plugin once:
 | `notices`         | `true`                                   | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                                          |
 | `health`          | `true`                                   | Set to `false` to turn off [cache health](#cache-health) tracking and warnings. They don't depend on `tips`.                                                                                                              |
 | `compactionModel` |                                          | Model to suggest for compacting after the cache expires, such as `"gitlab/duo-chat-gpt-6-1-sol"`, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`. |
-| `ttl`             |                                          | Cache lifetime, such as `"1h"`. Overrides the model and provider `cache.ttl`.                                                                                                                                             |
+| `ttl`             |                                          | Cache lifetime, such as `"1h"`, or an object that maps model patterns to lifetimes. Overrides the model and provider `cache.ttl` without changing requests. See [Cache indicator](#cache-indicator).                      |
 | `contextCeiling`  | `250000`, or where a higher price starts | Context size the ceiling tip measures against. Setting it applies to every model, including tiered ones. Capped at the model's input limit.                                                                               |
 | `contextRatio`    | `0.8`                                    | Share of the ceiling at which the ceiling tip appears.                                                                                                                                                                    |
 | `minTokens`       | `50000`                                  | Smallest context that a model-switch tip or an expiry message covers.                                                                                                                                                     |

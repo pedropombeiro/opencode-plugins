@@ -19,7 +19,7 @@ import {
 } from './cache';
 import { compactionChoice, expiryNotice, formatClock, type Choice } from './compaction';
 import { createHealth, type Finding, type Thresholds } from './health';
-import type { Settings } from './options';
+import { ttlForModel, type Settings } from './options';
 import {
   contextCeilingTip,
   estimateTokens,
@@ -115,8 +115,8 @@ export function createCoach(options: CoachOptions) {
         )
       : undefined;
 
-  const ttlFor = (model?: ModelInfo, provider?: ProviderInfo) =>
-    settings.ttl ??
+  const ttlFor = (ref: ModelRef | undefined, model?: ModelInfo, provider?: ProviderInfo) =>
+    ttlForModel(settings.ttl, ref) ??
     parseTtl(model?.settings?.cache?.ttl) ??
     parseTtl(provider?.settings?.cache?.ttl) ??
     DEFAULT_TTL;
@@ -187,7 +187,7 @@ export function createCoach(options: CoachOptions) {
     const stepModel = step && findModel(models, step.model);
     const target = selected ? findModel(models, selected) : stepModel;
     const provider = step && providers.find((entry) => entry.id === step.model.providerID);
-    const ttl = ttlFor(stepModel, provider);
+    const ttl = ttlFor(step?.model, stepModel, provider);
     const warming = warmingFor(sessionID, stepModel, provider);
     const state = cacheState({
       step,
@@ -310,7 +310,7 @@ export function createCoach(options: CoachOptions) {
     const price = from && priceFor(from.cost, tokens);
     const tip = modelSwitchTip({
       tokens,
-      warm: step.started + ttlFor(from, provider) > now,
+      warm: step.started + ttlFor(step.model, from, provider) > now,
       from: { name: nameOf(from, step.model), price },
       to: { name: nameOf(to, selected), price: to && priceFor(to.cost, tokens) },
       compaction: compactionFor(models, step.model, tokens, price),
@@ -350,7 +350,7 @@ export function createCoach(options: CoachOptions) {
               ...(message?.type === 'assistant' ? { agent: message.agent } : {}),
               started,
               tokens,
-              ttl: ttlFor(model, provider),
+              ttl: ttlFor(ref, model, provider),
               cachePriced: cachePriced(model),
               ...(price ? { price } : {}),
             }),
@@ -362,7 +362,7 @@ export function createCoach(options: CoachOptions) {
     const scheduled = notice({
       sessionID,
       stepID: assistantMessageID,
-      expires: started + ttlFor(model, provider),
+      expires: started + ttlFor(ref, model, provider),
       tokens: total,
       ref,
       model,
@@ -380,7 +380,7 @@ export function createCoach(options: CoachOptions) {
       tips.push(
         warmingTip({
           gap: started - (previous.ended ?? previous.started),
-          ttl: ttlFor(model, provider),
+          ttl: ttlFor(ref, model, provider),
           warming,
           model: shortName(nameOf(model, ref)),
           written: tokens.cache.write,
