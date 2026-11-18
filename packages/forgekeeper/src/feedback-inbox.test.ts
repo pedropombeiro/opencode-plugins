@@ -16,6 +16,40 @@ const recordAndDeliver = async (
 ) => (await inbox.record(...args)).delivery;
 
 describe('feedback inbox', () => {
+  test('marking a displayed batch read preserves newer updates and survives reload', async () => {
+    let stored: InboxState | undefined;
+    const open = () =>
+      createFeedbackInbox({
+        initiallyPaused: true,
+        read: async () => stored,
+        write: async (next) => {
+          stored = next;
+        },
+        changed: () => {},
+      });
+    const inbox = open();
+    expect((await inbox.list()).paused).toBe(true);
+    await inbox.pause(false);
+    const item = {
+      id: 'seen',
+      sessionID: 'one',
+      url: 'https://example.com',
+      title: 'Review',
+      links: [],
+      at: 1,
+    };
+    await recordAndDeliver(inbox, item);
+    const shown = (await inbox.list()).items.map((entry) => entry.id);
+    await recordAndDeliver(inbox, { ...item, id: 'new' });
+    await inbox.markRead(shown);
+    const state = await open().list();
+    expect(state.paused).toBe(false);
+    expect(state.items.map((entry) => [entry.id, !!entry.read])).toEqual([
+      ['new', false],
+      ['seen', true],
+    ]);
+    expect(feedbackFooter(state, 'one')).toBe('1 review update');
+  });
   test("a session's footer counts only its own updates", () => {
     const item = (id: string, sessionID: string): FeedbackItem => ({
       id,

@@ -382,6 +382,7 @@ export default Plugin.define({
       const facts = () =>
         [
           item().sessionID === props.current ? 'This session' : undefined,
+          item().read ? 'Read' : 'Unread',
           feedbackTime(item()),
           item().automation
             ? `${item().automation!.state}${item().automation!.reason ? `: ${item().automation!.reason}` : ''}`
@@ -450,11 +451,22 @@ export default Plugin.define({
             <h2>Review updates{state().paused ? ' (monitoring paused)' : ''}</h2>
             <ui.Button
               size="small"
+              disabled={!state().items.some((item) => !item.read)}
+              onClick={() =>
+                void inboxAction(directory(), 'markFeedbackRead', {
+                  ids: state().items.map((item) => item.id),
+                })
+              }
+            >
+              Mark all as read
+            </ui.Button>
+            <ui.Button
+              size="small"
               onClick={() =>
                 void inboxAction(directory(), 'pauseFeedback', { paused: !state().paused })
               }
             >
-              {state().paused ? 'Resume monitoring' : 'Pause monitoring'}
+              {state().paused ? 'Enable feedback inbox' : 'Pause monitoring'}
             </ui.Button>
           </header>
           <Show when={inboxErrors[directory()]}>

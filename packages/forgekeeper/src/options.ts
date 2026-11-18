@@ -3,6 +3,7 @@
 export interface StatusOptions {
   // `status: false` keeps only session targets and titles.
   enabled: boolean;
+  inbox: boolean;
   pollSeconds: number;
   watch: Watch;
   // Bot accounts whose comments count as review feedback, such as security
@@ -104,7 +105,7 @@ const DEFAULT_WATCH: Watch = {
   lifecycle: true,
   reviewRequests: true,
 };
-const DEFAULT_DELIVERY: Delivery = { reviews: 'summary', lifecycle: 'inbox' };
+const DEFAULT_DELIVERY: Delivery = { reviews: 'inbox', lifecycle: 'inbox' };
 const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
 
 const HOST = /^[a-z0-9.-]+(:\d+)?$/;
@@ -132,6 +133,7 @@ const ACTIONS: Record<keyof LifecycleExecution, readonly ExecutionAction[]> = {
 // The top-level options. `hosts` and `githubHosts` are read with the forges.
 const OPTIONS = [
   'status',
+  'inbox',
   'pollSeconds',
   'watch',
   'reviewBots',
@@ -442,6 +444,7 @@ export function statusOptions(options: unknown): StatusOptions {
     read.choice(`delivery.${key}`, delivery[key], DELIVERIES, DEFAULT_DELIVERY[key]);
   return {
     enabled: read.boolean('status', source.status, true),
+    inbox: read.boolean('inbox', source.inbox, false),
     pollSeconds: read.pollSeconds(source.pollSeconds),
     watch: {
       humanReviews: watched('humanReviews'),

@@ -76,10 +76,10 @@ Conflicts appear in both the composer pill and the status panel:
 The OpenCode web app loads neither the terminal nor the desktop part, but it offers two
 commands that answer in the conversation:
 
-| Command         | Action                                                                                                                      |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `/forge-report` | Show the PR/MR status of the session.                                                                                       |
-| `/forge-inbox`  | List the session's pending updates. `ack <number>` or `ack all` acknowledges them, and `summarize <number>` summarizes one. |
+| Command         | Action                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `/forge-report` | Show the PR/MR status of the session.                                                                               |
+| `/forge-inbox`  | List the session's pending updates. `ack <id>` or `ack all` acknowledges them, and `summarize <id>` summarizes one. |
 
 Each answer is a short tool-free model turn that shows a report written from forge data.
 Those apps don't display the text of messages that plugins add, so the model shows it.
@@ -96,12 +96,16 @@ Forgekeeper watches explicit PR/MR targets for human and automated review feedba
 failed jobs, and merges. Recent top-level sessions can receive updates even if their tabs
 aren't open. Branch-derived PRs/MRs get status but no review notifications.
 
-All updates go to a persistent local inbox. By default, review feedback also starts a summary
-turn, while lifecycle updates stay in the inbox. In `/forge-feedback`, select an update to
-open its links, acknowledge it, summarize it in its session, or pause monitoring.
-Acknowledging an update doesn't reply to or resolve a remote discussion.
+New checkouts show status without collecting inbox updates. Open `/forge-feedback` and choose
+**Enable feedback inbox** (Ctrl+S in the terminal) to start monitoring this checkout. Set
+`inbox: true` to enable monitoring by default. Automation rules also opt in. A saved checkout
+preference takes precedence, including one from before the upgrade.
 
-To summarize lifecycle updates automatically too, set `delivery.lifecycle` to `summary`:
+**Mark all as read** (Ctrl+U in the terminal) clears the badge for the displayed updates and
+keeps them in the inbox. An update arriving afterward stays unread. **Acknowledge** dismisses
+an update locally. Neither action replies to or resolves a remote discussion.
+
+To enable monitoring and summarize lifecycle updates automatically:
 
 ```json
 {
@@ -109,6 +113,7 @@ To summarize lifecycle updates automatically too, set `delivery.lifecycle` to `s
     {
       "package": "opencode-forgekeeper",
       "options": {
+        "inbox": true,
         "delivery": { "lifecycle": "summary" }
       }
     }
@@ -118,10 +123,10 @@ To summarize lifecycle updates automatically too, set `delivery.lifecycle` to `s
 
 Each delivery option accepts:
 
-- `inbox`: retain the update without posting to the session. This is the lifecycle default.
+- `inbox` (default): retain the update without posting to the session.
 - `passive`: queue a notice without starting a turn.
-- `summary`: start a restricted summary turn after active work finishes. This is the review
-  default. Review updates without comments use a passive notice instead.
+- `summary`: start a restricted summary turn after active work finishes. Review updates without
+  comments use a passive notice instead.
 
 Human and GitLab Duo feedback wait for a four-minute quiet period, with status polling every
 30 seconds meanwhile, so an update arrives within about 5 minutes of the last comment. That's
@@ -182,7 +187,8 @@ Only specify values you want to change. The terminal part has no separate option
 | `watch.lifecycle`                 | `true`                        | Monitor conflicts, failed jobs, and merges.                                                                                                                                                                                                                                           |
 | `watch.reviewRequests`            | `true`                        | Monitor requests for your review on GitLab MRs, including repeated ones.                                                                                                                                                                                                              |
 | `reviewBots`                      | GitLab.com security reviewers | Exact bot usernames by host. Your list replaces the defaults.                                                                                                                                                                                                                         |
-| `delivery.reviews`                | `"summary"`                   | Review delivery: `inbox`, `passive`, or `summary`.                                                                                                                                                                                                                                    |
+| `inbox`                           | `false`                       | Enable inbox monitoring for checkouts without a saved monitoring preference. Automation rules also enable it.                                                                                                                                                                         |
+| `delivery.reviews`                | `"inbox"`                     | Review delivery: `inbox`, `passive`, or `summary`.                                                                                                                                                                                                                                    |
 | `delivery.lifecycle`              | `"inbox"`                     | Conflict, job-failure, and merge delivery.                                                                                                                                                                                                                                            |
 | `lifecycleExecution.parentMerged` | `{ "mode": "notify" }`        | Optionally prepare retarget proposals for tracked dependents.                                                                                                                                                                                                                         |
 | `automation.rules`                | No rules                      | Reviewers whose feedback starts a coding turn that prepares fixes, or projects whose failed jobs start an investigation, optionally limited to allowed models. Set `"execution": "environment"` to permit the configured environment provider when the owning checkout doesn't match. |

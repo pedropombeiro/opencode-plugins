@@ -4,6 +4,7 @@ import {
   FEEDBACK_COMMAND,
   FEEDBACK_TITLE,
   feedbackReport,
+  feedbackRef,
   invalidFeedbackReport,
   parseFeedbackAction,
   sessionItems,
@@ -219,6 +220,8 @@ export async function setupServer(
       refresh: async ({ key }) =>
         watcher ? { enabled: true, snapshot: json(await watcher.refresh(key)) } : DISABLED,
       feedback: async () => (watcher ? watcher.inbox.list() : { items: [], paused: false }),
+      markFeedbackRead: async ({ ids }) =>
+        watcher ? watcher.inbox.markRead(ids) : { items: [], paused: false },
       acknowledgeFeedback: async ({ id }) =>
         watcher ? watcher.inbox.acknowledge(id) : { items: [], paused: false },
       summarizeFeedback: async ({ id }) => {
@@ -412,12 +415,17 @@ export async function setupServer(
     const state = await status.inbox.list();
     if (action.kind === 'list') return feedbackReport(state, sessionID);
     const items = sessionItems(state, sessionID);
-    const chosen = action.which === 'all' ? items : [items[action.which - 1]].filter(Boolean);
+    const chosen =
+      action.which === 'all'
+        ? items
+        : items.filter((item) => feedbackRef(item.id) === action.which);
+    if (action.which !== 'all' && chosen.length > 1)
+      return 'Ambiguous update ID. Use the feedback panel.';
     if (chosen.length === 0)
       return feedbackReport(
         state,
         sessionID,
-        action.which === 'all' ? undefined : `There is no update number ${action.which}.`,
+        action.which === 'all' ? undefined : `No pending update with ID ${action.which}.`,
       );
     if (action.kind === 'summarize') {
       await status.summarize(chosen[0].id);
@@ -608,8 +616,11 @@ export async function setupServer(
       if (type === 'session.renamed' && sessionID)
         void watcher?.titleChanged(sessionID).catch(() => {});
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
-      if (type === 'session.execution.succeeded' || type === 'session.execution.failed')
-        watcher?.turnEnded();
+      if (
+        sessionID &&
+        (type === 'session.execution.succeeded' || type === 'session.execution.failed')
+      )
+        watcher?.turnEnded(sessionID);
       // A shutdown doesn't end the turn: the resumed execution continues it.
       const reason = (event.data as { reason?: string } | undefined)?.reason;
       if (

@@ -943,8 +943,8 @@ export function createAutomationHost(
         } catch (error) {
           // A linked session's turn outlives its deleted owner, so the
           // instance of the checkout the owner was in keeps watching it.
-          if (env.missingSession(error) && record.execution?.ownerDirectory === directory)
-            records.push(record);
+          if (!env.missingSession(error)) throw error;
+          if (record.execution?.ownerDirectory === directory) records.push(record);
           continue;
         }
         if (session.location.directory === directory) records.push(record);

@@ -4,12 +4,47 @@ import { linkedMetadata } from './linked-session';
 import { deferred } from './testing';
 
 describe('feedback discovery', () => {
+  test('a targeted refresh reads one session and keeps the other sessions enrolled', async () => {
+    let scans = 0;
+    let eligible = true;
+    const reads: string[] = [];
+    let watched: string[] = [];
+    const discovery = createFeedbackDiscovery({
+      directory: '/repo',
+      candidates: async () => {
+        scans++;
+        return ['one', 'two'];
+      },
+      candidate: async () => eligible,
+      session: async (id) => {
+        reads.push(id);
+        return { time: {}, location: { directory: '/repo' } };
+      },
+      activity: async () => Date.now(),
+      paused: async () => false,
+      watch: (ids) => {
+        watched = ids;
+      },
+      error: (error) => {
+        throw error;
+      },
+    });
+    await discovery.refresh();
+    reads.length = 0;
+    await discovery.refresh('two');
+    expect(reads).toEqual(['two']);
+    eligible = false;
+    await discovery.refresh('two');
+    expect(watched).toEqual(['one']);
+    expect(scans).toBe(1);
+  });
   test('discovers only recent non-archived root sessions in its checkout, without linked ones', async () => {
     const watched: string[][] = [];
     const at = 10 * RECENT_ACTIVITY;
     let paused = false;
     const discovery = createFeedbackDiscovery({
       directory: '/repo',
+      candidate: async () => true,
       now: () => at,
       candidates: async () => [
         'recent',
@@ -53,6 +88,7 @@ describe('feedback discovery', () => {
     const discovery = createFeedbackDiscovery({
       directory: '/repo',
       candidates: () => gate.promise,
+      candidate: async () => true,
       session: async () => ({ time: {}, location: { directory: '/repo' } }),
       activity: async () => Date.now(),
       paused: async () => false,

@@ -506,6 +506,7 @@ export default {
           title: item.title,
           // A lifecycle event's first fact, such as a proposed retarget, shows too.
           description: [
+            item.read ? 'Read' : 'Unread',
             context.data.session.get(item.sessionID)?.title ?? item.sessionID,
             feedbackTime(item),
             ...(item.automation
@@ -585,8 +586,21 @@ export default {
             },
           },
           {
+            bind: 'ctrl+u',
+            title: 'Mark all as read',
+            selection: 'none',
+            onTrigger: async () => {
+              await rpc.markFeedbackRead(
+                { ids: state.items.map((item) => item.id) },
+                { location: { directory } },
+              );
+              context.ui.dialog.clear();
+              void showFeedback();
+            },
+          },
+          {
             bind: 'ctrl+s',
-            title: state.paused ? 'Resume monitoring' : 'Pause monitoring',
+            title: state.paused ? 'Enable feedback inbox' : 'Pause monitoring',
             selection: 'none',
             onTrigger: async () => {
               await rpc.pauseFeedback({ paused: !state.paused }, { location: { directory } });

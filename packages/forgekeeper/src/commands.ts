@@ -1,5 +1,6 @@
 import { feedbackLinks, feedbackTime, type FeedbackItem, type InboxState } from './feedback-inbox';
 import { detailsMessage } from './format';
+import { createHash } from 'node:crypto';
 import type { Snapshot } from './store';
 
 // Server commands, which every client offers, including the web and desktop
@@ -27,30 +28,28 @@ export const statusReport = (snapshot: Snapshot) =>
 
 export type FeedbackAction =
   | { kind: 'list' }
-  | { kind: 'acknowledge'; which: number | 'all' }
-  | { kind: 'summarize'; which: number }
+  | { kind: 'acknowledge'; which: string }
+  | { kind: 'summarize'; which: string }
   | { kind: 'invalid'; input: string };
 
-const USAGE = `Usage: \`/${FEEDBACK_COMMAND} [ack <number> | ack all | summarize <number>]\``;
+const USAGE = `Usage: \`/${FEEDBACK_COMMAND} [ack <id> | ack all | summarize <id>]\``;
+export const feedbackRef = (id: string) =>
+  createHash('sha256').update(id).digest('hex').slice(0, 16);
 
-// The arguments of `/forge-feedback`: nothing lists the session's updates,
-// `ack` acknowledges one or all of them, and `summarize` summarizes one.
 export function parseFeedbackAction(input: string): FeedbackAction {
   const words = input.trim().toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return { kind: 'list' };
   const [verb, argument, ...rest] = words;
-  const number = argument && /^[1-9]\d*$/.test(argument) ? Number(argument) : undefined;
+  const ref = argument && /^[0-9a-f]{16}$/.test(argument);
   if (rest.length === 0 && (verb === 'ack' || verb === 'acknowledge')) {
     if (argument === 'all') return { kind: 'acknowledge', which: 'all' };
-    if (number !== undefined) return { kind: 'acknowledge', which: number };
+    if (ref) return { kind: 'acknowledge', which: argument };
   }
-  if (rest.length === 0 && verb === 'summarize' && number !== undefined)
-    return { kind: 'summarize', which: number };
+  if (rest.length === 0 && verb === 'summarize' && ref)
+    return { kind: 'summarize', which: argument };
   return { kind: 'invalid', input: input.trim() };
 }
 
-// The session's own updates, newest first, as the inbox stores them. Their
-// numbers in `/forge-feedback` are positions in this list.
 export const sessionItems = (state: InboxState, sessionID: string) =>
   state.items.filter((item) => item.sessionID === sessionID);
 
@@ -61,7 +60,7 @@ function describeItem(item: FeedbackItem, index: number): string[] {
       `${item.automation.state}${item.automation.reason ? `: ${item.automation.reason}` : ''}`,
     );
   return [
-    `${index + 1}. ${item.title}`,
+    `${index + 1}. ${item.title} (\`${feedbackRef(item.id)}\`)`,
     `   - ${facts.join(' · ')}`,
     ...(item.details ?? []).map((detail) => `   - ${detail}`),
     ...feedbackLinks(item).map((url) => `   - ${url}`),
@@ -75,11 +74,7 @@ export function feedbackReport(state: InboxState, sessionID: string, note?: stri
     ...(note ? [note] : []),
   ];
   if (!items.length) return [...lines, 'No pending review updates for this session.'].join('\n\n');
-  return [
-    ...lines,
-    items.flatMap(describeItem).join('\n'),
-    `Acknowledge with \`/${FEEDBACK_COMMAND} ack <number>\` or \`/${FEEDBACK_COMMAND} ack all\`. Summarize one in this session with \`/${FEEDBACK_COMMAND} summarize <number>\`.`,
-  ].join('\n\n');
+  return [...lines, items.flatMap(describeItem).join('\n'), USAGE].join('\n\n');
 }
 
 export const invalidFeedbackReport = (input: string) =>

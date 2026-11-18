@@ -27,6 +27,7 @@ export interface FeedbackItem {
   // When Forgekeeper recorded the update.
   at: number;
   notifiedAt?: number;
+  read?: true;
   automation?: AutomationStatus;
   automationAllowed?: boolean;
 }
@@ -72,7 +73,7 @@ export function feedbackFooter(
   state: InboxState,
   sessionID: string | undefined,
 ): string | undefined {
-  const count = state.items.filter((item) => item.sessionID === sessionID).length;
+  const count = state.items.filter((item) => item.sessionID === sessionID && !item.read).length;
   if (!sessionID || count === 0) return undefined;
   return `${count} review update${count === 1 ? '' : 's'}${state.paused ? ' (paused)' : ''}`;
 }
@@ -120,6 +121,7 @@ export function linkOptions(item: Pick<FeedbackItem, 'url' | 'links' | 'kind'>) 
 
 export function createFeedbackInbox(options: {
   read: () => Promise<InboxState | undefined>;
+  initiallyPaused?: boolean;
   write: (state: InboxState) => Promise<void>;
   changed: () => void;
   notify?: (item: FeedbackItem) => Promise<void>;
@@ -139,7 +141,7 @@ export function createFeedbackInbox(options: {
     return next;
   };
   const read = async (): Promise<InboxState> =>
-    (await options.read()) ?? { items: [], paused: false };
+    (await options.read()) ?? { items: [], paused: options.initiallyPaused ?? false };
   const change = (update: (state: InboxState) => InboxState, adding = false) =>
     run(async () => {
       const previous = await read();
@@ -215,6 +217,13 @@ export function createFeedbackInbox(options: {
     list: () => run(read),
     record,
     notifyPending: async () => notify((await run(read)).items),
+    markRead: (ids: readonly string[]) => {
+      const shown = new Set(ids);
+      return change((state) => ({
+        ...state,
+        items: state.items.map((item) => (shown.has(item.id) ? { ...item, read: true } : item)),
+      }));
+    },
     acknowledge: (id: string) =>
       change((state) => ({ ...state, items: state.items.filter((item) => item.id !== id) })),
     automation: (id: string, automation: AutomationStatus) =>

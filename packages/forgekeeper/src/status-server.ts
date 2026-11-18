@@ -142,6 +142,7 @@ export async function setupStatus(
   const foreign = new Set<string>();
   let invalidate: (sessionID: string) => void = () => {};
   const inbox = createFeedbackInbox({
+    initiallyPaused: !settings.inbox && !settings.automation.rules.length,
     select: (item) => automation.selectAutomatic(item),
     read: async () =>
       (await ctx.storage.get(`feedback-inbox/${encodeURIComponent(directory)}`)) as
@@ -504,16 +505,15 @@ export async function setupStatus(
     now: deps.now,
   });
   invalidate = (sessionID) => service.invalidate(sessionID);
+  const hasTarget = (targets: Target[]) =>
+    !!classifyTargets(targetOutput(targets))?.some((target) => target.kind === 'merge-request');
   const discovery = createFeedbackDiscovery({
     directory,
+    candidate: async (id) => hasTarget(await host.storedTargets(id)),
     candidates: async () =>
       (await scanAll('sessions/')).flatMap(({ key, value }) => {
         const targets = (value as { targets?: Target[] }).targets ?? [];
-        return classifyTargets(targetOutput(targets))?.some(
-          (target) => target.kind === 'merge-request',
-        )
-          ? [key.slice('sessions/'.length)]
-          : [];
+        return hasTarget(targets) ? [key.slice('sessions/'.length)] : [];
       }),
     session: (sessionID) => ctx.session.get({ sessionID }),
     // The newest user prompt in the context. A compaction drops earlier
@@ -534,12 +534,27 @@ export async function setupStatus(
     error: (error) => reportOnce('discovery', 'Could not discover recent review sessions', error),
     now: deps.now,
   });
+  let restored = false;
+  let restoring = false;
+  const restoreAutomation = async () => {
+    if (restored || restoring || closing) return;
+    restoring = true;
+    try {
+      const records = await automationHost.restorable();
+      if (!closing) automation.restore(records);
+      restored = true;
+    } catch (error) {
+      reportOnce('automation-restore', 'Could not restore automation attempts; will retry', error);
+    } finally {
+      restoring = false;
+    }
+  };
+  void tracked(restoreAutomation());
   void inbox
     .list()
     .then(async (state) => {
       if (closing) return;
       service.pauseFeedback(state.paused);
-      automation.restore(await automationHost.restorable());
       await notifyPending();
       // Events found before a reload or a failure, such as a merge, which
       // ends polling, still go.
@@ -579,6 +594,7 @@ export async function setupStatus(
   }, DISCOVERY_INTERVAL);
   const notificationTimer = setInterval(() => {
     if (closing) return;
+    if (!restored) void tracked(restoreAutomation());
     void notifyPending();
     void retryLifecycle();
   }, FETCH_INTERVAL);
@@ -747,7 +763,7 @@ export async function setupStatus(
       void inbox
         .prune((item) => item.sessionID === sessionID && !includesRequest(targets, item.url))
         .catch((error) => reportOnce('inbox', 'Could not clear stale review updates', error));
-      void discovery.refresh();
+      void discovery.refresh(sessionID);
     },
     // A title reference only counts without targets.
     async titleChanged(sessionID: string) {
@@ -755,7 +771,7 @@ export async function setupStatus(
       if ((await host.state(sessionID)).targets.length === 0) service.invalidate(sessionID);
     },
     // A turn may have pushed a branch or opened a PR/MR.
-    turnEnded() {
+    turnEnded(sessionID: string) {
       statusCache.clear();
       feedbackCache.clear();
       requestCache.clear();
@@ -765,7 +781,7 @@ export async function setupStatus(
           for (const request of lookup.requests) reviews.invalidate(key, request);
         service.notify(key);
       }
-      void discovery.refresh();
+      void discovery.refresh(sessionID);
     },
     // Records how a session's turn ended for its running review attempts.
     executionEnded(sessionID: string, outcome: 'succeeded' | 'failed', at: number) {
@@ -788,6 +804,7 @@ export async function setupStatus(
     // it's discarded. The next lookup finds out which instance owns the
     // session. Deliveries check again before they send.
     sessionMoved(sessionID: string) {
+      void discovery.refresh(sessionID);
       if (service.keys().includes(sessionID)) service.invalidate(sessionID);
     },
     // Stops new work, lets started deliveries store their outcome, then stops

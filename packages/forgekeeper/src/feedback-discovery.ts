@@ -16,6 +16,7 @@ export interface DiscoverySession {
 export function createFeedbackDiscovery(options: {
   directory: string;
   candidates: () => Promise<string[]>;
+  candidate: (id: string) => Promise<boolean>;
   session: (id: string) => Promise<DiscoverySession>;
   activity: (id: string) => Promise<number | undefined>;
   paused: () => Promise<boolean>;
@@ -25,34 +26,49 @@ export function createFeedbackDiscovery(options: {
 }) {
   let stopped = false;
   let running: Promise<void> | undefined;
-  const refresh = () => {
+  let full = false;
+  const pending = new Set<string>();
+  const watched = new Set<string>();
+  const refresh = (id?: string) => {
     if (stopped) return Promise.resolve();
+    if (id === undefined) full = true;
+    else pending.add(id);
     if (running) return running;
     running = (async () => {
-      if (await options.paused()) {
-        if (!stopped) options.watch([]);
-        return;
-      }
-      const ids: string[] = [];
-      await mapLimit(await options.candidates(), CONCURRENCY, async (id) => {
-        if (stopped) return;
-        try {
-          const session = await options.session(id);
-          if (
-            session.parentID ||
-            session.time.archived !== undefined ||
-            session.location.directory !== options.directory ||
-            linkedOwner({ ...session, id: session.id ?? id })
-          )
-            return;
-          const activity = await options.activity(id);
-          const age = (options.now ?? Date.now)() - (activity ?? -Infinity);
-          if (age >= 0 && age <= RECENT_ACTIVITY) ids.push(id);
-        } catch (error) {
-          options.error(error);
+      while (!stopped && (full || pending.size)) {
+        const scan = full;
+        full = false;
+        const changed = [...pending];
+        pending.clear();
+        if (await options.paused()) {
+          watched.clear();
+          if (!stopped) options.watch([]);
+          continue;
         }
-      });
-      if (!stopped) options.watch(ids);
+        const ids = scan ? await options.candidates() : changed;
+        if (scan) watched.clear();
+        await mapLimit(ids, CONCURRENCY, async (id) => {
+          if (stopped) return;
+          try {
+            watched.delete(id);
+            if (!scan && !(await options.candidate(id))) return;
+            const session = await options.session(id);
+            if (
+              session.parentID ||
+              session.time.archived !== undefined ||
+              session.location.directory !== options.directory ||
+              linkedOwner({ ...session, id: session.id ?? id })
+            )
+              return;
+            const activity = await options.activity(id);
+            const age = (options.now ?? Date.now)() - (activity ?? -Infinity);
+            if (age >= 0 && age <= RECENT_ACTIVITY) watched.add(id);
+          } catch (error) {
+            options.error(error);
+          }
+        });
+        if (!stopped) options.watch([...watched]);
+      }
     })()
       .catch(options.error)
       .finally(() => {

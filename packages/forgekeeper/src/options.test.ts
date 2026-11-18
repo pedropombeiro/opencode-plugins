@@ -216,9 +216,10 @@ describe('statusOptions', () => {
       }
   });
 
-  test('watches everything and defaults to review summaries and lifecycle inbox delivery', () => {
+  test('defaults to status only and inbox delivery when enabled', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
+      inbox: false,
       pollSeconds: 120,
       watch: {
         humanReviews: true,
@@ -228,7 +229,7 @@ describe('statusOptions', () => {
         reviewRequests: true,
       },
       reviewBots: DEFAULT_REVIEW_BOTS,
-      delivery: { reviews: 'summary', lifecycle: 'inbox' },
+      delivery: { reviews: 'inbox', lifecycle: 'inbox' },
       lifecycleExecution: { parentMerged: notify },
       automation: { rules: [] },
       problems: [],
@@ -262,7 +263,7 @@ describe('statusOptions', () => {
       problems: [],
     });
     expect(statusOptions({ delivery: { lifecycle: 'passive' } }).delivery).toEqual({
-      reviews: 'summary',
+      reviews: 'inbox',
       lifecycle: 'passive',
     });
   });
@@ -276,7 +277,7 @@ describe('statusOptions', () => {
       [{ watch: ['lifecycle'] }, 'watch must be an object; using the defaults'],
       [
         { delivery: { reviews: 'summmary' } },
-        'delivery.reviews must be one of "inbox", "passive", "summary"; using "summary"',
+        'delivery.reviews must be one of "inbox", "passive", "summary"; using "inbox"',
       ],
       [{ delivery: 'summary' }, 'delivery must be an object; using the defaults'],
       [{ hosts: 'gitlab.example.com' }, 'hosts must be a list of host names'],
@@ -285,7 +286,7 @@ describe('statusOptions', () => {
     }
     const invalid = statusOptions({ watch: { lifecycle: 'false' }, delivery: { reviews: 'x' } });
     expect(invalid.watch.lifecycle).toBe(true);
-    expect(invalid.delivery.reviews).toBe('summary');
+    expect(invalid.delivery.reviews).toBe('inbox');
   });
 
   test('reports unknown options, at every level, without failing the others', () => {

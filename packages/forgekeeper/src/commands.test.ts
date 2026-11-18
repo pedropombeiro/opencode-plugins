@@ -3,11 +3,14 @@ import { feedbackReport, parseFeedbackAction, statusReport } from './commands';
 import type { FeedbackItem } from './feedback-inbox';
 
 describe('/forge-inbox arguments', () => {
-  test('lists without arguments, and acknowledges or summarizes by number', () => {
+  test('lists without arguments, and acknowledges or summarizes by ID', () => {
     expect(parseFeedbackAction('  ')).toEqual({ kind: 'list' });
-    expect(parseFeedbackAction('ack 2')).toEqual({ kind: 'acknowledge', which: 2 });
+    expect(parseFeedbackAction('ack 2')).toEqual({ kind: 'invalid', input: 'ack 2' });
     expect(parseFeedbackAction('Acknowledge ALL')).toEqual({ kind: 'acknowledge', which: 'all' });
-    expect(parseFeedbackAction('summarize 1')).toEqual({ kind: 'summarize', which: 1 });
+    expect(parseFeedbackAction('summarize 0123456789abcdef')).toEqual({
+      kind: 'summarize',
+      which: '0123456789abcdef',
+    });
   });
 
   test('rejects anything else', () => {

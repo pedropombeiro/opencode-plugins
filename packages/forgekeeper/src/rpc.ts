@@ -71,6 +71,15 @@ export const ForgeSessionRpc = {
       },
       output: inboxState,
     },
+    markFeedbackRead: {
+      input: {
+        type: 'object',
+        properties: { ids: { type: 'array', items: { type: 'string' }, maxItems: 500 } },
+        required: ['ids'],
+        additionalProperties: false,
+      },
+      output: inboxState,
+    },
     // Starts a tool-free summary turn for an update in its session.
     summarizeFeedback: {
       input: {
@@ -237,6 +246,8 @@ export const implement = (handlers: Handlers) => ({
   monitoringStatus: (input: unknown) =>
     handlers.monitoringStatus(input as Input<'monitoringStatus'>),
   feedback: () => handlers.feedback({}),
+  markFeedbackRead: (input: unknown) =>
+    handlers.markFeedbackRead(input as Input<'markFeedbackRead'>),
   acknowledgeFeedback: (input: unknown) =>
     handlers.acknowledgeFeedback(input as Input<'acknowledgeFeedback'>),
   summarizeFeedback: (input: unknown) =>

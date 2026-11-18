@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Plugin } from '@opencode/plugin';
+import { feedbackRef } from './commands';
 import type { FeedbackTarget } from './forge';
 import type {
   CommentDetail,
@@ -307,7 +308,7 @@ async function harness(options: Options = {}) {
       },
     },
     location: { directory },
-    options: options.pluginOptions ?? {},
+    options: { inbox: true, delivery: { reviews: 'summary' }, ...options.pluginOptions },
     storage: {
       // Copies like durable storage, so later changes in memory don't count as stored.
       get: async (key: string) => {
@@ -2060,7 +2061,7 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
-  test('lists, acknowledges, and summarizes review updates by number', async () => {
+  test('lists, acknowledges, and summarizes review updates by stable ID', async () => {
     const { app } = await watchedFeedback({
       pluginOptions: { delivery: { reviews: 'inbox' } },
     });
@@ -2080,20 +2081,57 @@ describe('PR/MR status lifecycle', () => {
     const listed = await reportOf('');
     expect(listed).toContain(`1. ${item.title}`);
     expect(listed).toContain(`- ${projectA}#note_7`);
-    expect(await reportOf('summarize 2')).toContain('There is no update number 2.');
+    expect(await reportOf('summarize 0000000000000000')).toContain('No pending update with ID');
     expect(await reportOf('frobnicate')).toContain('did not understand "frobnicate"');
 
     // Summarizing starts the summary's own turn instead of a report.
-    await app.runCommand('forge-inbox', 'summarize 1');
+    await app.runCommand('forge-inbox', `summarize ${feedbackRef(item.id)}`);
     expect(app.passive.at(-1)!.text).toContain('Forgekeeper summarizes this review feedback');
     await app.request();
     app.prompt();
 
-    const acknowledged = await reportOf('ack 1');
+    const acknowledged = await reportOf(`ack ${feedbackRef(item.id)}`);
     expect(acknowledged).toContain(`Acknowledged: ${item.title}`);
     expect(acknowledged).toContain('No pending review updates for this session.');
     expect((await app.feedback()).items).toEqual([]);
     await app.cleanup();
+  });
+
+  test('delivers pending feedback at startup when automation recovery fails', async () => {
+    const claims = createReviewClaims(':memory:');
+    claims.records.list = async () => {
+      throw new Error('attempts unavailable');
+    };
+    const app = await harness({
+      status: new StatusForge(),
+      reviewClaims: claims,
+      storage: new Map<string, unknown>([
+        ['sessions/one', { targets: [{ url: projectA }] }],
+        [
+          'feedback-inbox/%2Frepo',
+          {
+            paused: false,
+            items: [
+              {
+                id: 'waiting',
+                sessionID: 'one',
+                title: 'Review update',
+                url: projectA,
+                at: 1,
+                links: [],
+                delivery: 'passive',
+              },
+            ],
+          },
+        ],
+      ]),
+    });
+    try {
+      await settle();
+      expect(app.passive.some((message) => message.text.includes('Review update'))).toBe(true);
+    } finally {
+      await app.cleanup();
+    }
   });
 
   test('keeps a queued summary pending while an earlier step runs before its delivery', async () => {

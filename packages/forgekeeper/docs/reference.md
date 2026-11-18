@@ -54,7 +54,7 @@ what's missing, such as `glab is not installed`.
 Forgekeeper 3 changes where review notifications go, and renames its options:
 
 - **Notifications:** review feedback goes to the `/forge-feedback` inbox and starts a
-  restricted summary turn by default, without asking the agent to address it. Set
+  restricted summary turn when configured, without asking the agent to address it. Set
   `delivery.reviews` to `"inbox"` to stop automatic session delivery, or `"passive"` to queue
   a notice without starting a turn. See
   [Review notifications](#review-notifications).
@@ -259,10 +259,10 @@ The server registers two commands that every client offers, while status is on, 
 the web app:
 
 - `/forge-report` refreshes the session's status and shows what `/forge-status` shows.
-- `/forge-inbox` lists the session's pending updates, numbered newest first, with their
-  links. `/forge-inbox ack <number>` and `/forge-inbox ack all` acknowledge updates, and
-  `/forge-inbox summarize <number>` starts the update's summary turn, as Ctrl+R does in
-  `/forge-feedback`. A number refers to the list as it is when the command runs.
+- `/forge-inbox` lists the session's pending updates, newest first, with their stable IDs and
+  links. `/forge-inbox ack <id>` and `/forge-inbox ack all` acknowledge updates, and
+  `/forge-inbox summarize <id>` starts the update's summary turn, as Ctrl+R does in
+  `/forge-feedback`. Use the displayed ID rather than the update's position.
 
 The apps don't display the text of a synthetic message, so each answer runs as a
 tool-free turn in which the session's model shows Forgekeeper's report. The report is
@@ -294,8 +294,9 @@ not shared between checkouts, whose CLI credentials and repository context may d
 
 ### Which sessions the server watches
 
-The server discovers recent sessions at startup, every 5 minutes, and after target changes
-or completed turns. A session qualifies when it is a non-archived root session in the
+With inbox monitoring enabled, the server discovers recent sessions at startup and every
+5 minutes. A target change, session move, or completed turn rechecks only the affected session.
+A session qualifies when it is a non-archived root session in the
 checkout, has an explicit PR/MR target, and has a user message in the last 72 hours.
 A compaction drops earlier messages from the session's context, so when the context has no
 user message, the newest compaction counts instead, since compactions run only during
@@ -348,12 +349,12 @@ retry is dropped.
 Feedback goes to a persistent inbox. The `delivery.reviews` option sets what else
 an update does:
 
-- `inbox` posts nothing to the session.
+- `inbox`, the default, posts nothing to the session.
 - `passive` queues a session message with `resume: false`, which starts no turn. It
   doesn't mark the session unread, because the TUI marks sessions unread only when a
   turn ends. When something else wakes the session, the message can run as its own
   step; Forgekeeper then sends only the notice, without tools or the session's history.
-- `summary`, the default, queues a message that starts a summary turn, described below.
+- `summary` queues a message that starts a summary turn, described below.
   A turn that ends marks the session unread. Updates without comments, such as Copilot reviews,
   get a passive message instead.
 
@@ -471,12 +472,17 @@ input in it. The turn ends at the next user prompt. A later turn that another pl
 without a user prompt also runs without tools. The summary is the only part that stays in
 the session's history.
 
+New checkouts start with status only unless `inbox: true` or automation rules enable feedback.
+In `/forge-feedback`, choose **Enable feedback inbox** to opt in for one checkout. A saved
+monitoring preference takes precedence. **Mark all as read** (Ctrl+U) clears the unread count
+for the displayed updates without acknowledging them or changing delivery.
+
 `/forge-feedback` lists pending feedback for
 the current checkout. Select an update to open its PR/MR or comment links, press Ctrl+D
 to acknowledge it, press Ctrl+R to summarize it in its session in any delivery mode, or
 press Ctrl+S to pause or resume review monitoring. Acknowledgement
 only dismisses the local update; it does not reply to or resolve a remote discussion.
-A session's footer shows how many of its own updates are pending. The home screen, where
+A session's footer shows how many of its own updates are unread. The home screen, where
 new sessions start, shows no count. `/forge-feedback` lists the whole checkout's updates,
 and connected CLIs in the checkout show a toast even when the session's tab has never been
 visited. With session tabs on, those CLIs also reopen the session's tab, without leaving
@@ -1237,7 +1243,8 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                                           |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
-| `delivery.reviews`       | `"summary"`                   | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).                                                                                                                                                                                  |
+| `inbox`                  | `false`                       | Enable inbox monitoring for checkouts without a saved monitoring preference. Automation rules also enable it.                                                                                                                                                                                                       |
+| `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).                                                                                                                                                                                  |
 | `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                                                                                                                                                                                                                |
 | `lifecycleExecution`     | `"notify"`                    | What Forgekeeper works out when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                                                                                                                                                                                                   |
 | `automation.rules`       | No rules                      | What starts an automatic turn: feedback from authorized reviewers, or failed jobs, and where it runs. See [Prepare fixes](#prepare-fixes-from-review-feedback), [Investigate failed jobs](#investigate-failed-jobs), and [Run automation in an execution environment](#run-automation-in-an-execution-environment). |
@@ -1329,10 +1336,9 @@ OpenCode scopes plugin storage by plugin ID, so nothing stored under the former 
   aren't announced.
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
-With default options, the footer and review monitoring start right away. All notifications
-enter the feedback inbox, and review feedback also starts a restricted summary turn.
-Lifecycle updates stay in the inbox unless you change `delivery.lifecycle`. Set `status`
-to `false` to keep only titles.
+With default options, a new checkout shows the footer. Enable the inbox to collect updates,
+then set `delivery.reviews` to `summary` if you want automatic summaries. Set `status` to
+`false` to keep only titles.
 
 If you set options for `opencode-forgekeeper` 2.x, also see
 [Upgrade from forgekeeper 2.x](#upgrade-from-forgekeeper-2x).
