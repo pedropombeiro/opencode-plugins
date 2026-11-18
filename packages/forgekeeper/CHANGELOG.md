@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.0.0...opencode-forgekeeper-5.0.1) (2026-11-18)
+
+
+### Performance Improvements
+
+* **forgekeeper:** index recent session activity for feedback discovery ([568a8d1](https://github.com/pedropombeiro/opencode-plugins/commit/568a8d1e41aa640422cd6de1d0aa5fc17daa9a68))
+
 ## [5.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-4.1.0...opencode-forgekeeper-5.0.0) (2026-11-18)
 
 
