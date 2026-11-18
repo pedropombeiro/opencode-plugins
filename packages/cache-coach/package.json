@@ -1,6 +1,6 @@
 {
   "name": "opencode-cache-coach",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "OpenCode plugin that shows whether a session's prompt cache is still warm, suggests cheaper habits when a costly pattern shows up, and warns when cache misses persist",
   "author": {
     "name": "Pedro Pombeiro",

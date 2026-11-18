@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.3.0...opencode-cache-coach-0.4.0) (2026-11-18)
+
+
+### Features
+
+* **cache-coach:** track cache reuse and warn when misses persist ([#160](https://github.com/pedropombeiro/opencode-plugins/issues/160)) ([35eadf9](https://github.com/pedropombeiro/opencode-plugins/commit/35eadf93729381df3df6f041f92dc74086badef9))
+
 ## [0.3.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.2.1...opencode-cache-coach-0.3.0) (2026-11-13)
 
 
