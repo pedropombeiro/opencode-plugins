@@ -103,7 +103,15 @@ export default Plugin.define({
 
     function showTip(server: ServerRef, sessionID: string, tip: Tip | undefined) {
       const taken = gate.take(`${server.id}\n${sessionID}`, tip);
-      if (taken) toast(server, sessionID, taken);
+      if (!taken) return;
+      toast(server, sessionID, taken);
+      if (taken.attention)
+        void ctx.attention.notify({
+          title: taken.title,
+          message: taken.message,
+          session: { server: server.id, id: sessionID },
+          id: `cache-coach:${server.id}:${sessionID}:${taken.key}`,
+        });
     }
 
     function deliver(server: ServerRef, notice: Notice) {
@@ -188,9 +196,11 @@ export default Plugin.define({
                   if (visible(server, sessionID))
                     showTip(server, sessionID, coach.toolOutput(event.data));
                 }),
-                data.on('session.compaction.ended', (event) =>
-                  gate.compacted(`${server.id}\n${event.data.sessionID}`),
-                ),
+                data.on('session.step.failed', (event) => coach.stepFailed(event.data)),
+                data.on('session.compaction.ended', (event) => {
+                  gate.compacted(`${server.id}\n${event.data.sessionID}`);
+                  coach.compacted(event.data.sessionID);
+                }),
               ];
               onCleanup(() => {
                 for (const stop of stops) stop();

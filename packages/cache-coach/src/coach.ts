@@ -18,10 +18,13 @@ import {
   type Tokens,
 } from './cache';
 import { compactionChoice, expiryNotice, formatClock, type Choice } from './compaction';
+import { createHealth, type Finding, type Thresholds } from './health';
 import type { Settings } from './options';
 import {
   contextCeilingTip,
   estimateTokens,
+  healthLines,
+  healthTip,
   largeOutputTip,
   modelSwitchTip,
   warmingTip,
@@ -54,6 +57,7 @@ export interface CoachOptions {
   settings: Settings;
   selectedModel: (sessionID: string) => ModelRef | undefined;
   startedAt: (sessionID: string, id: string) => number | undefined;
+  thresholds?: Thresholds;
 }
 
 export interface Notice {
@@ -215,8 +219,51 @@ export function createCoach(options: CoachOptions) {
     };
   }
 
-  const describe = (sessionID: string, time: number) =>
-    details({ ...view(sessionID, time), sessionCost: data.session.cost(sessionID) });
+  const health = createHealth(options.thresholds);
+  const unseen = new Map<string, { finding: Finding; name: string }>();
+
+  const cachePriced = (model?: ModelInfo) =>
+    (model?.cost ?? []).some((cost) => cost.cache.read > 0 || cost.cache.write > 0);
+
+  function healthTips(
+    sessionID: string,
+    finding: Finding | undefined,
+    name: string,
+    visible: boolean,
+  ): Tip[] {
+    if (finding && healthTip(finding, name)) {
+      const pending = unseen.get(sessionID)?.finding;
+      unseen.delete(sessionID);
+      const dropped =
+        finding.type === 'recovered' &&
+        pending?.type === 'persistent' &&
+        pending.key === finding.key &&
+        pending.incident === finding.incident;
+      if (dropped) return [];
+      unseen.set(sessionID, { finding, name });
+      while (unseen.size > 50) {
+        const oldest = unseen.keys().next().value;
+        if (oldest === undefined) break;
+        unseen.delete(oldest);
+      }
+    }
+    if (!visible) return [];
+    const pending = unseen.get(sessionID);
+    unseen.delete(sessionID);
+    const tip = pending && healthTip(pending.finding, pending.name);
+    return tip ? [tip] : [];
+  }
+
+  function describe(sessionID: string, time: number) {
+    const lines = details({ ...view(sessionID, time), sessionCost: data.session.cost(sessionID) });
+    const step = settings.health ? stepOf(sessionID) : undefined;
+    const message = step && data.session.message.get(sessionID, step.id);
+    const agent = message?.type === 'assistant' ? message.agent : undefined;
+    const extra = step
+      ? healthLines(health.status(sessionID, step.model, agent), health.summary(sessionID))
+      : [];
+    return extra.length ? [...lines, '', ...extra] : lines;
+  }
 
   function notice(input: {
     sessionID: string;
@@ -279,7 +326,7 @@ export function createCoach(options: CoachOptions) {
     now = Date.now(),
   ): { notice?: Notice; tips: Tip[] } | undefined {
     const { sessionID, assistantMessageID, tokens } = event;
-    if (!coached(sessionID) || !reportsCache(tokens)) return undefined;
+    if (!coached(sessionID)) return undefined;
     const message = data.session.message.get(sessionID, assistantMessageID);
     const ref =
       message?.type === 'assistant' ? message.model : (session(sessionID)?.model ?? undefined);
@@ -289,6 +336,27 @@ export function createCoach(options: CoachOptions) {
     const provider = ref && providers.find((entry) => entry.id === ref.providerID);
     const started =
       options.startedAt(sessionID, assistantMessageID) ?? message?.time.created ?? now;
+    const price = model && priceFor(model.cost, promptTokens(tokens));
+    const checked =
+      settings.health && ref
+        ? healthTips(
+            sessionID,
+            health.observe({
+              sessionID,
+              stepID: assistantMessageID,
+              model: ref,
+              ...(message?.type === 'assistant' ? { agent: message.agent } : {}),
+              started,
+              tokens,
+              ttl: ttlFor(model, provider),
+              cachePriced: cachePriced(model),
+              ...(price ? { price } : {}),
+            }),
+            shortName(nameOf(model, ref)),
+            visible,
+          )
+        : [];
+    if (!reportsCache(tokens)) return checked.length ? { tips: checked } : undefined;
     const scheduled = notice({
       sessionID,
       stepID: assistantMessageID,
@@ -298,7 +366,7 @@ export function createCoach(options: CoachOptions) {
       model,
       models,
     });
-    if (!visible || !settings.tips) return { notice: scheduled, tips: [] };
+    if (!visible || !settings.tips) return { notice: scheduled, tips: checked };
     const tips: (Tip | undefined)[] = [];
     const previous = lastStep(
       data.session.message.list(sessionID) as Messages,
@@ -333,7 +401,7 @@ export function createCoach(options: CoachOptions) {
         price: model && priceFor(model.cost, total),
       }),
     );
-    return { notice: scheduled, tips: tips.filter((tip): tip is Tip => !!tip) };
+    return { notice: scheduled, tips: [...checked, ...tips.filter((tip): tip is Tip => !!tip)] };
   }
 
   function toolOutput(event: ToolOutput): Tip | undefined {
@@ -357,7 +425,16 @@ export function createCoach(options: CoachOptions) {
     });
   }
 
-  return { view, describe, switchTip, stepEnded, toolOutput, coached };
+  function stepFailed(event: { sessionID: string; assistantMessageID: string }) {
+    health.failed(event.sessionID, event.assistantMessageID);
+  }
+
+  function compacted(sessionID: string) {
+    health.compacted(sessionID);
+    unseen.delete(sessionID);
+  }
+
+  return { view, describe, switchTip, stepEnded, stepFailed, compacted, toolOutput, coached };
 }
 
 export function createNotices(input: {

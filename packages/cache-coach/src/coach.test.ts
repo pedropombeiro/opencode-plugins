@@ -26,6 +26,14 @@ const cheap = {
   cost: [{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }],
   limit: { context: 1_000_000 },
 };
+const free = {
+  providerID: 'local',
+  id: 'free',
+  modelID: 'free',
+  name: 'Free',
+  cost: [],
+  limit: { context: 1_000_000 },
+};
 const tokens = (read: number, write = 0) => ({
   input: 0,
   output: 0,
@@ -56,7 +64,7 @@ function harness(options: { settings?: Partial<Settings>; parentID?: string } = 
       },
     },
     location: {
-      model: { list: () => [opus, cheap], sync: async () => {} },
+      model: { list: () => [opus, cheap, free], sync: async () => {} },
       provider: { list: () => [], sync: async () => {} },
     },
   } as unknown as CoachData;
@@ -153,6 +161,206 @@ describe('createCoach', () => {
       content: [{ type: 'text', text: 'x'.repeat(100_000) }],
     });
     expect(tip).toMatchObject({ key: 'large-output:bash' });
+  });
+});
+
+describe('cache health', () => {
+  const usage = (read: number, write: number, input = 1000) => ({
+    input,
+    output: 2000,
+    reasoning: 0,
+    cache: { read, write },
+  });
+
+  function run(
+    options: Parameters<typeof harness>[0] & {
+      model?: { providerID: string; id: string; variant?: string };
+      agent?: string;
+      from?: number;
+    } = {},
+  ) {
+    const { coach, messages } = harness(options);
+    let count = options.from ?? 0;
+    const send = (
+      value: ReturnType<typeof usage>,
+      visible = true,
+      model = options.model ?? { providerID: 'anthropic', id: 'opus' },
+    ) => {
+      count += 1;
+      const id = `m${count}`;
+      const at = count * 30_000;
+      messages.push({
+        type: 'assistant',
+        id,
+        model,
+        ...(options.agent ? { agent: options.agent } : {}),
+        tokens: value,
+        time: { created: at, completed: at + 1000 },
+        content: [],
+      });
+      return coach.stepEnded(
+        { sessionID: 'one', assistantMessageID: id, tokens: value },
+        visible,
+        at,
+      );
+    };
+    const keys = (result: ReturnType<typeof send>) => (result?.tips ?? []).map((tip) => tip.key);
+    return { coach, send, keys };
+  }
+
+  const cold = usage(0, 100_000);
+  const warm = usage(95_000, 3000, 2000);
+
+  const repeat = (times: number, send: () => unknown) => {
+    for (let index = 0; index < times; index += 1) send();
+  };
+
+  test('stays silent on detection and warns once when misses persist', () => {
+    const { send, keys } = run();
+    for (let index = 0; index < 7; index += 1) expect(keys(send(cold))).toEqual([]);
+    const result = send(cold);
+    expect(result?.notice).toMatchObject({ stepID: 'm8' });
+    expect(result?.tips).toEqual([
+      expect.objectContaining({
+        key: 'cache-health:anthropic/opus:150000',
+        title: 'Cache reuse still low',
+        attention: true,
+      }),
+    ]);
+    expect(result?.tips[0].message).toContain('for Claude Opus: 0% of 404K input tokens');
+    expect(result?.tips[0].message).toContain('Over 7 requests, an estimated ~707K tokens');
+    expect(result?.tips[0].message).toContain('(~$4.06 extra)');
+    for (let index = 0; index < 4; index += 1) expect(keys(send(cold))).toEqual([]);
+  });
+
+  test('stays silent through a short incident', () => {
+    const { send, keys } = run();
+    for (let index = 0; index < 5; index += 1) expect(keys(send(cold))).toEqual([]);
+    for (let index = 0; index < 4; index += 1) expect(keys(send(warm))).toEqual([]);
+  });
+
+  test('holds a warning for a hidden session until it is visible', () => {
+    const { send, keys } = run();
+    for (let index = 0; index < 8; index += 1) expect(keys(send(cold, false))).toEqual([]);
+    expect(keys(send(cold))).toEqual(['cache-health:anthropic/opus:150000']);
+  });
+
+  test('drops a hidden warning that recovered before it was shown', () => {
+    const { send, keys } = run();
+    repeat(8, () => send(cold, false));
+    repeat(3, () => send(warm, false));
+    expect(keys(send(warm))).toEqual([]);
+  });
+
+  test('reports the recovery of a persistent incident once', () => {
+    const { send, keys } = run();
+    repeat(8, () => send(cold));
+    expect(keys(send(warm))).toEqual([]);
+    expect(keys(send(warm))).toEqual(['cache-health-recovered:anthropic/opus:150000']);
+    expect(keys(send(warm))).toEqual([]);
+  });
+
+  test('keeps working with tips off and stops with health off', () => {
+    const quiet = run({ settings: { tips: false } });
+    repeat(7, () => quiet.send(cold));
+    expect(quiet.keys(quiet.send(cold))).toEqual(['cache-health:anthropic/opus:150000']);
+    const off = run({ settings: { health: false } });
+    for (let index = 0; index < 10; index += 1) expect(off.keys(off.send(cold))).toEqual([]);
+  });
+
+  test('skips subagent sessions', () => {
+    const { send } = run({ parentID: 'root' });
+    for (let index = 0; index < 10; index += 1) expect(send(cold)).toBeUndefined();
+  });
+
+  test('detects misses on models without prices when the provider reports cache use', () => {
+    const { send, keys } = run({ model: free });
+    repeat(7, () => send(cold));
+    const result = send(cold);
+    expect(keys(result)).toEqual(['cache-health:local/free:150000']);
+    expect(result?.tips[0].message).toContain('for Free:');
+    expect(result?.tips[0].message).not.toContain('extra');
+  });
+
+  test('records incidents assumed from cache prices without warning about them', () => {
+    const { coach, send } = run();
+    for (let index = 0; index < 12; index += 1) expect(send(usage(0, 0, 100_000))).toBeUndefined();
+    expect(coach.describe('one', 400_000).at(-1)).toContain('They may not be real misses');
+  });
+
+  test('drops a hidden warning when compaction ends its incident', () => {
+    const { coach, send, keys } = run();
+    repeat(8, () => send(cold, false));
+    coach.compacted('one');
+    expect(keys(send(warm))).toEqual([]);
+  });
+
+  test('warns about a new incident after the coach is recreated', () => {
+    const shown = new Set<string>();
+    const gate = createTipGate({
+      has: (key) => shown.has(key),
+      add: (key) => shown.add(key),
+      remove: (key) => shown.delete(key),
+    });
+    const delivered = (from: number) => {
+      const { send } = run({ from });
+      const titles: string[] = [];
+      for (let index = 0; index < 8; index += 1)
+        for (const tip of send(cold)?.tips ?? []) if (gate.take('one', tip)) titles.push(tip.title);
+      return titles;
+    };
+    expect(delivered(0)).toEqual(['Cache reuse still low']);
+    expect(delivered(100)).toEqual(['Cache reuse still low']);
+  });
+
+  test('stays quiet without cache telemetry or cache prices', () => {
+    const { send } = run({ model: free });
+    for (let index = 0; index < 10; index += 1) expect(send(usage(0, 0, 100_000))).toBeUndefined();
+  });
+
+  test('resets after compaction', () => {
+    const { coach, send, keys } = run();
+    repeat(7, () => send(cold));
+    coach.compacted('one');
+    for (let index = 0; index < 7; index += 1) expect(keys(send(cold))).toEqual([]);
+  });
+
+  test('ignores failed steps', () => {
+    const { coach, send, keys } = run();
+    repeat(7, () => send(cold));
+    coach.stepFailed({ sessionID: 'one', assistantMessageID: 'm8' });
+    expect(keys(send(cold))).toEqual([]);
+    expect(keys(send(cold))).toEqual(['cache-health:anthropic/opus:150000']);
+  });
+
+  test('keys incidents by model variant and agent', () => {
+    const { coach, send, keys } = run({
+      model: { providerID: 'anthropic', id: 'opus', variant: 'high' },
+      agent: 'build',
+    });
+    repeat(7, () => send(cold));
+    expect(keys(send(cold))).toEqual(['cache-health:anthropic/opus#high@build:150000']);
+    expect(coach.describe('one', 250_000).join('\n')).toContain(
+      'Cache health: reuse unexpectedly low',
+    );
+  });
+
+  test('adds the health status and session incidents to the details', () => {
+    const { coach, send } = run();
+    send(cold);
+    expect(coach.describe('one', 40_000).at(-1)).toBe(
+      'Cache health: waiting for more requests on this model',
+    );
+    repeat(4, () => send(warm));
+    expect(coach.describe('one', 160_000).at(-1)).toBe(
+      'Cache health: 95% of 400K input tokens read from the cache across the last 4 requests',
+    );
+    repeat(4, () => send(cold));
+    repeat(3, () => send(warm));
+    expect(coach.describe('one', 400_000).slice(-2)).toEqual([
+      "Cache misses this session: 1 incident. In total, an estimated ~418K tokens from earlier prompts weren't read from the cache (~$2.39 extra).",
+      'Last incident on anthropic/opus: 7 requests, ended. In most of the missed requests, little or nothing was read from the cache.',
+    ]);
   });
 });
 

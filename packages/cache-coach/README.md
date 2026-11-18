@@ -11,7 +11,8 @@ as you work, with cost comparisons and suggestions based on your session and mod
 
 The cache indicator and `/cache` details show where you stand. Tips and expiry messages help you
 decide what to do next, such as compacting while the cache is warm or using a cheaper model when
-the context must be written again.
+the context must be written again. Cache health tracking shows when requests stop reading the context
+from the cache, and warns when that persists.
 
 ![Cache Coach expiry notice estimating the cost of rewriting a large context and suggesting cheaper compaction.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/cache-expiry-notice.png)
 
@@ -121,6 +122,68 @@ session, except the model-switch tips, which appear for every switch away from a
 Tips stay in the TUI and never enter the conversation, so they don't add tokens or change the
 cache. Subagent sessions don't get tips.
 
+## Cache health
+
+The plugin tracks when a session stops reading its context from the cache. It measures the share
+of input tokens that came from the cache, counting uncached input, cache reads, and cache writes,
+and leaving out output and reasoning tokens. It opens an incident in two cases:
+
+- **Sustained misses.** Over 4 requests in a row on the same model, with at least 100K input tokens
+  in total, less than 5% came from the cache.
+- **Regression.** After a healthy stretch of at least 5 earlier requests in the session with 50% or
+  more read from the cache, the last 4 requests drop by at least 40 percentage points, to under 30%.
+
+Many incidents end on their own before you could act on them, so the plugin doesn't interrupt you
+when one opens. `/cache` lists the incidents of the session, an estimate of the tokens that weren't
+read from the cache, and their extra cost. It also says whether the misses read little or nothing
+from the cache or only the start of each prompt, which helps in a report to the provider:
+
+```text
+Cache misses this session: 2 incidents. In total, an estimated ~1.2M tokens from earlier prompts
+weren't read from the cache (~$7.10 extra).
+Last incident on gitlab/duo-chat-opus-5@build: 7 requests, ended. In most of the missed requests,
+little or nothing was read from the cache.
+```
+
+The plugin warns only when an incident persists, after 3 more requests that read less than 30% from
+the cache:
+
+```text
+Cache reuse is still low for Opus 5: under 1% of 404K input tokens came from the cache across the
+last 4 requests. In most of the missed requests, little or nothing was read from the cache. Over 7
+requests, an estimated ~690K tokens from earlier prompts weren't read from the cache (~$3.97
+extra). Each missed request processes the context again, so compacting makes misses cheaper.
+Possible causes include prompt-prefix changes, cache configuration, or provider-side misses. Run
+/cache for details to include in a report.
+```
+
+The incident ends when the last 3 requests together read at least 50% from the cache, or the
+earlier share minus 20 percentage points when that's higher. After a warning, the plugin says once
+that the cache recovered. The earlier share stays fixed while an incident is open, so a long
+failure doesn't become the new normal.
+
+The cache counters can't tell why reuse dropped, so the warning lists likely causes and doesn't
+blame the model. The plugin only counts requests that could have read the cache:
+
+- The first request on a model, variant, or agent, the first after compaction, and the first after
+  a gap longer than the cache lifetime only start the cache, so they don't count. Each agent has its
+  own system prompt and tools, so the plugin tracks each agent separately. Warming doesn't extend
+  the gap, because the plugin can't see whether it works.
+- Requests with fewer than 8K input tokens, failed requests, and requests without usage don't count.
+- OpenCode reports missing cache counts as 0. So requests without cache reads or writes only count
+  as misses after the provider reported cache use for that model in the session, or when the model
+  has cache prices. Some providers don't report cache use at all, so incidents from the second case
+  appear in `/cache` marked as assumed, stay out of its totals, and never show a warning.
+- Each session has its own history, so requests in other sessions or subagents don't affect it.
+  Subagent sessions get no warnings.
+- A single missed request doesn't open an incident, so `/cache` doesn't count isolated misses.
+
+The estimated tokens not read from the cache are the previous request's prompt minus what the
+request read from the cache. The extra cost compares what they cost with the cache-read price.
+Detection doesn't depend on prices, so it works for models without prices, and then `/cache` shows
+only token counts. In OpenCode Desktop, a warning or recovery also sends a system notification. The
+plugin keeps this history in memory, so it starts over when OpenCode restarts.
+
 ## OpenCode Desktop
 
 In OpenCode Desktop, a pill above the composer shows the cache state, such as `cache 3:42` or
@@ -156,8 +219,9 @@ form of the package entry. OpenCode still loads the plugin once:
 
 | Option            | Default                                  | Description                                                                                                                                                                                                               |
 | ----------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tips`            | `true`                                   | Set to `false` to keep only the indicator.                                                                                                                                                                                |
+| `tips`            | `true`                                   | Set to `false` to turn off tips.                                                                                                                                                                                          |
 | `notices`         | `true`                                   | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                                          |
+| `health`          | `true`                                   | Set to `false` to turn off [cache health](#cache-health) tracking and warnings. They don't depend on `tips`.                                                                                                              |
 | `compactionModel` |                                          | Model to suggest for compacting after the cache expires, such as `"gitlab/duo-chat-gpt-6-1-sol"`, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`. |
 | `ttl`             |                                          | Cache lifetime, such as `"1h"`. Overrides the model and provider `cache.ttl`.                                                                                                                                             |
 | `contextCeiling`  | `250000`, or where a higher price starts | Context size the ceiling tip measures against. Setting it applies to every model, including tiered ones. Capped at the model's input limit.                                                                               |

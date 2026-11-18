@@ -60,9 +60,9 @@ function server(id: string) {
     id,
     data,
     client: { config: { get: async () => [] } },
-    emit(type: string) {
+    emit(type: string, data: Partial<StepEnded> = {}) {
       for (const handler of handlers.get(type) ?? [])
-        handler({ data: { sessionID: 'shared', assistantMessageID: 'step', tokens } });
+        handler({ data: { sessionID: 'shared', assistantMessageID: 'step', tokens, ...data } });
     },
     listeners: () => [...handlers.values()].reduce((sum, set) => sum + set.size, 0),
   };
@@ -79,6 +79,7 @@ const ref = (connection: ReturnType<typeof server>) => ({
 const [current, setCurrent] = solid.createSignal<ReturnType<typeof ref> | undefined>(ref(a));
 const [tabs, setTabs] = solid.createSignal([ref(a), ref(b)]);
 const toasts: { title: string }[] = [];
+const notified: { title: string; id: string }[] = [];
 const registrations = new Map<unknown, unknown>();
 const intervals = new Set<() => void>();
 const exports: { default?: gui.Plugin.Definition } = {};
@@ -117,12 +118,17 @@ const stop = solid.createRoot((cleanup) => {
     },
     toast: { show: (value: { title: string }) => toasts.push(value) },
     layout: { open: () => {} },
-    attention: { notify: async () => ({}) },
+    attention: {
+      notify: async (value: { title: string; id: string }) => {
+        notified.push(value);
+        return {};
+      },
+    },
   } as unknown as Parameters<NonNullable<gui.Plugin.Definition['setup']>>[0]);
 });
 
-assert.equal(a.listeners(), 4);
-assert.equal(b.listeners(), 4);
+assert.equal(a.listeners(), 5);
+assert.equal(b.listeners(), 5);
 
 a.emit('session.step.ended');
 b.emit('session.step.ended');
@@ -163,13 +169,30 @@ setServers([reconnected, b]);
 setTabs([ref(reconnected), ref(b)]);
 setCurrent(ref(reconnected));
 assert.equal(a.listeners(), 0, 'Reconnect must unsubscribe the old data store');
-assert.equal(reconnected.listeners(), 4, 'Reconnect must subscribe the new data store once');
+assert.equal(reconnected.listeners(), 5, 'Reconnect must subscribe the new data store once');
 a.emit('session.compaction.ended');
 reconnected.emit('session.step.ended');
 assert.equal(toasts.length, 4, 'Events from the old data store must not reset tips');
 reconnected.emit('session.compaction.ended');
 reconnected.emit('session.step.ended');
 assert.equal(toasts.length, 5, 'Events from the new data store must reach the coach');
+
+const missed = { input: 1000, output: 0, reasoning: 0, cache: { read: 0, write: 100_000 } };
+reconnected.emit('session.step.failed', { assistantMessageID: 'failed' });
+for (let index = 1; index <= 5; index += 1)
+  reconnected.emit('session.step.ended', { assistantMessageID: `miss-${index}`, tokens: missed });
+assert.equal(toasts.length, 5, 'A short cache-miss incident must stay silent');
+assert.equal(notified.length, 0, 'A short cache-miss incident must not notify');
+for (let index = 6; index <= 8; index += 1)
+  reconnected.emit('session.step.ended', { assistantMessageID: `miss-${index}`, tokens: missed });
+assert.equal(toasts.length, 6, 'Persistent cache misses must show one warning');
+assert.equal(toasts.at(-1)?.title, 'Cache reuse still low');
+assert.equal(notified.length, 1, 'A cache health warning must also send one system notification');
+assert.match(
+  notified[0].id,
+  /^cache-coach:a:shared:cache-health:provider\/one:\d+$/,
+  'The notification must be keyed by the incident',
+);
 
 setServers([reconnected]);
 assert.equal(b.listeners(), 0, 'Removing a server must unsubscribe its data store');

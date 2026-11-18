@@ -14,6 +14,7 @@ test('reads valid options', () => {
     parseOptions({
       tips: false,
       notices: false,
+      health: false,
       compactionModel: ['gitlab/duo-chat-gpt-6-1-sol', 'anthropic/claude-sonnet-5-5'],
       ttl: '1h',
       contextCeiling: 180_000,
@@ -25,6 +26,7 @@ test('reads valid options', () => {
   ).toEqual({
     tips: false,
     notices: false,
+    health: false,
     compactionModels: [
       { providerID: 'gitlab', id: 'duo-chat-gpt-6-1-sol' },
       { providerID: 'anthropic', id: 'claude-sonnet-5-5' },
@@ -49,6 +51,13 @@ test('reads a single compaction model and skips invalid ones', () => {
 
 test('ignores invalid options', () => {
   expect(
-    parseOptions({ tips: 'no', ttl: 'later', contextCeiling: -1, contextRatio: 2, minCost: 'x' }),
+    parseOptions({
+      tips: 'no',
+      health: 'no',
+      ttl: 'later',
+      contextCeiling: -1,
+      contextRatio: 2,
+      minCost: 'x',
+    }),
   ).toEqual({ ...DEFAULTS, ttl: undefined, contextCeiling: undefined });
 });
