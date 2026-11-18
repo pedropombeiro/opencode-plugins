@@ -3,6 +3,7 @@ import { linkedOwner } from './linked-session';
 
 export const RECENT_ACTIVITY = 3 * 24 * 60 * 60_000;
 export const DISCOVERY_INTERVAL = 5 * 60_000;
+const RECONCILE_INTERVAL = 24 * 60 * 60_000;
 
 export interface DiscoverySession {
   id?: string;
@@ -17,6 +18,7 @@ export function createFeedbackDiscovery(options: {
   directory: string;
   candidates: () => Promise<string[]>;
   candidate: (id: string) => Promise<boolean>;
+  missing?: (error: unknown) => boolean;
   session: (id: string) => Promise<DiscoverySession>;
   activity: (id: string) => Promise<number | undefined>;
   paused: () => Promise<boolean>;
@@ -28,7 +30,9 @@ export function createFeedbackDiscovery(options: {
   let running: Promise<void> | undefined;
   let full = false;
   const pending = new Set<string>();
-  const watched = new Set<string>();
+  const activityBySession = new Map<string, number>();
+  const retry = new Set<string>();
+  let scannedAt: number | undefined;
   const refresh = (id?: string) => {
     if (stopped) return Promise.resolve();
     if (id === undefined) full = true;
@@ -41,17 +45,30 @@ export function createFeedbackDiscovery(options: {
         const changed = [...pending];
         pending.clear();
         if (await options.paused()) {
-          watched.clear();
+          scannedAt = undefined;
+          activityBySession.clear();
+          retry.clear();
           if (!stopped) options.watch([]);
           continue;
         }
-        const ids = scan ? await options.candidates() : changed;
-        if (scan) watched.clear();
-        await mapLimit(ids, CONCURRENCY, async (id) => {
+        const at = (options.now ?? Date.now)();
+        const rebuild =
+          scan &&
+          (scannedAt === undefined || at - scannedAt >= RECONCILE_INTERVAL || at < scannedAt);
+        const ids = rebuild
+          ? await options.candidates()
+          : new Set([...changed, ...(scan ? retry : [])]);
+        if (rebuild) {
+          activityBySession.clear();
+          retry.clear();
+          scannedAt = at;
+        }
+        await mapLimit([...ids], CONCURRENCY, async (id) => {
           if (stopped) return;
           try {
-            watched.delete(id);
-            if (!scan && !(await options.candidate(id))) return;
+            activityBySession.delete(id);
+            retry.delete(id);
+            if (!rebuild && !(await options.candidate(id))) return;
             const session = await options.session(id);
             if (
               session.parentID ||
@@ -61,13 +78,20 @@ export function createFeedbackDiscovery(options: {
             )
               return;
             const activity = await options.activity(id);
-            const age = (options.now ?? Date.now)() - (activity ?? -Infinity);
-            if (age >= 0 && age <= RECENT_ACTIVITY) watched.add(id);
+            if (activity !== undefined) activityBySession.set(id, activity);
           } catch (error) {
+            if (options.missing?.(error)) return;
+            retry.add(id);
             options.error(error);
           }
         });
-        if (!stopped) options.watch([...watched]);
+        const watched: string[] = [];
+        const now = (options.now ?? Date.now)();
+        for (const [id, activity] of activityBySession) {
+          if (now - activity > RECENT_ACTIVITY) activityBySession.delete(id);
+          else if (activity <= now) watched.push(id);
+        }
+        if (!stopped) options.watch(watched);
       }
     })()
       .catch(options.error)

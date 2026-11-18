@@ -294,8 +294,10 @@ not shared between checkouts, whose CLI credentials and repository context may d
 
 ### Which sessions the server watches
 
-With inbox monitoring enabled, the server discovers recent sessions at startup and every
-5 minutes. A target change, session move, or completed turn rechecks only the affected session.
+With inbox monitoring enabled, the server indexes recent activity at startup, when monitoring
+resumes, and once per day to recover missed events. Session events and target changes update
+the affected entry. Every 5 minutes the server expires old entries and retries failed reads
+without rereading other sessions' conversations.
 A session qualifies when it is a non-archived root session in the
 checkout, has an explicit PR/MR target, and has a user message in the last 72 hours.
 A compaction drops earlier messages from the session's context, so when the context has no

@@ -509,6 +509,7 @@ export async function setupStatus(
     !!classifyTargets(targetOutput(targets))?.some((target) => target.kind === 'merge-request');
   const discovery = createFeedbackDiscovery({
     directory,
+    missing: missingSession,
     candidate: async (id) => hasTarget(await host.storedTargets(id)),
     candidates: async () =>
       (await scanAll('sessions/')).flatMap(({ key, value }) => {

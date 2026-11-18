@@ -601,6 +601,11 @@ export async function setupServer(
       types: [
         'session.renamed',
         'session.moved',
+        'session.archived',
+        'session.unarchived',
+        'session.deleted',
+        'session.compaction.ended',
+        'session.execution.started',
         'session.execution.succeeded',
         'session.execution.failed',
         'session.execution.interrupted',
@@ -618,6 +623,16 @@ export async function setupServer(
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
       if (
         sessionID &&
+        (type === 'session.archived' ||
+          type === 'session.unarchived' ||
+          type === 'session.deleted' ||
+          type === 'session.compaction.ended' ||
+          type === 'session.execution.started' ||
+          type === 'session.execution.interrupted')
+      )
+        void watcher?.discovery.refresh(sessionID);
+      if (
+        sessionID &&
         (type === 'session.execution.succeeded' || type === 'session.execution.failed')
       )
         watcher?.turnEnded(sessionID);
@@ -625,7 +640,9 @@ export async function setupServer(
       const reason = (event.data as { reason?: string } | undefined)?.reason;
       if (
         sessionID &&
-        type.startsWith('session.execution.') &&
+        (type === 'session.execution.succeeded' ||
+          type === 'session.execution.failed' ||
+          type === 'session.execution.interrupted') &&
         !(type === 'session.execution.interrupted' && reason === 'shutdown')
       )
         watcher?.executionEnded(

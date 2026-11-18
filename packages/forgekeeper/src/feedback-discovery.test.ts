@@ -4,6 +4,51 @@ import { linkedMetadata } from './linked-session';
 import { deferred } from './testing';
 
 describe('feedback discovery', () => {
+  test('expires indexed activity, retries unreadable contexts, and rebuilds after a pause', async () => {
+    let now = 2 * RECENT_ACTIVITY;
+    let paused = false;
+    let fail = true;
+    let scans = 0;
+    const reads: string[] = [];
+    let watched: string[] = [];
+    const discovery = createFeedbackDiscovery({
+      directory: '/repo',
+      now: () => now,
+      paused: async () => paused,
+      candidates: async () => {
+        scans++;
+        return ['old', 'retry'];
+      },
+      candidate: async () => true,
+      session: async () => ({ time: {}, location: { directory: '/repo' } }),
+      activity: async (id) => {
+        reads.push(id);
+        if (id === 'retry' && fail) throw new Error('unavailable');
+        return id === 'old' ? RECENT_ACTIVITY : now;
+      },
+      watch: (ids) => {
+        watched = ids;
+      },
+      error: () => {},
+    });
+    await discovery.refresh();
+    expect(watched).toEqual(['old']);
+    reads.length = 0;
+    now++;
+    fail = false;
+    await discovery.refresh();
+    expect(watched).toEqual(['retry']);
+    await discovery.refresh();
+    expect(reads).toEqual(['retry']);
+    expect(scans).toBe(1);
+    paused = true;
+    await discovery.refresh();
+    expect(watched).toEqual([]);
+    paused = false;
+    await discovery.refresh();
+    expect(scans).toBe(2);
+    expect(watched).toEqual(['retry']);
+  });
   test('a targeted refresh reads one session and keeps the other sessions enrolled', async () => {
     let scans = 0;
     let eligible = true;
