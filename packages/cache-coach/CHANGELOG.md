@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.5.0...opencode-cache-coach-0.5.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **cache-coach:** describe cache retention and expiry as estimates ([#165](https://github.com/pedropombeiro/opencode-plugins/issues/165)) ([13fc764](https://github.com/pedropombeiro/opencode-plugins/commit/13fc764a1ab8eab29a87876c7633faef6a2365d1))
+
 ## [0.5.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.4.0...opencode-cache-coach-0.5.0) (2026-11-18)
 
 
