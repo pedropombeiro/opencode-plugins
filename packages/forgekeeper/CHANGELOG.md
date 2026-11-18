@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-4.0.1...opencode-forgekeeper-4.1.0) (2026-11-18)
+
+
+### Features
+
+* **forgekeeper:** notify review sessions about review and re-review requests ([#131](https://github.com/pedropombeiro/opencode-plugins/issues/131)) ([6dbd154](https://github.com/pedropombeiro/opencode-plugins/commit/6dbd15412568c76a64e87388640599ebd6afa35a))
+* **forgekeeper:** run automation on PRs/MRs from selected authors ([#156](https://github.com/pedropombeiro/opencode-plugins/issues/156)) ([0797f37](https://github.com/pedropombeiro/opencode-plugins/commit/0797f370a2d02a5cb2c5f18378da7d07cfb4e949))
+* **forgekeeper:** run review automation in a worktree when the checkout is elsewhere ([#158](https://github.com/pedropombeiro/opencode-plugins/issues/158)) ([3e195d5](https://github.com/pedropombeiro/opencode-plugins/commit/3e195d55e99c26616511a728d0c40e8ed884d0cb))
+
 ## [4.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-4.0.0...opencode-forgekeeper-4.0.1) (2026-11-17)
 
 
