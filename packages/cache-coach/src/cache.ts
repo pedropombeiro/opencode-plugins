@@ -245,15 +245,23 @@ export function details(input: {
   if (state.kind === 'unknown')
     return ['No cache data yet. The provider may not report cache tokens for this session.'];
   const lines: string[] = [];
-  if (state.kind === 'running') lines.push('Cache: in use by the running request');
+  if (state.kind === 'running') lines.push('Cache: request running, cache reuse not yet confirmed');
   else if (state.kind === 'warm')
-    lines.push(`Cache: warm, about ${formatRemaining(state.remaining)} left`);
-  else if (state.reason === 'expired') lines.push('Cache: cold, it expired');
+    lines.push(
+      `Cache: likely warm, about ${formatRemaining(state.remaining)} left in the estimate`,
+    );
+  else if (state.reason === 'expired')
+    lines.push('Cache: assumed cold, estimated lifetime elapsed');
   else
     lines.push(
       `Cache: cold, ${input.selectedModel ?? 'the selected model'} has no cache for this session`,
     );
-  lines.push(`Cache lifetime: ${formatDuration(input.ttl)} after each request`);
+  lines.push(
+    `Estimated cache lifetime: ${formatDuration(input.ttl)} from the start of each request`,
+  );
+  lines.push(
+    'Based on plugin or model/provider configuration, or a 5-minute fallback. The provider may ignore the requested lifetime or retain the cache for a different duration. Cache Coach cannot verify the actual expiry, and its ttl option does not change server retention.',
+  );
   lines.push(
     warming
       ? `Warming: every ${formatDuration(warming.interval)} while idle, until ${formatDuration(warming.duration)} after the last request. Warming requests may not renew the cache, so the countdown doesn't count on them.`
@@ -271,8 +279,8 @@ export function details(input: {
   const warm = state.kind === 'warm' || state.kind === 'running';
   lines.push(
     warm
-      ? `Next message: reads ~${formatTokens(input.next.tokens)} tokens from the cache${cost}`
-      : `Next message: writes ~${formatTokens(input.next.tokens)} tokens to a new cache${cost}`,
+      ? `Next message estimate: reads ~${formatTokens(input.next.tokens)} tokens from the cache${cost}`
+      : `Next message estimate: writes ~${formatTokens(input.next.tokens)} tokens to a new cache${cost}`,
   );
   if (input.sessionCost !== undefined)
     lines.push(`Session cost so far: ${formatUsd(input.sessionCost)}`);
