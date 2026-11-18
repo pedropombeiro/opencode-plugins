@@ -67,6 +67,8 @@ interface AutomationEnvironment {
   missingSession: (error: unknown) => boolean;
   redeliver: (item: FeedbackItem) => void;
   report: (error: unknown) => void;
+  // Shows a configuration problem, such as a rule author that can't be resolved.
+  warn?: (message: string) => void;
   // Aborts when the plugin stops, which ends waits and sleeps.
   signal: AbortSignal;
   // Replaces the timer-based sleep, for tests.
@@ -236,34 +238,81 @@ function pipelineMismatch(request: ReviewRequest, item: FeedbackItem): string | 
   if (!request.headSha) return "The forge didn't report the PR/MR's head commit.";
 }
 
+// Resolves a rule author's username to their account ID, or undefined when
+// it can't be resolved.
+type AuthorResolver = (
+  ref: ReviewRef,
+  request: ReviewRequest,
+  username: string,
+) => Promise<string | undefined>;
+
+// The rules that cover the PR/MR's author. The signed-in user's own PR/MR, or
+// for failed jobs, one they review, is covered by every rule. Anyone else's
+// is covered only by the matching rules whose `authors` list its author, so
+// for review feedback only those rules' reviewers count. Rejects when no
+// rule covers it.
+async function authorRules(
+  deps: AutomationDependencies,
+  directory: string,
+  rules: readonly AutomationRule[],
+  resolveAuthor: AuthorResolver,
+  ref: ReviewRef,
+  request: ReviewRequest,
+  jobs: boolean,
+): Promise<readonly AutomationRule[]> {
+  const viewer = await (deps.viewerID
+    ? deps.viewerID(ref)
+    : traitsOf(request).feedback?.viewerID?.(deps.exec, directory, ref.host));
+  if (!viewer) throw new Error('Could not read the signed-in account');
+  if (request.authorID === viewer || (jobs && request.reviewerIDs?.includes(viewer))) return rules;
+  const on = jobs ? 'job-failed' : 'review';
+  const matching = (rule: AutomationRule) =>
+    rule.on === on && rule.host === ref.host && rule.projects.includes(ref.project);
+  const listed = [...new Set(rules.filter(matching).flatMap((rule) => rule.authors ?? []))];
+  const authorID = request.authorID;
+  const matched = new Set(
+    authorID
+      ? (
+          await Promise.all(
+            listed.map(async (name) =>
+              (await resolveAuthor(ref, request, name)) === authorID ? [name] : [],
+            ),
+          )
+        ).flat()
+      : [],
+  );
+  if (!matched.size)
+    throw new Ineligible(
+      jobs
+        ? 'You neither wrote nor review this PR/MR, and no automation rule lists its author, so automatic investigation is skipped. Use Act on feedback to investigate anyway.'
+        : 'You did not write this PR/MR, and no automation rule lists its author, so automatic action is skipped. Use Act on feedback to act anyway.',
+    );
+  return rules.filter(
+    (rule) => !matching(rule) || !!rule.authors?.some((name) => matched.has(name)),
+  );
+}
+
 // Checks that the PR/MR is open and the checkout is its source branch, at its
 // head commit when the forge reports one. A failed-job update's pipeline
-// must also be the head commit's. Automatic runs need the PR/MR to be the
-// signed-in user's own, or for failed jobs, one they review.
+// must also be the head commit's. Automatic runs need a rule that covers the
+// PR/MR's author; see `authorRules`. Returns the rules that apply: for a
+// manual run, all of them.
 async function assertMatchingCheckout(
   deps: AutomationDependencies,
   directory: string,
+  rules: readonly AutomationRule[],
+  resolveAuthor: AuthorResolver,
   item: FeedbackItem,
   automatic: boolean,
-) {
+): Promise<readonly AutomationRule[]> {
   const ref = parseUrl(item.url);
   const request = ref && (await currentRequest(deps, directory, item.url));
   if (!ref || !request || request.state !== 'opened')
     throw new Ineligible('The PR/MR is no longer open');
   const jobs = isJobFailure(item);
-  if (automatic) {
-    const viewer = await (deps.viewerID
-      ? deps.viewerID(ref)
-      : traitsOf(request).feedback?.viewerID?.(deps.exec, directory, ref.host));
-    if (!viewer) throw new Error('Could not read the signed-in account');
-    const reviewing = jobs && !!request.reviewerIDs?.includes(viewer);
-    if (request.authorID !== viewer && !reviewing)
-      throw new Ineligible(
-        jobs
-          ? 'You neither wrote nor review this PR/MR, so automatic investigation is skipped. Use Act on feedback to investigate anyway.'
-          : 'You did not write this PR/MR, so automatic action is skipped. Use Act on feedback to act anyway.',
-      );
-  }
+  const applicable = automatic
+    ? await authorRules(deps, directory, rules, resolveAuthor, ref, request, jobs)
+    : rules;
   if (jobs) {
     const mismatch = pipelineMismatch(request, item);
     if (mismatch) throw new Ineligible(mismatch);
@@ -284,6 +333,7 @@ async function assertMatchingCheckout(
         ? `The checkout isn't at the head commit that the failing ${traitsOf(request).ci} tested, so the failure may already be fixed. To investigate anyway, check out ${request.headSha.slice(0, 12)}, then use Retry feedback work.`
         : 'The checkout does not match the PR/MR source project and branch',
     );
+  return applicable;
 }
 
 // The failed jobs of the update's pipeline, while it's still the PR/MR's
@@ -406,15 +456,44 @@ export function createAutomationHost(
     return fallback ? modelKey(fallback) : undefined;
   };
 
+  // A rule author that can't be resolved is ignored, so it never widens a
+  // rule, and reported once per run.
+  const unresolved = new Set<string>();
+  const resolveAuthor: AuthorResolver = async (ref, request, username) => {
+    let reason = 'the forge has no such account';
+    try {
+      const id = await (deps.reviewerID
+        ? deps.reviewerID(ref, username)
+        : traitsOf(request).feedback?.reviewerID?.(deps.exec, directory, ref.host, username));
+      if (id) return id;
+    } catch (error) {
+      reason = error instanceof Error ? error.message : String(error);
+    }
+    const key = `${ref.host}/${username}`;
+    if (!unresolved.has(key)) {
+      unresolved.add(key);
+      env.warn?.(`Forgekeeper ignores automation author @${username} on ${ref.host}: ${reason}`);
+    }
+    return undefined;
+  };
+
   async function validate(item: FeedbackItem, automatic: boolean) {
     if (!(await env.deliverable(item)))
       throw new Ineligible('The session no longer targets this PR/MR here');
     const session = await ctx.session.get({ sessionID: item.sessionID });
     if (session.parentID) throw new Ineligible('Subagents cannot own review automation');
-    await assertMatchingCheckout(deps, directory, item, automatic);
+    const rules = await assertMatchingCheckout(
+      deps,
+      directory,
+      env.rules,
+      resolveAuthor,
+      item,
+      automatic,
+    );
     // An investigation changes nothing, so a read-only agent may run it.
     if (session.agent === 'plan' && !isJobFailure(item))
       throw new Ineligible('Switch the owning session to a coding agent before acting on feedback');
+    return rules;
   }
 
   async function assertPending(item: FeedbackItem) {
@@ -565,11 +644,11 @@ export function createAutomationHost(
           }
           if (!ref || (!current.manual && !investigatesJobs(env.rules, ref)))
             throw new Error('The failed-job automation rule is no longer enabled');
-          await validate(current.item, !current.manual);
+          const rules = await validate(current.item, !current.manual);
           // The pipeline must still fail. Jobs that failed after the prompt
           // was written don't stop the turn, which reads the pipeline itself.
           await readFailures(deps, directory, current.item);
-          const models = investigationModels(env.rules, ref);
+          const models = investigationModels(rules, ref);
           const refusal = modelRefusal(models, requested, 'retry');
           if (refusal) throw new Error(refusal);
           await assertPending(current.item);
@@ -580,20 +659,19 @@ export function createAutomationHost(
           if (await save(started, current)) return;
         }
       }
-      const reviewers = record.manual ? undefined : ruleReviewers(record.item.url);
-      if (!ref || reviewers?.length === 0)
+      if (!ref || (!record.manual && ruleReviewers(record.item.url).length === 0))
         throw new Error('The review automation rule is no longer enabled');
-      await validate(record.item, !record.manual);
+      const rules = await validate(record.item, !record.manual);
       const current = await findings(
         record.item,
-        reviewers,
+        record.manual ? undefined : automationReviewers(rules, ref),
         record.manual ? restrictedReviewers(env.rules, ref) : undefined,
       );
       if (findingsDigest(current) !== record.digest)
         throw new Error(
           'The review findings changed after the task was queued. Explicitly retry to act on the current findings.',
         );
-      const models = allowedModelsFor(env.rules, ref, current);
+      const models = allowedModelsFor(rules, ref, current);
       const refusal = modelRefusal(models, requested, 'retry');
       if (refusal) throw new Error(refusal);
       await assertPending(record.item);

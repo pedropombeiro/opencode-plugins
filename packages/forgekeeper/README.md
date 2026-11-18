@@ -137,8 +137,9 @@ Forgekeeper reports failed jobs but never retries or fixes them. For tracked sta
 also propose retargeting dependents after a parent merges, but never retargets or rebases itself.
 
 Optionally, `automation.rules` lets exact reviewers on exact projects, such as GitLab Duo, start
-a coding turn that prepares fixes for their feedback. It runs only on PRs/MRs you wrote, in the
-one session that targets them, with the checkout on the source branch. A rule can require models
+a coding turn that prepares fixes for their feedback. It runs only on PRs/MRs you wrote, or that
+an account in the rule's `authors` wrote, in the one session that targets them, with the
+checkout on the source branch. A rule can require models
 you trust with code changes. The turn uses the session's instructions and permissions, and
 leaves changes uncommitted. In `/forge-feedback`, **Act on feedback** (Ctrl+A) starts the same
 turn on request, and **Retry feedback work** (Ctrl+T) retries one after you inspect it.
@@ -146,7 +147,8 @@ turn on request, and **Retry feedback work** (Ctrl+T) retries one after you insp
 A `job-failed` rule investigates failed jobs on exact projects instead. Once a pipeline's
 failures go quiet for four minutes, or the pipeline finishes, one turn reads the failed jobs'
 logs and reports each failure's cause and a recommended fix, without changing anything. It runs
-on PRs/MRs you wrote or review, with the checkout at the head commit the pipeline tested. See
+on PRs/MRs you wrote or review, or that an account in the rule's `authors` wrote, with the
+checkout at the head commit the pipeline tested. See
 [Investigate failed jobs](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#investigate-failed-jobs).
 
 See [review detection and summaries](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#review-notifications),

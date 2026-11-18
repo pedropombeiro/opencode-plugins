@@ -143,6 +143,36 @@ describe('statusOptions', () => {
       "reviewAutomation isn't a Forgekeeper option; ignoring it",
     ]);
   });
+
+  test('both rule types accept exact extra authors, and invalid ones drop the rule', () => {
+    const review = {
+      on: 'review' as const,
+      host: 'gitlab.com',
+      projects: ['team/project'],
+      reviewers: ['gitlabduo'],
+      action: 'prepare' as const,
+    };
+    const job = { on: 'job-failed' as const, host: 'gitlab.com', projects: ['team/project'] };
+    const authors = ['Service-Bot', 'service-bot', 'other.user'];
+    const options = statusOptions({
+      automation: { rules: [{ ...review, authors }, { ...job, authors }, review] },
+    });
+    expect(options.problems).toEqual([]);
+    expect(options.automation.rules).toEqual([
+      { ...review, authors: ['service-bot', 'other.user'] },
+      { ...job, action: 'investigate' as const, authors: ['service-bot', 'other.user'] },
+      review,
+    ]);
+    for (const rule of [review, job])
+      for (const invalid of [[], ['service-*'], 'service-bot', [42]]) {
+        const ignored = statusOptions({ automation: { rules: [{ ...rule, authors: invalid }] } });
+        expect(ignored.automation.rules).toEqual([]);
+        expect(ignored.problems).toEqual([
+          'automation.rules[0] authors must be a nonempty list of exact usernames; using no rule',
+        ]);
+      }
+  });
+
   test('watches everything and delivers only to the inbox by default', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,

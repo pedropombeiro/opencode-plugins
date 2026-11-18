@@ -811,11 +811,40 @@ target. Forgekeeper records a batch with multiple associated sessions as skipped
 its findings, so it stays skipped even if the other associations are removed later. While
 sessions can't be read, Forgekeeper leaves the batch undecided and retries it.
 
-Automatic action only runs on PRs/MRs you wrote, as the signed-in `glab` or `gh` account, so a
-review of a colleague's MR never edits their branch. Before queuing a batch, Forgekeeper also
+By default, automatic action only runs on PRs/MRs you wrote, as the signed-in `glab` or `gh`
+account, so a review of a colleague's MR never edits their branch. To include other accounts,
+list them in the rule's [`authors`](#other-authors). Before queuing a batch, Forgekeeper also
 checks that the session's checkout is on the PR/MR's source branch, at its head commit. A batch
 that fails these checks is skipped with the reason, and keeps its normal delivery, such as a
 summary. **Act on feedback** works on any author's PR/MR.
+
+### Other authors
+
+To also act on PRs/MRs that another account writes, such as a service account whose MRs you
+maintain, list it in the rule's `authors`:
+
+```json
+{
+  "on": "review",
+  "host": "gitlab.com",
+  "projects": ["gitlab-org/gitlab"],
+  "reviewers": ["GitLabDuo"],
+  "authors": ["service-modelops-agent-principles-distiller"],
+  "action": "prepare"
+}
+```
+
+`authors` adds to your own PRs/MRs and never replaces them. Usernames must be exact, without
+wildcards. Forgekeeper resolves them through the authenticated forge API and compares the
+account IDs with the PR/MR's author. An entry that doesn't resolve is ignored, with an error
+toast once per run, so it never widens the rule. A rule with an empty or invalid `authors` list
+is ignored, with an error toast.
+
+On a PR/MR that another account wrote, only the rules that list that author apply: only their
+reviewers' findings count, and only their allowed models restrict the turn. A failed-job
+investigation on a PR/MR you review keeps every matching rule, as before. When several rules match a
+project, any rule that lists the author is enough. Fixes stay uncommitted, so pushing to
+someone else's branch remains your decision.
 
 Eligible work waits for the owning session to become idle. Before submission, Forgekeeper
 rechecks ownership, inbox membership, pause state, rules, current findings, and the checkout's
@@ -964,8 +993,9 @@ is shared across worktrees, and a reload never replays uncertain work. Forgekeep
 the batch with the reason, and keeps its normal delivery, when any of these checks fail:
 
 - **Author or reviewer:** automatic investigations run on PRs/MRs you wrote or review, as
-  the signed-in `glab` or `gh` account. On GitHub, a reviewer is someone with a pending
-  review request or a submitted review.
+  the signed-in `glab` or `gh` account, and on ones written by an account that a matching
+  rule's `authors` lists, as for [review rules](#other-authors). On GitHub, a reviewer is
+  someone with a pending review request or a submitted review.
 - **Current pipeline:** the failing pipeline must still be the PR/MR's head pipeline, the
   one for its head commit, and still have failed jobs. On GitLab, that includes merged
   results pipelines, which test a merge of the head commit into the target branch.
