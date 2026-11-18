@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-session-finder-1.1.1...opencode-session-finder-1.2.0) (2026-11-18)
+
+
+### Features
+
+* **session-finder:** add Desktop session search ([22c7d6b](https://github.com/pedropombeiro/opencode-plugins/commit/22c7d6bbcbf94dfcc9fa1092eb07e4017cd3a874))
+
 ## [1.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-session-finder-1.1.0...opencode-session-finder-1.1.1) (2026-11-05)
 
 
