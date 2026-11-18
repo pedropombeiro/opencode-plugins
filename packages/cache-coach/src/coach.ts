@@ -17,10 +17,17 @@ import {
   type ModelRef,
   type Tokens,
 } from './cache';
-import { compactionChoice, expiryNotice, formatClock, type Choice } from './compaction';
+import {
+  compactionChoice,
+  compactionThreshold,
+  expiryNotice,
+  formatClock,
+  type Choice,
+} from './compaction';
 import { createHealth, type Finding, type Thresholds } from './health';
 import { ttlForModel, type Settings } from './options';
 import {
+  automaticCompactionTip,
   contextCeilingTip,
   estimateTokens,
   healthLines,
@@ -138,26 +145,30 @@ export function createCoach(options: CoachOptions) {
     return compactionChoice({ candidates, current, tokens, price, minCost: settings.minCost });
   }
 
-  const configured = new Map<string, { warming: unknown }>();
-  const loading = new Set<string>();
-  function topWarming(directory: string | undefined): unknown {
+  type LocationConfig = { warming?: unknown; auto?: boolean; buffer?: number | string };
+  let configured = new Map<string, LocationConfig | undefined>();
+  function locationConfig(directory: string | undefined) {
     const key = directory ?? '';
-    const loaded = configured.get(key);
-    if (!loaded && !loading.has(key)) {
-      loading.add(key);
+    const cache = configured;
+    if (!cache.has(key)) {
+      cache.set(key, undefined);
       void options
         .client()
         .config.get(directory ? { location: { directory } } : undefined)
         .then((entries) => {
-          const warming = [...entries]
-            .reverse()
-            .map((entry) => (entry.type === 'document' ? entry.info.warming : undefined))
-            .find((value) => value !== undefined);
-          configured.set(key, { warming });
+          const config: LocationConfig = {};
+          for (const entry of entries) {
+            if (entry.type !== 'document') continue;
+            const { warming, compaction } = entry.info;
+            if (warming !== undefined) config.warming = warming;
+            if (compaction?.auto !== undefined) config.auto = compaction.auto;
+            if (compaction?.buffer !== undefined) config.buffer = compaction.buffer;
+          }
+          cache.set(key, config);
         })
-        .catch(() => loading.delete(key));
+        .catch(() => cache.delete(key));
     }
-    return loaded?.warming;
+    return cache.get(key);
   }
 
   const cacheSettings = (settings: unknown) =>
@@ -168,7 +179,7 @@ export function createCoach(options: CoachOptions) {
     const fromModel = cacheSettings(model?.settings);
     const fromProvider = cacheSettings(provider?.settings);
     return resolveWarming({
-      top: topWarming(locationOf(sessionID)?.directory),
+      top: locationConfig(locationOf(sessionID)?.directory)?.warming,
       provider: fromProvider?.warming,
       model: fromModel?.warming,
       ttl: parseTtl(fromModel?.ttl) ?? parseTtl(fromProvider?.ttl),
@@ -358,7 +369,19 @@ export function createCoach(options: CoachOptions) {
             visible,
           )
         : [];
-    if (!reportsCache(tokens)) return checked.length ? { tips: checked } : undefined;
+    const config = locationConfig(locationOf(sessionID)?.directory);
+    const threshold =
+      config && config.auto !== false && model
+        ? compactionThreshold(model.limit, config.buffer)
+        : undefined;
+    const automatic =
+      visible && settings.tips && threshold
+        ? automaticCompactionTip(total, threshold, settings.contextRatio)
+        : undefined;
+    if (!reportsCache(tokens)) {
+      if (automatic) checked.push(automatic);
+      return checked.length ? { tips: checked } : undefined;
+    }
     const scheduled = notice({
       sessionID,
       stepID: assistantMessageID,
@@ -391,18 +414,21 @@ export function createCoach(options: CoachOptions) {
         }),
       );
     }
-    tips.push(
-      contextCeilingTip({
-        tokens: total,
-        ceiling: contextCeiling({
-          configured: settings.contextCeiling,
-          costs: model?.cost,
-          modelLimit: model ? (model.limit.input ?? model.limit.context) : undefined,
+    const ceiling = contextCeiling({
+      configured: settings.contextCeiling,
+      costs: model?.cost,
+      modelLimit: model ? (model.limit.input ?? model.limit.context) : undefined,
+    });
+    if (automatic) tips.push(automatic);
+    else if (ceiling)
+      tips.push(
+        contextCeilingTip({
+          tokens: total,
+          ceiling,
+          ratio: settings.contextRatio,
+          price: model && priceFor(model.cost, total),
         }),
-        ratio: settings.contextRatio,
-        price: model && priceFor(model.cost, total),
-      }),
-    );
+      );
     return { notice: scheduled, tips: [...checked, ...tips.filter((tip): tip is Tip => !!tip)] };
   }
 
@@ -436,7 +462,24 @@ export function createCoach(options: CoachOptions) {
     unseen.delete(sessionID);
   }
 
-  return { view, describe, switchTip, stepEnded, stepFailed, compacted, toolOutput, coached };
+  const prepare = (sessionID: string) => {
+    if (settings.tips && coached(sessionID)) locationConfig(locationOf(sessionID)?.directory);
+  };
+  const configUpdated = () => {
+    configured = new Map();
+  };
+  return {
+    view,
+    describe,
+    switchTip,
+    stepEnded,
+    stepFailed,
+    compacted,
+    toolOutput,
+    coached,
+    prepare,
+    configUpdated,
+  };
 }
 
 export function createNotices(input: {
@@ -492,6 +535,9 @@ export function createTipGate(store: {
       store.add(key);
       return tip;
     },
-    compacted: (sessionID: string) => store.remove(`${sessionID}:context-limit`),
+    compacted: (sessionID: string) => {
+      store.remove(`${sessionID}:context-limit`);
+      store.remove(`${sessionID}:automatic-compaction`);
+    },
   };
 }

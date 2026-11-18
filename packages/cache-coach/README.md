@@ -129,17 +129,24 @@ sees them and the cache isn't affected.
 ## Tips
 
 The plugin shows a toast when it spots one of these patterns. Each tip appears at most once per
-session, except the model-switch tips, which appear for every switch away from a new request:
+session, except the ceiling and compaction tips, which reset after compaction, and the model-switch
+tips, which appear for every switch away from a new request:
 
 - **Model switch on a warm cache.** Selecting another model for a large context means the next
   message writes it to a new cache. The tip compares that with staying on the current model and
   suggests compacting first.
 - **Model switch after the cache expired.** The next message writes the context again on any model,
   so the tip says when the new model, or your `compactionModel`, can compact it for less.
-- **Close to the context ceiling.** At 80% of the ceiling (`contextRatio`), the tip suggests
-  compacting while the cache is warm, and shows what the same compaction costs after the cache
-  expires. The ceiling is 250K tokens by default. For a model that charges more above a prompt
-  size, such as Claude Haiku 5.5 above 100K tokens, the default ceiling is that size instead.
+- **Approaching automatic compaction.** When automatic compaction is enabled, the tip estimates
+  how many tokens remain before OpenCode summarizes older messages, so you can save exact details.
+  By default, it appears after a step reaches 80% of the compaction threshold. OpenCode sets
+  that threshold by subtracting `compaction.buffer` from the model's input window. A large step can cross the threshold
+  before the tip appears.
+  Starting in OpenCode 2.3.1, automatic compaction can [prepare a summary in the background](https://opencode.ai/docs/compaction#background-compaction)
+  before you see the tip. That summary costs tokens even if OpenCode never uses it.
+- **Close to a higher price or a custom ceiling.** The tip compares warm and cold compaction costs
+  when you approach a pricing tier or your `contextCeiling`. If both tips apply to the same step,
+  the automatic compaction warning takes priority.
 - **Large tool output.** A tool result stays in every later request in the session. The tip
   suggests asking for a narrower result next time.
 - **Warming didn't keep the cache.** When warming is on and a request within the warming window
@@ -247,18 +254,18 @@ form of the package entry. OpenCode still loads the plugin once:
 }
 ```
 
-| Option            | Default                                  | Description                                                                                                                                                                                                               |
-| ----------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tips`            | `true`                                   | Set to `false` to turn off tips.                                                                                                                                                                                          |
-| `notices`         | `true`                                   | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                                          |
-| `health`          | `true`                                   | Set to `false` to turn off [cache health](#cache-health) tracking and warnings. They don't depend on `tips`.                                                                                                              |
-| `compactionModel` |                                          | Model to suggest for compacting after the cache expires, such as `"gitlab/duo-chat-gpt-6-1-sol"`, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`. |
-| `ttl`             |                                          | Cache lifetime, such as `"1h"`, or an object that maps model patterns to lifetimes. Overrides the model and provider `cache.ttl` without changing requests. See [Cache indicator](#cache-indicator).                      |
-| `contextCeiling`  | `250000`, or where a higher price starts | Context size the ceiling tip measures against. Setting it applies to every model, including tiered ones. Capped at the model's input limit.                                                                               |
-| `contextRatio`    | `0.8`                                    | Share of the ceiling at which the ceiling tip appears.                                                                                                                                                                    |
-| `minTokens`       | `50000`                                  | Smallest context that a model-switch tip or an expiry message covers.                                                                                                                                                     |
-| `minCost`         | `0.1`                                    | Smallest cost or cost difference, in USD, that a model-switch tip or an expiry message covers.                                                                                                                            |
-| `largeOutput`     | `20000`                                  | Estimated tokens in a tool result at which the large-output tip appears.                                                                                                                                                  |
+| Option            | Default                             | Description                                                                                                                                                                                                               |
+| ----------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tips`            | `true`                              | Set to `false` to turn off tips.                                                                                                                                                                                          |
+| `notices`         | `true`                              | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                                          |
+| `health`          | `true`                              | Set to `false` to turn off [cache health](#cache-health) tracking and warnings. They don't depend on `tips`.                                                                                                              |
+| `compactionModel` |                                     | Model to suggest for compacting after the cache expires, such as `"gitlab/duo-chat-gpt-6-1-sol"`, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`. |
+| `ttl`             |                                     | Cache lifetime, such as `"1h"`, or an object that maps model patterns to lifetimes. Overrides the model and provider `cache.ttl` without changing requests. See [Cache indicator](#cache-indicator).                      |
+| `contextCeiling`  | Where a higher price starts, if any | Context size for the cost tip. Setting it overrides the pricing tier but does not change OpenCode's compaction threshold.                                                                                                 |
+| `contextRatio`    | `0.8`                               | Share of the relevant threshold at which the compaction or cost tip appears.                                                                                                                                              |
+| `minTokens`       | `50000`                             | Smallest context that a model-switch tip or an expiry message covers.                                                                                                                                                     |
+| `minCost`         | `0.1`                               | Smallest cost or cost difference, in USD, that a model-switch tip or an expiry message covers.                                                                                                                            |
+| `largeOutput`     | `20000`                             | Estimated tokens in a tool result at which the large-output tip appears.                                                                                                                                                  |
 
 Costs come from the model prices OpenCode knows, including cache and long-context prices. Without
 them, the indicator and tips leave the amounts out.

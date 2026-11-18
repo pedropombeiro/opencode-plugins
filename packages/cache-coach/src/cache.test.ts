@@ -127,11 +127,8 @@ describe('contextCeiling', () => {
   ];
   const flat: Cost[] = [{ input: 4, output: 20, cache: { read: 0.2, write: 5 } }];
 
-  test('defaults to 250K', () => {
-    expect(contextCeiling({ costs: flat, modelLimit: 1_000_000 })).toEqual({
-      tokens: 250_000,
-      reason: 'limit',
-    });
+  test('does not invent a price ceiling on flat-rate models', () => {
+    expect(contextCeiling({ costs: flat, modelLimit: 1_000_000 })).toBeUndefined();
   });
 
   test('defaults to where the higher price starts', () => {
@@ -143,7 +140,7 @@ describe('contextCeiling', () => {
 
   test('uses the lowest of several price tiers', () => {
     const costs: Cost[] = [...tiered, { tier: { type: 'context', size: 50_000 }, ...flat[0] }];
-    expect(contextCeiling({ costs }).tokens).toBe(50_000);
+    expect(contextCeiling({ costs })?.tokens).toBe(50_000);
   });
 
   test('prefers the configured ceiling', () => {
@@ -154,12 +151,8 @@ describe('contextCeiling', () => {
   });
 
   test('caps at the model limit', () => {
-    expect(contextCeiling({ costs: flat, modelLimit: 128_000 }).tokens).toBe(128_000);
-    expect(contextCeiling({ configured: 300_000, modelLimit: 200_000 }).tokens).toBe(200_000);
-    expect(contextCeiling({ costs: tiered, modelLimit: 64_000 })).toEqual({
-      tokens: 64_000,
-      reason: 'limit',
-    });
+    expect(contextCeiling({ configured: 300_000, modelLimit: 200_000 })?.tokens).toBe(200_000);
+    expect(contextCeiling({ costs: tiered, modelLimit: 64_000 })).toBeUndefined();
   });
 });
 

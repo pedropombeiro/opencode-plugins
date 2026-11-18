@@ -41,7 +41,9 @@ const tokens = (read: number, write = 0) => ({
   cache: { read, write },
 });
 
-function harness(options: { settings?: Partial<Settings>; parentID?: string } = {}) {
+function harness(
+  options: { settings?: Partial<Settings>; parentID?: string; config?: unknown[] } = {},
+) {
   const messages: unknown[] = [];
   const state = {
     status: 'idle',
@@ -70,7 +72,7 @@ function harness(options: { settings?: Partial<Settings>; parentID?: string } = 
   } as unknown as CoachData;
   const coach = createCoach({
     data,
-    client: () => ({ config: { get: async () => [] } }) as never,
+    client: () => ({ config: { get: async () => options.config ?? [] } }) as never,
     settings: { ...DEFAULTS, ...options.settings },
     selectedModel: () => state.selected,
     startedAt: () => undefined,
@@ -88,6 +90,29 @@ function harness(options: { settings?: Partial<Settings>; parentID?: string } = 
 }
 
 describe('createCoach', () => {
+  test('estimates remaining room from the effective config even without cached tokens', async () => {
+    const config = [
+      { type: 'document', info: { compaction: { auto: false, buffer: '20%' } } },
+      { type: 'document', info: { compaction: { auto: true } } },
+    ];
+    const { coach } = harness({ config });
+    const event = {
+      sessionID: 'one',
+      assistantMessageID: 'a',
+      tokens: { ...tokens(0), input: 780_000 },
+    };
+    coach.prepare('one');
+    await Promise.resolve();
+    expect(coach.stepEnded(event, true)?.tips).toMatchObject([
+      { key: 'automatic-compaction', message: expect.stringContaining('About 20K tokens') },
+    ]);
+    expect(coach.stepEnded(event, false)?.tips ?? []).toEqual([]);
+    config.pop();
+    coach.configUpdated();
+    coach.prepare('one');
+    await Promise.resolve();
+    expect(coach.stepEnded(event, true)?.tips ?? []).toEqual([]);
+  });
   test('reports a warm cache until the lifetime ends', () => {
     const { coach, step } = harness();
     step('a', 0, 100_000);

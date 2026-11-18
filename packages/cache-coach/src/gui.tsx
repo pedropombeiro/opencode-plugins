@@ -179,8 +179,10 @@ export default Plugin.define({
               if (!server) return;
               const { coach, notices, starts } = coachFor(server);
               const stops = [
+                data.on('config.updated', coach.configUpdated),
                 data.on('session.step.started', (event) => {
                   const { sessionID, assistantMessageID } = event.data;
+                  coach.prepare(sessionID);
                   notices.set(sessionID, undefined);
                   starts.set(sessionID, { id: assistantMessageID, at: Date.now() });
                 }),

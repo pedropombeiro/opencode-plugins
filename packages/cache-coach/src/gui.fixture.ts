@@ -127,8 +127,8 @@ const stop = solid.createRoot((cleanup) => {
   } as unknown as Parameters<NonNullable<gui.Plugin.Definition['setup']>>[0]);
 });
 
-assert.equal(a.listeners(), 5);
-assert.equal(b.listeners(), 5);
+assert.equal(a.listeners(), 6);
+assert.equal(b.listeners(), 6);
 
 a.emit('session.step.ended');
 b.emit('session.step.ended');
@@ -169,7 +169,7 @@ setServers([reconnected, b]);
 setTabs([ref(reconnected), ref(b)]);
 setCurrent(ref(reconnected));
 assert.equal(a.listeners(), 0, 'Reconnect must unsubscribe the old data store');
-assert.equal(reconnected.listeners(), 5, 'Reconnect must subscribe the new data store once');
+assert.equal(reconnected.listeners(), 6, 'Reconnect must subscribe the new data store once');
 a.emit('session.compaction.ended');
 reconnected.emit('session.step.ended');
 assert.equal(toasts.length, 4, 'Events from the old data store must not reset tips');

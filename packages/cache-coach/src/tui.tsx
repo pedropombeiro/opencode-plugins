@@ -163,8 +163,10 @@ export default {
     });
 
     const stops = [
+      context.data.on('config.updated', coach.configUpdated),
       context.data.on('session.step.started', (event) => {
         const { sessionID, assistantMessageID } = event.data;
+        coach.prepare(sessionID);
         notices.set(sessionID, undefined);
         setStarts((draft) => {
           draft[sessionID] = { id: assistantMessageID, at: Date.now() };

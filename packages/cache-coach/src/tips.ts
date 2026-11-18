@@ -59,6 +59,25 @@ export function modelSwitchTip(input: {
   };
 }
 
+export function automaticCompactionTip(
+  tokens: number,
+  threshold: number,
+  ratio: number,
+): Tip | undefined {
+  if (tokens < threshold * ratio) return undefined;
+  const remaining = threshold - tokens;
+  const estimate =
+    remaining > 0
+      ? `About ${formatTokens(remaining)} tokens remain before automatic compaction.`
+      : 'This session has reached the estimated automatic compaction threshold.';
+  return {
+    key: 'automatic-compaction',
+    title: 'Approaching automatic compaction',
+    message: `${estimate} If you need exact details from earlier messages, save them now.`,
+    variant: 'info',
+  };
+}
+
 export function contextCeilingTip(input: {
   tokens: number;
   ceiling: Ceiling;

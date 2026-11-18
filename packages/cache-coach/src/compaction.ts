@@ -22,6 +22,21 @@ export interface Choice {
   cost: number;
 }
 
+export function compactionThreshold(
+  limit: { input?: number; context: number },
+  buffer?: number | string,
+): number | undefined {
+  const window =
+    limit.input && limit.context
+      ? Math.min(limit.input, limit.context)
+      : limit.input || limit.context;
+  if (!window) return undefined;
+  const reserve =
+    typeof buffer === 'string' ? Math.round((window * parseFloat(buffer)) / 100) : buffer;
+  if (reserve !== undefined && reserve < window) return window - reserve;
+  return window - Math.max(Math.floor(window * 0.15), window >= 32_000 ? 16_000 : 0);
+}
+
 export function compactionChoice(input: {
   candidates: readonly Candidate[];
   current: ModelRef;

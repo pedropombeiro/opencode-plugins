@@ -98,8 +98,6 @@ export function priceFor(costs: readonly Cost[] | undefined, prompt: number): Pr
 
 export const usd = (tokens: number, perMillion: number) => (tokens * perMillion) / 1_000_000;
 
-export const DEFAULT_CEILING = 250_000;
-
 export interface Ceiling {
   tokens: number;
   reason: 'price' | 'limit';
@@ -116,14 +114,14 @@ export function contextCeiling(input: {
   configured?: number;
   costs?: readonly Cost[];
   modelLimit?: number;
-}): Ceiling {
+}): Ceiling | undefined {
   const cap = (tokens: number) =>
     input.modelLimit && input.modelLimit > 0 ? Math.min(tokens, input.modelLimit) : tokens;
   if (input.configured) return { tokens: cap(input.configured), reason: 'limit' };
   const tier = priceTier(input.costs);
   if (tier && (!input.modelLimit || tier < input.modelLimit))
     return { tokens: tier, reason: 'price' };
-  return { tokens: cap(DEFAULT_CEILING), reason: 'limit' };
+  return undefined;
 }
 
 const UNITS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
