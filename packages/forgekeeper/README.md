@@ -4,13 +4,12 @@ An [OpenCode](https://opencode.ai) plugin that keeps coding sessions connected t
 PRs/MRs, review feedback, and CI status. It supports GitHub and GitLab.
 
 Session titles include the references you're working on. The prompt footer shows what needs
-attention, and optional summaries bring review feedback back into the relevant conversation.
+attention, and automatic summaries bring review feedback back into the relevant conversation.
 A session can track several PRs/MRs across repositories.
 
 ![OpenCode session list with issue and MR references, a review notification, and a footer summarizing four MRs.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/session-review-notification.png)
 
-This capture shows optional session delivery. Current releases default to the feedback inbox;
-notification wording has changed since this capture.
+Notification wording has changed since this capture.
 
 ## Installation
 
@@ -97,11 +96,12 @@ Forgekeeper watches explicit PR/MR targets for human and automated review feedba
 failed jobs, and merges. Recent top-level sessions can receive updates even if their tabs
 aren't open. Branch-derived PRs/MRs get status but no review notifications.
 
-By default, updates go to a persistent local inbox. In `/forge-feedback`, select an update to
+All updates go to a persistent local inbox. By default, review feedback also starts a summary
+turn, while lifecycle updates stay in the inbox. In `/forge-feedback`, select an update to
 open its links, acknowledge it, summarize it in its session, or pause monitoring.
 Acknowledging an update doesn't reply to or resolve a remote discussion.
 
-To bring summaries into conversations automatically, set both delivery options to `summary`:
+To summarize lifecycle updates automatically too, set `delivery.lifecycle` to `summary`:
 
 ```json
 {
@@ -109,7 +109,7 @@ To bring summaries into conversations automatically, set both delivery options t
     {
       "package": "opencode-forgekeeper",
       "options": {
-        "delivery": { "reviews": "summary", "lifecycle": "summary" }
+        "delivery": { "lifecycle": "summary" }
       }
     }
   ]
@@ -118,10 +118,10 @@ To bring summaries into conversations automatically, set both delivery options t
 
 Each delivery option accepts:
 
-- `inbox`: retain the update without posting to the session. This is the default.
+- `inbox`: retain the update without posting to the session. This is the lifecycle default.
 - `passive`: queue a notice without starting a turn.
-- `summary`: start a restricted summary turn after active work finishes. Review updates
-  without comments use a passive notice instead.
+- `summary`: start a restricted summary turn after active work finishes. This is the review
+  default. Review updates without comments use a passive notice instead.
 
 Human and GitLab Duo feedback wait for a four-minute quiet period, with status polling every
 30 seconds meanwhile, so an update arrives within about 5 minutes of the last comment. That's
@@ -182,7 +182,7 @@ Only specify values you want to change. The terminal part has no separate option
 | `watch.lifecycle`                 | `true`                        | Monitor conflicts, failed jobs, and merges.                                                                                                                                                                                                                                           |
 | `watch.reviewRequests`            | `true`                        | Monitor requests for your review on GitLab MRs, including repeated ones.                                                                                                                                                                                                              |
 | `reviewBots`                      | GitLab.com security reviewers | Exact bot usernames by host. Your list replaces the defaults.                                                                                                                                                                                                                         |
-| `delivery.reviews`                | `"inbox"`                     | Review delivery: `inbox`, `passive`, or `summary`.                                                                                                                                                                                                                                    |
+| `delivery.reviews`                | `"summary"`                   | Review delivery: `inbox`, `passive`, or `summary`.                                                                                                                                                                                                                                    |
 | `delivery.lifecycle`              | `"inbox"`                     | Conflict, job-failure, and merge delivery.                                                                                                                                                                                                                                            |
 | `lifecycleExecution.parentMerged` | `{ "mode": "notify" }`        | Optionally prepare retarget proposals for tracked dependents.                                                                                                                                                                                                                         |
 | `automation.rules`                | No rules                      | Reviewers whose feedback starts a coding turn that prepares fixes, or projects whose failed jobs start an investigation, optionally limited to allowed models. Set `"execution": "environment"` to permit the configured environment provider when the owning checkout doesn't match. |

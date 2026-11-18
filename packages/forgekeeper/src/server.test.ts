@@ -1661,7 +1661,7 @@ describe('PR/MR status', () => {
     let comments: ReviewComment[] = [];
     const app = await harness({
       status: forge,
-      pluginOptions: quiet,
+      pluginOptions: { ...quiet, delivery: { reviews: 'inbox' } },
       feedback: async () => ({ complete: true, viewerID: 'me', comments }),
     });
     await app.set({ target: projectA });
@@ -1787,7 +1787,7 @@ describe('PR/MR status lifecycle', () => {
     const options = {
       status: forge,
       storage,
-      pluginOptions: { watch: { humanReviews: false } },
+      pluginOptions: { watch: { humanReviews: false }, delivery: { reviews: 'inbox' } },
       feedback: async () => ({ complete: true, viewerID: 'me', comments }),
     };
     const first = await harness(options);
@@ -1917,16 +1917,15 @@ describe('PR/MR status lifecycle', () => {
     }
   });
 
-  test('tells the session about settled human feedback', async () => {
+  test('summarizes settled human feedback by default', async () => {
     const { app } = await watchedFeedback();
     await app.refresh();
     await settle();
     expect((await app.feedback()).items).toMatchObject([
       { sessionID: 'one', links: [`${projectA}#note_7`], commentIDs: ['7'] },
     ]);
-    expect(app.syntheticStarted()).toBe(0);
-    // The inbox mode, the default, posts nothing to the session.
-    expect(app.passive).toEqual([]);
+    expect(app.syntheticStarted()).toBe(1);
+    expect(app.passive).toHaveLength(1);
     await app.cleanup();
   });
 
@@ -2062,7 +2061,9 @@ describe('PR/MR status lifecycle', () => {
   });
 
   test('lists, acknowledges, and summarizes review updates by number', async () => {
-    const { app } = await watchedFeedback();
+    const { app } = await watchedFeedback({
+      pluginOptions: { delivery: { reviews: 'inbox' } },
+    });
     await app.refresh();
     await settle();
     const [item] = (await app.feedback()).items;
@@ -2235,7 +2236,9 @@ describe('PR/MR status lifecycle', () => {
   });
 
   test('never starts turns for updates recorded in inbox mode after switching to summary mode', async () => {
-    const { app, reader } = await watchedFeedback();
+    const { app, reader } = await watchedFeedback({
+      pluginOptions: { delivery: { reviews: 'inbox' } },
+    });
     await app.refresh();
     await settle();
     const [item] = (await app.feedback()).items;
@@ -2670,6 +2673,7 @@ describe('PR/MR status lifecycle', () => {
   test('summarizes an update on request in inbox mode, including updates stored without comment IDs', async () => {
     const requested: string[][] = [];
     const { app, reader } = await watchedFeedback({
+      pluginOptions: { delivery: { reviews: 'inbox' } },
       details: async (request, ids) => {
         requested.push(ids);
         return summaryMode.details(request, ids);
@@ -3394,7 +3398,12 @@ describe('PR/MR status lifecycle', () => {
     } as GitHubPullRequest;
     forge.requests.set('group/a!1', request);
     const reader = feedbackReader();
-    const app = await harness({ status: forge, feedback: reader.read, now: reader.now });
+    const app = await harness({
+      status: forge,
+      feedback: reader.read,
+      now: reader.now,
+      pluginOptions: { delivery: { reviews: 'inbox' } },
+    });
     await app.set({ target: url });
     await app.watch(['one'], 'one');
     await settle();
@@ -3446,6 +3455,7 @@ describe('PR/MR status lifecycle', () => {
       status: forge,
       feedback: reader.read,
       now: reader.now,
+      pluginOptions: { delivery: { reviews: 'inbox' } },
     });
     await app.watch(['one', 'two'], 'one');
     await settle();
@@ -3469,8 +3479,10 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
-  test('keeps default notifications out of the agent inbox, including its next turn', async () => {
-    const { app, reader } = await watchedFeedback();
+  test('keeps inbox-only notifications out of the agent inbox, including its next turn', async () => {
+    const { app, reader } = await watchedFeedback({
+      pluginOptions: { delivery: { reviews: 'inbox' } },
+    });
     await app.refresh();
     await settle();
     expect((await app.feedback()).items).toHaveLength(1);
@@ -3486,7 +3498,9 @@ describe('PR/MR status lifecycle', () => {
   });
 
   test('ignores the removed resume option for CLI-watched sessions, and says so', async () => {
-    const { app } = await watchedFeedback({ pluginOptions: { resumeSession: true } });
+    const { app } = await watchedFeedback({
+      pluginOptions: { resumeSession: true, delivery: { reviews: 'inbox' } },
+    });
     await app.refresh();
     await settle();
     expect((await app.feedback()).items).toHaveLength(1);
@@ -3501,7 +3515,9 @@ describe('PR/MR status lifecycle', () => {
   });
 
   test('pause suppresses delivery and preserves unannounced comments for resume', async () => {
-    const { app, reader } = await watchedFeedback();
+    const { app, reader } = await watchedFeedback({
+      pluginOptions: { delivery: { reviews: 'inbox' } },
+    });
     await app.pauseFeedback(true);
     await app.refresh();
     await settle();
@@ -3527,6 +3543,7 @@ describe('PR/MR status lifecycle', () => {
       feedback: reader.read,
       now: reader.now,
       activity: reader.now(),
+      pluginOptions: { delivery: { reviews: 'inbox' } },
     });
     await settle();
     expect(reader.reads()).toBe(1);
@@ -4083,6 +4100,7 @@ describe('review requests', () => {
   test("announces a repeated request with the author's replies, and keeps it once they resolve their threads", async () => {
     const { app, request, resolveAll } = await requested({
       pluginOptions: {
+        delivery: { reviews: 'inbox' },
         automation: {
           rules: [
             {

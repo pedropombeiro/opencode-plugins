@@ -9,8 +9,7 @@ and review notifications are optional; see [Keep only session titles](#keep-only
 
 ![OpenCode session environment with issue and MR references, a review notification, and a footer tracking four merge requests.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/session-review-notification.png)
 
-This capture shows optional session delivery. Current releases default to the feedback inbox;
-notification wording has changed since this capture.
+Notification wording has changed since this capture.
 
 Requires OpenCode 2.2 or later. It replaces
 [`opencode-forge-session-title`](https://www.npmjs.com/package/opencode-forge-session-title); see
@@ -54,9 +53,10 @@ what's missing, such as `glab is not installed`.
 
 Forgekeeper 3 changes where review notifications go, and renames its options:
 
-- **Notifications:** review feedback no longer resumes the session or asks the agent to
-  address it. It goes to the `/forge-feedback` inbox. To also post it to the session, set
-  `delivery.reviews` to `"passive"` or `"summary"`. See
+- **Notifications:** review feedback goes to the `/forge-feedback` inbox and starts a
+  restricted summary turn by default, without asking the agent to address it. Set
+  `delivery.reviews` to `"inbox"` to stop automatic session delivery, or `"passive"` to queue
+  a notice without starting a turn. See
   [Review notifications](#review-notifications).
 - **Options:** Forgekeeper no longer reads the former option names. It shows an error toast
   that names each one, and uses that option's default instead. For example, a former
@@ -348,13 +348,13 @@ retry is dropped.
 Feedback goes to a persistent inbox. The `delivery.reviews` option sets what else
 an update does:
 
-- `inbox`, the default, posts nothing to the session.
+- `inbox` posts nothing to the session.
 - `passive` queues a session message with `resume: false`, which starts no turn. It
   doesn't mark the session unread, because the TUI marks sessions unread only when a
   turn ends. When something else wakes the session, the message can run as its own
   step; Forgekeeper then sends only the notice, without tools or the session's history.
-- `summary` queues a message that starts a summary turn, described below. A turn that
-  ends marks the session unread. Updates without comments, such as Copilot reviews,
+- `summary`, the default, queues a message that starts a summary turn, described below.
+  A turn that ends marks the session unread. Updates without comments, such as Copilot reviews,
   get a passive message instead.
 
 Session messages contain the notification title, when the newest comment was written, and
@@ -1237,7 +1237,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                                           |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
-| `delivery.reviews`       | `"inbox"`                     | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).                                                                                                                                                                                  |
+| `delivery.reviews`       | `"summary"`                   | What a review update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`. See [Summary turns](#summary-turns).                                                                                                                                                                                  |
 | `delivery.lifecycle`     | `"inbox"`                     | What a merge request update does besides entering the inbox: `"inbox"`, `"passive"`, or `"summary"`.                                                                                                                                                                                                                |
 | `lifecycleExecution`     | `"notify"`                    | What Forgekeeper works out when a parent PR/MR merges, in `parentMerged`. See [Stacked PRs/MRs](#stacked-prsmrs).                                                                                                                                                                                                   |
 | `automation.rules`       | No rules                      | What starts an automatic turn: feedback from authorized reviewers, or failed jobs, and where it runs. See [Prepare fixes](#prepare-fixes-from-review-feedback), [Investigate failed jobs](#investigate-failed-jobs), and [Run automation in an execution environment](#run-automation-in-an-execution-environment). |
@@ -1330,8 +1330,9 @@ OpenCode scopes plugin storage by plugin ID, so nothing stored under the former 
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
 With default options, the footer and review monitoring start right away. All notifications
-stay in the feedback inbox, and no session turn starts unless you set `delivery.reviews`
-or `delivery.lifecycle` to `"summary"`. Set `status` to `false` to keep only titles.
+enter the feedback inbox, and review feedback also starts a restricted summary turn.
+Lifecycle updates stay in the inbox unless you change `delivery.lifecycle`. Set `status`
+to `false` to keep only titles.
 
 If you set options for `opencode-forgekeeper` 2.x, also see
 [Upgrade from forgekeeper 2.x](#upgrade-from-forgekeeper-2x).

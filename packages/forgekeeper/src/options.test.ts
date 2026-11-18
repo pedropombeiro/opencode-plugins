@@ -216,7 +216,7 @@ describe('statusOptions', () => {
       }
   });
 
-  test('watches everything and delivers only to the inbox by default', () => {
+  test('watches everything and defaults to review summaries and lifecycle inbox delivery', () => {
     expect(statusOptions(undefined)).toEqual({
       enabled: true,
       pollSeconds: 120,
@@ -228,7 +228,7 @@ describe('statusOptions', () => {
         reviewRequests: true,
       },
       reviewBots: DEFAULT_REVIEW_BOTS,
-      delivery: { reviews: 'inbox', lifecycle: 'inbox' },
+      delivery: { reviews: 'summary', lifecycle: 'inbox' },
       lifecycleExecution: { parentMerged: notify },
       automation: { rules: [] },
       problems: [],
@@ -244,7 +244,7 @@ describe('statusOptions', () => {
         status: false,
         pollSeconds: 45,
         watch: { humanReviews: false, lifecycle: false, reviewRequests: false },
-        delivery: { reviews: 'summary' },
+        delivery: { reviews: 'inbox' },
         hosts: ['gitlab.example.com'],
         githubHosts: [],
       }),
@@ -258,11 +258,11 @@ describe('statusOptions', () => {
         lifecycle: false,
         reviewRequests: false,
       },
-      delivery: { reviews: 'summary', lifecycle: 'inbox' },
+      delivery: { reviews: 'inbox', lifecycle: 'inbox' },
       problems: [],
     });
     expect(statusOptions({ delivery: { lifecycle: 'passive' } }).delivery).toEqual({
-      reviews: 'inbox',
+      reviews: 'summary',
       lifecycle: 'passive',
     });
   });
@@ -276,7 +276,7 @@ describe('statusOptions', () => {
       [{ watch: ['lifecycle'] }, 'watch must be an object; using the defaults'],
       [
         { delivery: { reviews: 'summmary' } },
-        'delivery.reviews must be one of "inbox", "passive", "summary"; using "inbox"',
+        'delivery.reviews must be one of "inbox", "passive", "summary"; using "summary"',
       ],
       [{ delivery: 'summary' }, 'delivery must be an object; using the defaults'],
       [{ hosts: 'gitlab.example.com' }, 'hosts must be a list of host names'],
@@ -285,7 +285,7 @@ describe('statusOptions', () => {
     }
     const invalid = statusOptions({ watch: { lifecycle: 'false' }, delivery: { reviews: 'x' } });
     expect(invalid.watch.lifecycle).toBe(true);
-    expect(invalid.delivery.reviews).toBe('inbox');
+    expect(invalid.delivery.reviews).toBe('summary');
   });
 
   test('reports unknown options, at every level, without failing the others', () => {

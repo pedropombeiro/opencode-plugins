@@ -104,7 +104,7 @@ const DEFAULT_WATCH: Watch = {
   lifecycle: true,
   reviewRequests: true,
 };
-const DEFAULT_DELIVERY: Delivery = { reviews: 'inbox', lifecycle: 'inbox' };
+const DEFAULT_DELIVERY: Delivery = { reviews: 'summary', lifecycle: 'inbox' };
 const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
 
 const HOST = /^[a-z0-9.-]+(:\d+)?$/;
