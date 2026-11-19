@@ -96,6 +96,38 @@ function harness(
 }
 
 describe('createCoach', () => {
+  test('meters Duo calls without cache data and gates tool-loop advice by user turn', () => {
+    const { coach, messages } = harness();
+    const seen = new Set<string>();
+    const gate = createTipGate({
+      has: (key) => seen.has(key),
+      add: (key) => seen.add(key),
+      remove: (key) => seen.delete(key),
+    });
+    for (const turn of ['first', 'second']) {
+      messages.push({ type: 'user', id: turn, time: { created: 0 } });
+      expect(coach.view('one', 0).indicator).toBeUndefined();
+      for (let i = 1; i <= 10; i++) {
+        const id = `${turn}-${i}`;
+        const finish = i === 8 ? 'stop' : 'tool-calls';
+        const usage = { ...tokens(0), input: 50 };
+        messages.push({
+          type: 'assistant',
+          model: duo,
+          id,
+          finish,
+          tokens: usage,
+          time: { created: i, completed: i + 1 },
+        });
+        const tips =
+          coach.stepEnded({ sessionID: 'one', assistantMessageID: id, tokens: usage, finish }, true)
+            ?.tips ?? [];
+        expect(tips.filter((tip) => gate.take('one', tip))).toHaveLength(i === 9 ? 1 : 0);
+        if (i === 8)
+          expect(coach.view('one', i).indicator?.text).toBe('Duo this turn: 8 calls · ~2.5 cr');
+      }
+    }
+  });
   test('keeps Duo cache diagnostics separate from call-based billing', () => {
     const { coach, messages } = harness({ settings: { contextCeiling: 100_000 } });
     const event = { sessionID: 'one', assistantMessageID: 'a', tokens: tokens(100_000) };

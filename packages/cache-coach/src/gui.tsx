@@ -13,7 +13,7 @@ import {
   type SessionRef,
 } from '@opencode/plugin/gui';
 import { createMemo, createSignal, For, mapArray, onCleanup, Show } from 'solid-js';
-import { aboutUsd, indicator, shortName } from './cache';
+import { aboutUsd, shortName } from './cache';
 import {
   createCoach,
   createNotices,
@@ -242,7 +242,7 @@ export default Plugin.define({
       id: 'cache',
       show: (input): ComposerPillView | undefined => {
         const value = viewOf(input.session);
-        const current = indicator(value.state, value.next, value.alternative);
+        const current = value.indicator;
         if (!current) return undefined;
         return {
           icon: 'status',
@@ -270,7 +270,7 @@ export default Plugin.define({
         return coachFor(props.session.server).notices.get(props.session.id);
       };
       const tone = () => {
-        const current = indicator(value().state, value().next, value().alternative);
+        const current = value().indicator;
         return current?.tone === 'success' ? 'cc-success' : current ? 'cc-warning' : 'cc-muted';
       };
       return (

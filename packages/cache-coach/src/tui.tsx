@@ -2,7 +2,7 @@
 import type { Plugin } from '@opencode/plugin/tui';
 import { createEffect, createMemo, createSignal, Show, untrack } from 'solid-js';
 import { createViewFilter } from '../../_shared/src/index.ts';
-import { indicator, type Tone } from './cache';
+import type { Indicator as CacheIndicator, Tone } from './cache';
 import { createCoach, createNotices, createSwitchWatcher, createTipGate } from './coach';
 import { NOTICE_TEXT } from './notice';
 import { parseOptions } from './options';
@@ -109,11 +109,11 @@ export default {
       const current = createMemo(() => {
         if (!props.sessionID) return undefined;
         const value = coach.view(props.sessionID, now());
-        return indicator(value.state, value.next, value.alternative);
+        return value.indicator;
       });
       return (
         <Show when={current()}>
-          {(value: () => NonNullable<ReturnType<typeof indicator>>) => (
+          {(value: () => CacheIndicator) => (
             <text
               wrapMode="none"
               flexShrink={0}

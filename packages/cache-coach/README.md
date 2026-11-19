@@ -42,6 +42,12 @@ server part only keeps the expiry messages out of model requests.
 
 ### GitLab Duo Agentic Chat
 
+The CLI footer and Desktop indicator show usage since your last message, for example
+`Duo this turn: 8 calls · ~5.93 cr` on Opus 5.5. Several tool executions in one model response
+count as one call. When the agent requests more tools after eight or more observed Duo calls,
+Cache Coach suggests narrowing the task or batching independent checks. The tip appears at most
+once per turn. Set `tips` to `false` to keep only the meter.
+
 For `gitlab/duo-chat-*` models, run `/cache` to see observed model calls by model. For example,
 12 completed calls on Sonnet 5.5 use approximately 3.75 GitLab Credits at GitLab-managed rates.
 One message can require several calls. Cache Coach counts completed assistant steps in the session
@@ -70,7 +76,7 @@ The prompt footer shows the cache state of the session on screen:
 | `○ cache cold · … · GPT-6.1 Sol $0.45` | As above, and compacting on your `compactionModel` costs less.                     |
 | `● cache 3:42 · warming?`              | Likely warm, in a session that OpenCode warms. See [Warming](#warming).            |
 
-The footer stays empty until the session has a request whose provider reports cache tokens. Click
+The cache countdown stays hidden until the session has a request whose provider reports cache tokens. Click
 the indicator, or run `/cache`, to see the last request's cache hit rate, what the next message
 costs, and the session's cost so far.
 

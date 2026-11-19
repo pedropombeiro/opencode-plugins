@@ -39,6 +39,7 @@ export const duoTier = (ref: ModelRef) =>
   isDuo(ref) && Array.isArray(rateFor(ref, Date.now())) ? DUO_TIER : undefined;
 
 interface Message {
+  id: string;
   type: string;
   model?: ModelRef;
   tokens?: Tokens;
@@ -47,19 +48,62 @@ interface Message {
   finish?: string;
 }
 
+interface Usage {
+  calls: number;
+  credits?: number;
+}
+
+function observed(message: Message) {
+  return message.type === 'assistant' &&
+    message.model &&
+    isDuo(message.model) &&
+    message.time.completed !== undefined &&
+    !message.error &&
+    message.finish !== 'error'
+    ? message.model
+    : undefined;
+}
+
+function add(usage: Usage, model: ModelRef, message: Message) {
+  const rate = rateFor(model, message.time.created);
+  const prompt = message.tokens && promptTokens(message.tokens);
+  const calls =
+    typeof rate === 'number' ? rate : prompt ? rate?.[prompt > DUO_TIER ? 1 : 0] : undefined;
+  usage.calls++;
+  usage.credits = calls && usage.credits !== undefined ? usage.credits + 1 / calls : undefined;
+}
+
+export function duoTurn(messages: readonly Message[]) {
+  const usage: Usage = { calls: 0, credits: 0 };
+  let lastCall: string | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.type === 'user') {
+      if (!usage.calls) return undefined;
+      const credits =
+        usage.credits === undefined ? '' : ` · ~${Number(usage.credits.toFixed(2))} cr`;
+      return {
+        id: message.id,
+        lastCall,
+        calls: usage.calls,
+        text: `Duo this turn: ${usage.calls} ${usage.calls === 1 ? 'call' : 'calls'}${credits}`,
+      };
+    }
+    const model = observed(message);
+    if (model) {
+      lastCall ??= message.id;
+      add(usage, model, message);
+    }
+  }
+}
+
 export function duoUsage(messages: readonly Message[]): string[] {
-  const models = new Map<string, { calls: number; credits?: number }>();
+  const models = new Map<string, Usage>();
   for (const message of messages) {
-    const { model, tokens, time } = message;
-    if (message.type !== 'assistant' || !model || !isDuo(model)) continue;
-    if (time.completed === undefined || message.error || message.finish === 'error') continue;
+    const model = observed(message);
+    if (!model) continue;
     const usage = models.get(model.id) ?? { calls: 0, credits: 0 };
-    usage.calls++;
-    const rate = rateFor(model, time.created);
-    const prompt = tokens && promptTokens(tokens);
-    const calls =
-      typeof rate === 'number' ? rate : prompt ? rate?.[prompt > DUO_TIER ? 1 : 0] : undefined;
-    usage.credits = calls && usage.credits !== undefined ? usage.credits + 1 / calls : undefined;
+    add(usage, model, message);
     models.set(model.id, usage);
   }
   return Array.from(

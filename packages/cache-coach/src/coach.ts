@@ -6,6 +6,7 @@ import {
   DEFAULT_TTL,
   details,
   EXPIRING,
+  indicator,
   lastStep,
   nextCost,
   parseTtl,
@@ -25,7 +26,7 @@ import {
   type Choice,
 } from './compaction';
 import { createHealth, type Finding, type Thresholds } from './health';
-import { duoTier, duoUsage, isDuo } from './duo';
+import { duoTier, duoTurn, duoUsage, isDuo } from './duo';
 import { ttlForModel, type Settings } from './options';
 import {
   automaticCompactionTip,
@@ -77,6 +78,7 @@ export interface Notice {
 }
 
 export interface StepEnded {
+  finish?: string;
   sessionID: string;
   assistantMessageID: string;
   tokens: Tokens;
@@ -218,7 +220,16 @@ export function createCoach(options: CoachOptions) {
       state.kind === 'cold' && step
         ? compactionFor(models, selected ?? step.model, tokens, price)
         : undefined;
+    const cache = indicator(state, next, alternative);
+    const turn = duoTurn(data.session.message.list(sessionID));
     return {
+      indicator: turn
+        ? {
+            text: cache ? `${cache.text} · ${turn.text}` : turn.text,
+            tone: cache?.tone ?? ('muted' as const),
+          }
+        : cache,
+      turn,
       state,
       ttl,
       warming,
@@ -266,10 +277,12 @@ export function createCoach(options: CoachOptions) {
 
   function describe(sessionID: string, time: number) {
     const usage = duoUsage(data.session.message.list(sessionID));
+    const current = view(sessionID, time);
     const lines = details({
-      ...view(sessionID, time),
+      ...current,
       sessionCost: usage.length ? undefined : data.session.cost(sessionID),
     });
+    if (current.turn) lines.push('', current.turn.text);
     if (usage.length) lines.push('', 'GitLab Duo usage (GitLab-managed rates):', ...usage);
     if (!settings.health) return lines;
     const step = stepOf(sessionID);
@@ -400,6 +413,17 @@ export function createCoach(options: CoachOptions) {
     });
     if (!visible || !settings.tips) return { notice: scheduled, tips: checked };
     const tips: (Tip | undefined)[] = [];
+    if (duo && event.finish === 'tool-calls') {
+      const turn = duoTurn(data.session.message.list(sessionID));
+      if (turn && turn.calls >= 8 && turn.lastCall === assistantMessageID)
+        tips.push({
+          key: `duo-loop:${turn.id}`,
+          title: turn.text,
+          variant: 'info',
+          message:
+            'If the agent is still searching, narrow the scope or ask it to batch independent checks into one model round trip.',
+        });
+    }
     const previous = lastStep(
       data.session.message.list(sessionID) as Messages,
       startedAt(sessionID),
