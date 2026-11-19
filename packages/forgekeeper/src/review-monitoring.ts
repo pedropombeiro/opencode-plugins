@@ -172,8 +172,7 @@ export function createReviewMonitoring(
       interval: host.interval,
       record: async (key) =>
         (await storage.get(feedbackRecordKey(recordKey(key, automatedFeedback)))) as
-          | FeedbackRecord
-          | undefined,
+          FeedbackRecord | undefined,
       now,
       persist: (key, change, at) =>
         host.write(async () => {

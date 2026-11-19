@@ -194,10 +194,9 @@ export function createReviewClaims(
   };
   const lockOf = (directory: string) =>
     db()
-      .query<
-        { holder: string; value: string },
-        [string]
-      >('SELECT holder, value FROM checkout_locks WHERE directory = ?')
+      .query<{ holder: string; value: string }, [string]>(
+        'SELECT holder, value FROM checkout_locks WHERE directory = ?',
+      )
       .get(directory);
   // Frees the directory's lock when its attempt can't run anymore, such as
   // one whose worktree creation ended after the attempt did. Returns the lock
@@ -255,10 +254,9 @@ export function createReviewClaims(
       },
       async read(directory: string): Promise<CheckoutHolder | undefined> {
         const row = db()
-          .query<
-            { value: string },
-            [string]
-          >('SELECT value FROM checkout_locks WHERE directory = ?')
+          .query<{ value: string }, [string]>(
+            'SELECT value FROM checkout_locks WHERE directory = ?',
+          )
           .get(directory);
         return row ? JSON.parse(row.value) : undefined;
       },

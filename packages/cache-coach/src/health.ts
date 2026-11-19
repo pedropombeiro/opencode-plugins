@@ -112,14 +112,7 @@ export interface Summary {
 type Totals = Omit<Summary, 'last'>;
 
 export type Skip =
-  | 'invalid'
-  | 'duplicate'
-  | 'empty'
-  | 'late'
-  | 'reset'
-  | 'telemetry'
-  | 'small'
-  | 'eligible';
+  'invalid' | 'duplicate' | 'empty' | 'late' | 'reset' | 'telemetry' | 'small' | 'eligible';
 
 export type Status =
   | { kind: 'unknown' }

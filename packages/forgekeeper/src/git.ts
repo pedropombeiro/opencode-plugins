@@ -18,8 +18,7 @@ export interface Repository {
 }
 
 export type RepositoryLookup =
-  | { kind: 'repository'; repository: Repository }
-  | { kind: 'none'; reason: string };
+  { kind: 'repository'; repository: Repository } | { kind: 'none'; reason: string };
 
 export function parseRemote(url: string): RemoteProject | undefined {
   const trimmed = url.trim();
@@ -252,8 +251,7 @@ export async function fetchBranch(
 }
 
 export type ProjectsLookup =
-  | { kind: 'projects'; projects: RemoteProject[] }
-  | { kind: 'none'; reason: string };
+  { kind: 'projects'; projects: RemoteProject[] } | { kind: 'none'; reason: string };
 
 // Lists the projects on accepted hosts behind a checkout's remotes, `origin`
 // first and all on one host, for looking up a PR/MR by number regardless of the

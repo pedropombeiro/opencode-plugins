@@ -243,8 +243,7 @@ export const targetOutput = (targets: readonly Target[] | undefined): TargetOutp
   targets?.length ? { ...urlsOf(targets[0]), targets: targets.map(urlsOf) } : {};
 
 export type SessionTarget =
-  | { kind: 'merge-request'; ref: ReviewRef; url: string }
-  | { kind: 'other'; url: string };
+  { kind: 'merge-request'; ref: ReviewRef; url: string } | { kind: 'other'; url: string };
 
 const classify = (url: string): SessionTarget => {
   const ref = parseUrl(url);

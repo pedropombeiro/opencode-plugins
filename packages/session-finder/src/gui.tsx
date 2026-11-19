@@ -120,31 +120,28 @@ export default Plugin.define({
         .map((id) => ctx.servers.get(id))
         .find((server) => server?.builtin);
 
-    ctx.add(
-      Command,
-      (): Command => ({
-        id: 'search',
-        title: 'Search sessions',
-        group: 'Session',
-        section: 'session',
-        slash: { name: 'search-session', arguments: true },
-        enabled: !!builtinServer(),
-        run: (input) => {
-          const server = builtinServer();
-          if (!server) return;
-          const session = ctx.sessions.current();
-          const local = session?.server.id === server.id ? session : undefined;
-          ctx.dialogs.open((dialog) => (
-            <SearchDialog
-              server={server.id}
-              directory={local?.location?.directory ?? local?.directory}
-              sessionID={local?.id}
-              input={input}
-              close={dialog.close}
-            />
-          ));
-        },
-      }),
-    );
+    ctx.add(Command, (): Command => ({
+      id: 'search',
+      title: 'Search sessions',
+      group: 'Session',
+      section: 'session',
+      slash: { name: 'search-session', arguments: true },
+      enabled: !!builtinServer(),
+      run: (input) => {
+        const server = builtinServer();
+        if (!server) return;
+        const session = ctx.sessions.current();
+        const local = session?.server.id === server.id ? session : undefined;
+        ctx.dialogs.open((dialog) => (
+          <SearchDialog
+            server={server.id}
+            directory={local?.location?.directory ?? local?.directory}
+            sessionID={local?.id}
+            input={input}
+            close={dialog.close}
+          />
+        ));
+      },
+    }));
   },
 });

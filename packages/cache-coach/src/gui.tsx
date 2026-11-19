@@ -307,20 +307,17 @@ export default Plugin.define({
       render: (props) => <DetailsView session={props.session} />,
     });
 
-    ctx.add(
-      Command,
-      (): Command => ({
-        id: 'details',
-        title: 'Show prompt cache status',
-        group: 'Cache',
-        slash: { name: 'cache' },
-        enabled: !!ctx.sessions.current(),
-        run: () => {
-          const session = ctx.sessions.current();
-          if (session) openDetails(session);
-        },
-      }),
-    );
+    ctx.add(Command, (): Command => ({
+      id: 'details',
+      title: 'Show prompt cache status',
+      group: 'Cache',
+      slash: { name: 'cache' },
+      enabled: !!ctx.sessions.current(),
+      run: () => {
+        const session = ctx.sessions.current();
+        if (session) openDetails(session);
+      },
+    }));
 
     return () => clearInterval(clock);
   },

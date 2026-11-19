@@ -516,74 +516,65 @@ export default Plugin.define({
       render: (props) => <FeedbackView session={props.session} />,
     });
 
-    ctx.add(
-      Command,
-      (): Command => ({
-        id: 'status',
-        title: 'Show PR/MR status',
-        group: 'Forge',
-        slash: { name: 'forge-status' },
-        enabled: !!current(),
-        run: () => {
-          const session = current();
-          if (!session || statusOff(directoryOf(session))) return;
-          void client()?.refresh(placeOf(session));
-          open(STATUS_TAB, session);
-        },
-      }),
-    );
-    ctx.add(
-      Command,
-      (): Command => ({
-        id: 'feedback',
-        title: 'Show pending review feedback',
-        group: 'Forge',
-        slash: { name: 'forge-feedback' },
-        enabled: !!current(),
-        run: () => {
-          const session = current();
-          if (!session) return;
-          void reload(directoryOf(session));
-          open(FEEDBACK_TAB, session);
-        },
-      }),
-    );
-    ctx.add(
-      Command,
-      (): Command => ({
-        id: 'open',
-        title: 'Open PR/MR in browser',
-        group: 'Forge',
-        slash: { name: 'forge-open' },
-        enabled: !!current(),
-        run: async () => {
-          const session = current();
-          if (!session || statusOff(directoryOf(session))) return;
-          const place = placeOf(session);
-          let requests = requestsOf(place);
-          if (requests.length === 0) {
-            await client()?.refresh(place);
-            requests = requestsOf(place);
-          }
-          if (requests.length === 0) {
-            ctx.toast.show({ title: 'No PR/MR for this session or branch' });
-            return;
-          }
-          const url =
-            requests.length === 1
-              ? requests[0].url
-              : await ctx.dialogs.select({
-                  title: 'Open PR/MR',
-                  options: requests.map((request) => ({
-                    title: `${reference(request)} ${request.title}`,
-                    description: request.targetProject,
-                    value: request.url,
-                  })),
-                });
-          if (url) ctx.system.openExternal(url);
-        },
-      }),
-    );
+    ctx.add(Command, (): Command => ({
+      id: 'status',
+      title: 'Show PR/MR status',
+      group: 'Forge',
+      slash: { name: 'forge-status' },
+      enabled: !!current(),
+      run: () => {
+        const session = current();
+        if (!session || statusOff(directoryOf(session))) return;
+        void client()?.refresh(placeOf(session));
+        open(STATUS_TAB, session);
+      },
+    }));
+    ctx.add(Command, (): Command => ({
+      id: 'feedback',
+      title: 'Show pending review feedback',
+      group: 'Forge',
+      slash: { name: 'forge-feedback' },
+      enabled: !!current(),
+      run: () => {
+        const session = current();
+        if (!session) return;
+        void reload(directoryOf(session));
+        open(FEEDBACK_TAB, session);
+      },
+    }));
+    ctx.add(Command, (): Command => ({
+      id: 'open',
+      title: 'Open PR/MR in browser',
+      group: 'Forge',
+      slash: { name: 'forge-open' },
+      enabled: !!current(),
+      run: async () => {
+        const session = current();
+        if (!session || statusOff(directoryOf(session))) return;
+        const place = placeOf(session);
+        let requests = requestsOf(place);
+        if (requests.length === 0) {
+          await client()?.refresh(place);
+          requests = requestsOf(place);
+        }
+        if (requests.length === 0) {
+          ctx.toast.show({ title: 'No PR/MR for this session or branch' });
+          return;
+        }
+        const url =
+          requests.length === 1
+            ? requests[0].url
+            : await ctx.dialogs.select({
+                title: 'Open PR/MR',
+                options: requests.map((request) => ({
+                  title: `${reference(request)} ${request.title}`,
+                  description: request.targetProject,
+                  value: request.url,
+                })),
+              });
+        if (url) ctx.system.openExternal(url);
+      },
+    }));
 
     const builtinServer = () =>
       ctx.servers

@@ -237,10 +237,9 @@ function loadSessions(db: Database, table: string, options: SearchOptions) {
   let current: Current | null = null;
   if (currentID) {
     current = db
-      .query<
-        Current,
-        [string]
-      >(`SELECT ${project} AS project_id, directory FROM ${table} WHERE id = ?`)
+      .query<Current, [string]>(
+        `SELECT ${project} AS project_id, directory FROM ${table} WHERE id = ?`,
+      )
       .get(currentID);
   } else if (project !== 'NULL') {
     current = projectOf(db, options.cwd ?? process.cwd());
@@ -277,10 +276,9 @@ function projectOf(db: Database, directory: string): Current | null {
   let rows: { id: string; worktree: string; sandboxes: string | null }[];
   try {
     rows = db
-      .query<
-        { id: string; worktree: string; sandboxes: string | null },
-        []
-      >('SELECT id, worktree, sandboxes FROM project')
+      .query<{ id: string; worktree: string; sandboxes: string | null }, []>(
+        'SELECT id, worktree, sandboxes FROM project',
+      )
       .all();
   } catch {
     return null;

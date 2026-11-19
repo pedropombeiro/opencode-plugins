@@ -167,12 +167,10 @@ export function responsiveFooterSegments(snapshot: Snapshot, width: number): Seg
   const full = footerSegments(snapshot);
   if (segmentsWidth(full) <= width) return full;
 
-  const compact = full.map(
-    (segment): Segment => ({
-      ...segment,
-      text: segment.compact ?? segment.text,
-    }),
-  );
+  const compact = full.map((segment): Segment => ({
+    ...segment,
+    text: segment.compact ?? segment.text,
+  }));
   if (segmentsWidth(compact) <= width) return compact;
 
   const minimal = compact.filter((segment) => segment.essential);
