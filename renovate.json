@@ -27,6 +27,11 @@
       "automergeStrategy": "rebase"
     },
     {
+      "description": "Update OpenTUI packages together, so only one @opentui/core version is installed",
+      "matchPackageNames": ["@opentui/{/,}**"],
+      "groupName": "opentui"
+    },
+    {
       "description": "Hold TypeScript below 7 until typescript-eslint supports it (TS 7.0 ships no compiler API)",
       "matchPackageNames": ["typescript"],
       "allowedVersions": "<7"
