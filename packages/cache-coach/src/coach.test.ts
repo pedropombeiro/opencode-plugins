@@ -34,6 +34,12 @@ const free = {
   cost: [],
   limit: { context: 1_000_000 },
 };
+const duo = {
+  ...opus,
+  id: 'duo-chat-sonnet-5-5',
+  modelID: 'duo-chat-sonnet-5-5',
+  providerID: 'gitlab',
+};
 const tokens = (read: number, write = 0) => ({
   input: 0,
   output: 0,
@@ -66,7 +72,7 @@ function harness(
       },
     },
     location: {
-      model: { list: () => [opus, cheap, free], sync: async () => {} },
+      model: { list: () => [opus, cheap, free, duo], sync: async () => {} },
       provider: { list: () => [], sync: async () => {} },
     },
   } as unknown as CoachData;
@@ -90,6 +96,44 @@ function harness(
 }
 
 describe('createCoach', () => {
+  test('keeps Duo cache diagnostics separate from call-based billing', () => {
+    const { coach, messages } = harness({ settings: { contextCeiling: 100_000 } });
+    const event = { sessionID: 'one', assistantMessageID: 'a', tokens: tokens(100_000) };
+    messages.push({
+      type: 'assistant',
+      id: 'a',
+      model: duo,
+      tokens: event.tokens,
+      time: { created: 0, completed: 1000 },
+    });
+    const result = coach.stepEnded(event, true, 0);
+    expect(result?.notice).toBeUndefined();
+    expect(result?.tips[0]?.message).toBe("This session's context is at ~100K of 100K tokens.");
+    expect(coach.switchTip('one', cheap, MINUTE)).toBeUndefined();
+    const lines = coach.describe('one', MINUTE);
+    expect(lines).toContain('duo-chat-sonnet-5-5: 1 observed call · ~0.31 GitLab Credits');
+    expect(lines.join(' ')).not.toContain('$');
+    expect(lines.join(' ')).toContain('100% read from the cache');
+  });
+
+  test('estimates each Duo step at its prompt tier, including steps without cache reads', () => {
+    const { coach, messages } = harness();
+    const call = {
+      type: 'assistant',
+      model: { ...duo, id: 'duo-chat-gpt-6-2-sol' },
+      time: { created: 0, completed: 1 },
+    };
+    messages.push(
+      { ...call, tokens: { ...tokens(0), input: 272_000, output: 10 } },
+      { ...call, tokens: { ...tokens(0), input: 272_001 } },
+      { ...call, finish: 'error' },
+      { ...call, time: { created: 2 } },
+      { ...call, model: { ...duo, id: 'duo-chat-unknown' } },
+    );
+    const lines = coach.describe('one', MINUTE);
+    expect(lines).toContain('duo-chat-gpt-6-2-sol: 2 observed calls · ~1 GitLab Credits');
+    expect(lines).toContain('duo-chat-unknown: 1 observed call');
+  });
   test('estimates remaining room from the effective config even without cached tokens', async () => {
     const config = [
       { type: 'document', info: { compaction: { auto: false, buffer: '20%' } } },

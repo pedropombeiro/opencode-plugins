@@ -81,6 +81,7 @@ export function automaticCompactionTip(
 export function contextCeilingTip(input: {
   tokens: number;
   ceiling: Ceiling;
+  duo?: boolean;
   ratio: number;
   price?: Price;
 }): Tip | undefined {
@@ -97,7 +98,7 @@ export function contextCeilingTip(input: {
     key: 'context-limit',
     title: ceiling.reason === 'price' ? 'Close to a higher price' : 'Close to the context limit',
     variant: 'info',
-    message: `This session's context is at ${position}. Compacting now, while the cache is warm,${costs}`,
+    message: `This session's context is at ${position}.${input.duo ? '' : ` Compacting now, while the cache is warm,${costs}`}`,
   };
 }
 
@@ -182,7 +183,7 @@ export function healthTip(finding: Finding, model: string): Tip | undefined {
     key: `cache-health:${finding.key}:${record.opened}`,
     title: 'Cache reuse still low',
     variant: 'warning',
-    message: `Cache reuse is still low for ${model}: ${across(finding.window)}${earlier}. In most of the missed requests, ${patternOf(record)}. Over ${record.requests} requests, ${missed(record.lost, record.extra)}. Each missed request processes the context again, so compacting makes misses cheaper. Possible causes include prompt-prefix changes, cache configuration, or provider-side misses. Run /cache for details to include in a report.`,
+    message: `Cache reuse is still low for ${model}: ${across(finding.window)}${earlier}. In most of the missed requests, ${patternOf(record)}. Over ${record.requests} requests, ${missed(record.lost, record.extra)}.${record.extra ? ' Each missed request processes the context again, so compacting makes misses cheaper.' : ''} Possible causes include prompt-prefix changes, cache configuration, or provider-side misses. Run /cache for details to include in a report.`,
     attention: true,
   };
 }

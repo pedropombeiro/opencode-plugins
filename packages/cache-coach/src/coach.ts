@@ -25,6 +25,7 @@ import {
   type Choice,
 } from './compaction';
 import { createHealth, type Finding, type Thresholds } from './health';
+import { duoTier, duoUsage, isDuo } from './duo';
 import { ttlForModel, type Settings } from './options';
 import {
   automaticCompactionTip,
@@ -130,6 +131,8 @@ export function createCoach(options: CoachOptions) {
 
   const nameOf = (model: ModelInfo | undefined, ref: ModelRef) => model?.name ?? ref.id;
 
+  const tokenCosts = (model?: ModelInfo) => (isDuo(model) ? undefined : model?.cost);
+
   function compactionFor(
     models: readonly ModelInfo[],
     current: ModelRef,
@@ -140,7 +143,7 @@ export function createCoach(options: CoachOptions) {
       const model = findModel(models, ref);
       if (!model) return [];
       const limit = model.limit.input ?? model.limit.context;
-      return [{ ref, name: nameOf(model, ref), costs: model.cost, limit }];
+      return [{ ref, name: nameOf(model, ref), costs: tokenCosts(model), limit }];
     });
     return compactionChoice({ candidates, current, tokens, price, minCost: settings.minCost });
   }
@@ -209,15 +212,11 @@ export function createCoach(options: CoachOptions) {
       warming,
     });
     const tokens = step ? contextTokens(step.tokens) : 0;
-    const next = nextCost(state, tokens, target && priceFor(target.cost, tokens));
+    const price = priceFor(tokenCosts(target), tokens);
+    const next = nextCost(state, tokens, price);
     const alternative =
       state.kind === 'cold' && step
-        ? compactionFor(
-            models,
-            selected ?? step.model,
-            tokens,
-            target && priceFor(target.cost, tokens),
-          )
+        ? compactionFor(models, selected ?? step.model, tokens, price)
         : undefined;
     return {
       state,
@@ -266,7 +265,12 @@ export function createCoach(options: CoachOptions) {
   }
 
   function describe(sessionID: string, time: number) {
-    const lines = details({ ...view(sessionID, time), sessionCost: data.session.cost(sessionID) });
+    const usage = duoUsage(data.session.message.list(sessionID));
+    const lines = details({
+      ...view(sessionID, time),
+      sessionCost: usage.length ? undefined : data.session.cost(sessionID),
+    });
+    if (usage.length) lines.push('', 'GitLab Duo usage (GitLab-managed rates):', ...usage);
     if (!settings.health) return lines;
     const step = stepOf(sessionID);
     const message = step && data.session.message.get(sessionID, step.id);
@@ -288,7 +292,7 @@ export function createCoach(options: CoachOptions) {
     models: readonly ModelInfo[];
   }): Notice | undefined {
     const { ref, model, tokens } = input;
-    if (!settings.notices || !ref) return undefined;
+    if (!settings.notices || !ref || isDuo(ref)) return undefined;
     const price = model && priceFor(model.cost, tokens);
     const choice = compactionFor(input.models, ref, tokens, price);
     const description = expiryNotice({
@@ -313,6 +317,7 @@ export function createCoach(options: CoachOptions) {
     if (!settings.tips) return undefined;
     const step = stepOf(sessionID);
     if (!step || !reportsCache(step.tokens) || sameModel(step.model, selected)) return undefined;
+    if (isDuo(step.model) || isDuo(selected)) return undefined;
     const { models, providers } = catalog(sessionID);
     const from = findModel(models, step.model);
     const to = findModel(models, selected);
@@ -349,7 +354,8 @@ export function createCoach(options: CoachOptions) {
     const provider = ref && providers.find((entry) => entry.id === ref.providerID);
     const started =
       options.startedAt(sessionID, assistantMessageID) ?? message?.time.created ?? now;
-    const price = model && priceFor(model.cost, promptTokens(tokens));
+    const costs = tokenCosts(model);
+    const price = priceFor(costs, promptTokens(tokens));
     const checked =
       settings.health && ref
         ? healthTips(
@@ -378,7 +384,8 @@ export function createCoach(options: CoachOptions) {
       visible && settings.tips && threshold
         ? automaticCompactionTip(total, threshold, settings.contextRatio)
         : undefined;
-    if (!reportsCache(tokens)) {
+    const duo = isDuo(ref);
+    if (!reportsCache(tokens) && !duo) {
       if (automatic) checked.push(automatic);
       return checked.length ? { tips: checked } : undefined;
     }
@@ -399,7 +406,7 @@ export function createCoach(options: CoachOptions) {
       assistantMessageID,
     );
     const warming = warmingFor(sessionID, model, provider);
-    if (previous && ref && warming && sameModel(previous.model, ref)) {
+    if (!duo && previous && ref && warming && sameModel(previous.model, ref)) {
       tips.push(
         warmingTip({
           gap: started - (previous.ended ?? previous.started),
@@ -416,7 +423,8 @@ export function createCoach(options: CoachOptions) {
     }
     const ceiling = contextCeiling({
       configured: settings.contextCeiling,
-      costs: model?.cost,
+      costs,
+      tier: ref && duoTier(ref),
       modelLimit: model ? (model.limit.input ?? model.limit.context) : undefined,
     });
     if (automatic) tips.push(automatic);
@@ -426,7 +434,8 @@ export function createCoach(options: CoachOptions) {
           tokens: total,
           ceiling,
           ratio: settings.contextRatio,
-          price: model && priceFor(model.cost, total),
+          price: priceFor(costs, total),
+          duo,
         }),
       );
     return { notice: scheduled, tips: [...checked, ...tips.filter((tip): tip is Tip => !!tip)] };
@@ -449,7 +458,7 @@ export function createCoach(options: CoachOptions) {
       tool: tool?.type === 'tool' ? tool.name : 'A tool',
       tokens,
       threshold: settings.largeOutput,
-      price: model && priceFor(model.cost, tokens),
+      price: priceFor(tokenCosts(model), tokens),
     });
   }
 

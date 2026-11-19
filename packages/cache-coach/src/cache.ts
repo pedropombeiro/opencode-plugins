@@ -112,13 +112,14 @@ export function priceTier(costs: readonly Cost[] | undefined): number | undefine
 
 export function contextCeiling(input: {
   configured?: number;
+  tier?: number;
   costs?: readonly Cost[];
   modelLimit?: number;
 }): Ceiling | undefined {
   const cap = (tokens: number) =>
     input.modelLimit && input.modelLimit > 0 ? Math.min(tokens, input.modelLimit) : tokens;
   if (input.configured) return { tokens: cap(input.configured), reason: 'limit' };
-  const tier = priceTier(input.costs);
+  const tier = input.tier ?? priceTier(input.costs);
   if (tier && (!input.modelLimit || tier < input.modelLimit))
     return { tokens: tier, reason: 'price' };
   return undefined;

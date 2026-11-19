@@ -40,6 +40,23 @@ server part only keeps the expiry messages out of model requests.
 
 ## Cache indicator
 
+### GitLab Duo Agentic Chat
+
+For `gitlab/duo-chat-*` models, run `/cache` to see observed model calls by model. For example,
+12 completed calls on Sonnet 5.5 use approximately 3.75 GitLab Credits at GitLab-managed rates.
+One message can require several calls. Cache Coach counts completed assistant steps in the session
+history, even when they report no cache tokens. It skips failed steps and can't see idle keep-alives.
+For unknown rates, it shows only the call count. For billed usage, check the
+[GitLab Credits dashboard](https://docs.gitlab.com/subscriptions/gitlab_credits_dashboard/).
+
+A cache miss by itself doesn't change the credit rate. Cache Coach still reports cache health and
+context limits, but skips dollar estimates and advice to compact before the cache expires. For
+models with a long-context rate, prompts over 272,000 tokens cost more per call. The bundled rates
+come from the [GitLab rate card](https://docs.gitlab.com/subscriptions/gitlab_credits/#credit-multipliers)
+as of November 19, 2026.
+
+### Read the indicator
+
 The prompt footer shows the cache state of the session on screen:
 
 ![Animated Cache Coach footer showing the cache countdown and state indicators.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/cache-coach/images/cache-countdown.gif)
@@ -176,7 +193,7 @@ from the cache or only the start of each prompt, which helps in a report to the 
 ```text
 Cache misses this session: 2 incidents. In total, an estimated ~1.2M tokens from earlier prompts
 weren't read from the cache (~$7.10 extra).
-Last incident on gitlab/duo-chat-opus-5@build: 7 requests, ended. In most of the missed requests,
+Last incident on anthropic/claude-opus-5@build: 7 requests, ended. In most of the missed requests,
 little or nothing was read from the cache.
 ```
 
@@ -248,24 +265,24 @@ form of the package entry. OpenCode still loads the plugin once:
   "plugins": [
     {
       "package": "opencode-cache-coach",
-      "options": { "compactionModel": "gitlab/duo-chat-gpt-6-1-sol", "contextCeiling": 180000 }
+      "options": { "compactionModel": "anthropic/claude-haiku-5-5", "contextCeiling": 180000 }
     }
   ]
 }
 ```
 
-| Option            | Default                             | Description                                                                                                                                                                                                               |
-| ----------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tips`            | `true`                              | Set to `false` to turn off tips.                                                                                                                                                                                          |
-| `notices`         | `true`                              | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                                          |
-| `health`          | `true`                              | Set to `false` to turn off [cache health](#cache-health) tracking and warnings. They don't depend on `tips`.                                                                                                              |
-| `compactionModel` |                                     | Model to suggest for compacting after the cache expires, such as `"gitlab/duo-chat-gpt-6-1-sol"`, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`. |
-| `ttl`             |                                     | Cache lifetime, such as `"1h"`, or an object that maps model patterns to lifetimes. Overrides the model and provider `cache.ttl` without changing requests. See [Cache indicator](#cache-indicator).                      |
-| `contextCeiling`  | Where a higher price starts, if any | Context size for the cost tip. Setting it overrides the pricing tier but does not change OpenCode's compaction threshold.                                                                                                 |
-| `contextRatio`    | `0.8`                               | Share of the relevant threshold at which the compaction or cost tip appears.                                                                                                                                              |
-| `minTokens`       | `50000`                             | Smallest context that a model-switch tip or an expiry message covers.                                                                                                                                                     |
-| `minCost`         | `0.1`                               | Smallest cost or cost difference, in USD, that a model-switch tip or an expiry message covers.                                                                                                                            |
-| `largeOutput`     | `20000`                             | Estimated tokens in a tool result at which the large-output tip appears.                                                                                                                                                  |
+| Option            | Default                             | Description                                                                                                                                                                                          |
+| ----------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tips`            | `true`                              | Set to `false` to turn off tips.                                                                                                                                                                     |
+| `notices`         | `true`                              | Set to `false` to turn off the expiry messages and Desktop expiry notifications.                                                                                                                     |
+| `health`          | `true`                              | Set to `false` to turn off [cache health](#cache-health) tracking and warnings. They don't depend on `tips`.                                                                                         |
+| `compactionModel` |                                     | Token-priced model to suggest for compacting after the cache expires, or a list in order of preference. The plugin suggests the first one that fits the context and saves at least `minCost`.        |
+| `ttl`             |                                     | Cache lifetime, such as `"1h"`, or an object that maps model patterns to lifetimes. Overrides the model and provider `cache.ttl` without changing requests. See [Cache indicator](#cache-indicator). |
+| `contextCeiling`  | Where a higher price starts, if any | Context size for the cost tip. Setting it overrides the pricing tier but does not change OpenCode's compaction threshold.                                                                            |
+| `contextRatio`    | `0.8`                               | Share of the relevant threshold at which the compaction or cost tip appears.                                                                                                                         |
+| `minTokens`       | `50000`                             | Smallest context that a model-switch tip or an expiry message covers.                                                                                                                                |
+| `minCost`         | `0.1`                               | Smallest cost or cost difference, in USD, that a model-switch tip or an expiry message covers.                                                                                                       |
+| `largeOutput`     | `20000`                             | Estimated tokens in a tool result at which the large-output tip appears.                                                                                                                             |
 
 Costs come from the model prices OpenCode knows, including cache and long-context prices. Without
 them, the indicator and tips leave the amounts out.
