@@ -25,7 +25,7 @@ jobs:
       session-finder--release_created: ${{ steps.release.outputs['packages/session-finder--release_created'] }}
       cache-coach--release_created: ${{ steps.release.outputs['packages/cache-coach--release_created'] }}
     steps:
-      - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4.4.0
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           target-branch: ${{ github.ref_name }}
@@ -54,13 +54,13 @@ jobs:
             enabled: ${{ needs.release-please.outputs['cache-coach--release_created'] }}
     steps:
       - if: matrix.enabled == 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - if: matrix.enabled == 'true'
-        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3.6.3
+        uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
 
       - if: matrix.enabled == 'true'
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: lts/*
           registry-url: https://registry.npmjs.org
