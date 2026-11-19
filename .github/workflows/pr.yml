@@ -5,10 +5,14 @@ name: PR
     branches:
       - main
       - v1
+  push:
+    branches:
+      - main
+      - v1
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
