@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.6.0...opencode-cache-coach-0.7.0) (2026-11-19)
+
+
+### Features
+
+* **cache-coach:** estimate GitLab Duo credits per model call ([51c0302](https://github.com/pedropombeiro/opencode-plugins/commit/51c030281f567e661edcb3b33b93e6ffbd66f5be))
+* **cache-coach:** show Duo credits per turn and flag long tool loops ([e72746b](https://github.com/pedropombeiro/opencode-plugins/commit/e72746bccd7806da69927f34802217d75228b6d4))
+
 ## [0.6.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.5.1...opencode-cache-coach-0.6.0) (2026-11-18)
 
 
