@@ -66,6 +66,7 @@ export interface CoachOptions {
   settings: Settings;
   selectedModel: (sessionID: string) => ModelRef | undefined;
   startedAt: (sessionID: string, id: string) => number | undefined;
+  startedModel?: (sessionID: string, id: string) => ModelRef | undefined;
   thresholds?: Thresholds;
 }
 
@@ -360,7 +361,10 @@ export function createCoach(options: CoachOptions) {
     if (!coached(sessionID)) return undefined;
     const message = data.session.message.get(sessionID, assistantMessageID);
     const ref =
-      message?.type === 'assistant' ? message.model : (session(sessionID)?.model ?? undefined);
+      (message?.type === 'assistant' ? message.model : undefined) ??
+      options.startedModel?.(sessionID, assistantMessageID) ??
+      session(sessionID)?.model ??
+      undefined;
     const { models, providers } = catalog(sessionID);
     const model = findModel(models, ref);
     const total = contextTokens(tokens);

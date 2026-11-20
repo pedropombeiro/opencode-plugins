@@ -13,7 +13,7 @@ import {
   type SessionRef,
 } from '@opencode/plugin/gui';
 import { createMemo, createSignal, For, mapArray, onCleanup, Show } from 'solid-js';
-import { aboutUsd, shortName } from './cache';
+import { aboutUsd, shortName, type ModelRef } from './cache';
 import {
   createCoach,
   createNotices,
@@ -40,7 +40,7 @@ const DETAILS_TAB = 'details';
 interface ServerCoach {
   coach: Coach;
   notices: ReturnType<typeof createNotices>;
-  starts: Map<string, { id: string; at: number }>;
+  starts: Map<string, { id: string; at: number; model?: ModelRef }>;
 }
 
 const pillLabel = (text: string) => text.replace(/^[●◐○]\s*/, '');
@@ -133,7 +133,7 @@ export default Plugin.define({
       const data = server.data;
       const existing = coaches.get(data);
       if (existing) return existing;
-      const starts = new Map<string, { id: string; at: number }>();
+      const starts = new Map<string, { id: string; at: number; model?: ModelRef }>();
       const entry: ServerCoach = {
         starts,
         notices: createNotices({
@@ -152,6 +152,10 @@ export default Plugin.define({
           startedAt(sessionID, id) {
             const start = starts.get(sessionID);
             return start?.id === id ? start.at : undefined;
+          },
+          startedModel(sessionID, id) {
+            const start = starts.get(sessionID);
+            return start?.id === id ? start.model : undefined;
           },
         }),
       };
@@ -181,10 +185,10 @@ export default Plugin.define({
               const stops = [
                 data.on('config.updated', coach.configUpdated),
                 data.on('session.step.started', (event) => {
-                  const { sessionID, assistantMessageID } = event.data;
+                  const { sessionID, assistantMessageID, model } = event.data;
                   coach.prepare(sessionID);
                   notices.set(sessionID, undefined);
-                  starts.set(sessionID, { id: assistantMessageID, at: Date.now() });
+                  starts.set(sessionID, { id: assistantMessageID, at: Date.now(), model });
                 }),
                 data.on('session.step.ended', (event) => {
                   const { sessionID } = event.data;

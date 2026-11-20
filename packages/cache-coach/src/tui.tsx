@@ -1,8 +1,8 @@
 /** @jsxImportSource @opentui/solid */
 import type { Plugin } from '@opencode/plugin/tui';
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
-import { createViewFilter } from '../../_shared/src/index.ts';
-import type { Indicator as CacheIndicator, Tone } from './cache';
+import { createViewFilter, isSessionVisible } from '../../_shared/src/index.ts';
+import type { Indicator as CacheIndicator, ModelRef, Tone } from './cache';
 import { createCoach, createNotices, createSwitchWatcher, createTipGate } from './coach';
 import { NOTICE_TEXT } from './notice';
 import { parseOptions } from './options';
@@ -14,7 +14,7 @@ export default {
     const settings = parseOptions(context.options);
     const [now, setNow] = createSignal(Date.now());
     const [starts, setStarts] = context.storage.memory<
-      Record<string, { id: string; at: number } | undefined>
+      Record<string, { id: string; at: number; model?: ModelRef } | undefined>
     >('step-starts', { initial: {} });
     const [shown, setShown] = context.storage.memory<Record<string, boolean | undefined>>(
       'tips-shown',
@@ -37,11 +37,16 @@ export default {
         const start = starts[sessionID];
         return start?.id === id ? start.at : undefined;
       },
+      startedModel(sessionID, id) {
+        const start = starts[sessionID];
+        return start?.id === id ? start.model : undefined;
+      },
     });
 
     const notices = createNotices({
       running: (sessionID) => context.data.session.status(sessionID) === 'running',
-      deliver: (notice) =>
+      deliver: (notice) => {
+        if (!isSessionVisible(context, notice.sessionID)) return;
         void context.client.session
           .synthetic({
             sessionID: notice.sessionID,
@@ -51,7 +56,8 @@ export default {
             metadata: { cacheCoach: 'expiry' },
             resume: false,
           })
-          .catch(() => {}),
+          .catch(() => {});
+      },
     });
 
     const clock = setInterval(() => {
@@ -216,11 +222,11 @@ export default {
     const stops = [
       context.data.on('config.updated', coach.configUpdated),
       context.data.on('session.step.started', (event) => {
-        const { sessionID, assistantMessageID } = event.data;
+        const { sessionID, assistantMessageID, model } = event.data;
         coach.prepare(sessionID);
         notices.set(sessionID, undefined);
         setStarts((draft) => {
-          draft[sessionID] = { id: assistantMessageID, at: Date.now() };
+          draft[sessionID] = { id: assistantMessageID, at: Date.now(), model };
         });
       }),
       context.data.on('session.step.ended', (event) => {

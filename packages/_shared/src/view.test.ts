@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { Plugin } from '@opencode/plugin/tui';
 import type { OpenCodeEvent } from './opencode.ts';
-import { createViewFilter } from './view.ts';
+import { createViewFilter, isSessionVisible } from './view.ts';
 
 interface View {
   route?: string;
@@ -63,5 +63,20 @@ describe('createViewFilter', () => {
     const shows = createViewFilter(context({ route: 'ses_mine' }), () => true);
 
     expect(shows({ type: 'config.updated', data: {} } as unknown as OpenCodeEvent)).toBe(false);
+  });
+});
+
+describe('isSessionVisible', () => {
+  test('matches routed sessions, descendants, and open tabs', () => {
+    const ctx = context({
+      route: 'ses_mine',
+      tabs: ['ses_tab'],
+      parents: { ses_child: 'ses_mine' },
+    });
+
+    expect(isSessionVisible(ctx, 'ses_mine')).toBe(true);
+    expect(isSessionVisible(ctx, 'ses_child')).toBe(true);
+    expect(isSessionVisible(ctx, 'ses_tab')).toBe(true);
+    expect(isSessionVisible(ctx, 'ses_other')).toBe(false);
   });
 });

@@ -48,7 +48,15 @@ const tokens = (read: number, write = 0) => ({
 });
 
 function harness(
-  options: { settings?: Partial<Settings>; parentID?: string; config?: unknown[] } = {},
+  options: {
+    settings?: Partial<Settings>;
+    parentID?: string;
+    config?: unknown[];
+    startedModel?: (
+      sessionID: string,
+      id: string,
+    ) => { providerID: string; id: string } | undefined;
+  } = {},
 ) {
   const messages: unknown[] = [];
   const state = {
@@ -82,6 +90,7 @@ function harness(
     settings: { ...DEFAULTS, ...options.settings },
     selectedModel: () => state.selected,
     startedAt: () => undefined,
+    ...(options.startedModel ? { startedModel: options.startedModel } : {}),
   });
   const step = (id: string, at: number, read: number, write = 0) =>
     messages.push({
@@ -146,6 +155,19 @@ describe('createCoach', () => {
     expect(lines).toContain('duo-chat-sonnet-5-5: 1 observed call · ~0.31 GitLab Credits');
     expect(lines.join(' ')).not.toContain('$');
     expect(lines.join(' ')).toContain('100% read from the cache');
+  });
+
+  test('uses the started step model when the assistant message is not synced yet', () => {
+    const { coach } = harness({
+      startedModel: (_sessionID, id) =>
+        id === 'duo-step' ? { providerID: 'gitlab', id: 'duo-chat-gpt-6-2-sol' } : undefined,
+    });
+    const result = coach.stepEnded(
+      { sessionID: 'one', assistantMessageID: 'duo-step', tokens: tokens(100_000) },
+      true,
+      0,
+    );
+    expect(result?.notice).toBeUndefined();
   });
 
   test('estimates each Duo step at its prompt tier, including steps without cache reads', () => {
