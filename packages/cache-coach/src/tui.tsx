@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import type { Plugin } from '@opencode/plugin/tui';
-import { createEffect, createMemo, createSignal, Show, untrack } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js';
 import { createViewFilter } from '../../_shared/src/index.ts';
 import type { Indicator as CacheIndicator, Tone } from './cache';
 import { createCoach, createNotices, createSwitchWatcher, createTipGate } from './coach';
@@ -78,6 +78,59 @@ export default {
       return context.theme.text.muted;
     };
 
+    function CacheDialog(props: { sessionID: string }) {
+      const [height, setHeight] = createSignal(context.renderer.height);
+      const onResize = () => setHeight(context.renderer.height);
+      context.renderer.on('resize', onResize);
+      onCleanup(() => context.renderer.off('resize', onResize));
+
+      const lines = createMemo(() => coach.describe(props.sessionID, now()));
+      const close = () => context.ui.dialog.clear();
+      context.keymap.layer(() => ({
+        mode: 'modal',
+        commands: [{ bind: 'return', title: 'Close prompt cache details', run: close }],
+      }));
+
+      return (
+        <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+          <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
+            <text fg={context.theme.text.base}>
+              <b>Prompt cache</b>
+            </text>
+            <text fg={context.theme.text.muted} onMouseUp={close}>
+              Close (Esc)
+            </text>
+          </box>
+          <scrollbox
+            height={Math.max(1, Math.min(24, Math.floor(height() * 0.6) - 4))}
+            flexShrink={0}
+            scrollX={false}
+            focused
+          >
+            <For each={lines()}>
+              {(line) => {
+                if (!line) return <box height={1} />;
+                const label = /^([^:]+:)(?: |$)/.exec(line)?.[1];
+                const status = line.startsWith('Cache: ')
+                  ? line.includes('cold')
+                    ? color('warning')
+                    : line.includes('likely warm')
+                      ? color('success')
+                      : context.theme.text.base
+                  : context.theme.text.base;
+                return (
+                  <text fg={status} wrapMode="word">
+                    {label ? <b>{label}</b> : line}
+                    {label ? line.slice(label.length) : ''}
+                  </text>
+                );
+              }}
+            </For>
+          </scrollbox>
+        </box>
+      );
+    }
+
     function showDetails(sessionID?: string) {
       const route = context.ui.router.current();
       const id = sessionID ?? (route.type === 'session' ? route.sessionID : undefined);
@@ -85,10 +138,8 @@ export default {
         context.ui.toast.show({ message: 'Open a session to see its cache', variant: 'info' });
         return;
       }
-      void context.ui.dialog.alert({
-        title: 'Prompt cache',
-        message: coach.describe(id, Date.now()).join('\n'),
-      });
+      context.ui.dialog.set({ size: 'large', centered: true });
+      context.ui.dialog.show(() => <CacheDialog sessionID={id} />);
     }
 
     function showTip(sessionID: string, tip: Tip | undefined) {
