@@ -1,6 +1,6 @@
 [tools]
 bun = "1.4.5"
-npm = "12.2.2"
+npm = "12.2.3"
 
 [env]
 _.path = ["{{config_root}}/node_modules/.bin"]
