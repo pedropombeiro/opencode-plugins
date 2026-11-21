@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.7.0...opencode-cache-coach-0.8.0) (2026-11-21)
+
+
+### Features
+
+* **cache-coach:** render cache details in custom scrollable dialog ([14c73a4](https://github.com/pedropombeiro/opencode-plugins/commit/14c73a436a00e049ea3489dbbb997af21d48ab16))
+
+
+### Bug Fixes
+
+* **cache-coach:** guard TUI expiry notices by visibility and step model ([d8a95c2](https://github.com/pedropombeiro/opencode-plugins/commit/d8a95c28651467549667632050632e7b3ff6010c))
+
 ## [0.7.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-cache-coach-0.6.0...opencode-cache-coach-0.7.0) (2026-11-19)
 
 
