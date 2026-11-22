@@ -39,6 +39,11 @@
       "allowedVersions": "<7"
     },
     {
+      "description": "Hold Solid below 2 until @opentui/solid supports it (it peers on solid-js ^1.9.12, and Solid 2 removes batch and the JSX types)",
+      "matchPackageNames": ["solid-js"],
+      "allowedVersions": "<2"
+    },
+    {
       "description": "Hold Vite below 8 until @opencode/plugin's gui() stops setting the deprecated inlineDynamicImports option",
       "matchPackageNames": ["vite"],
       "allowedVersions": "<8"
