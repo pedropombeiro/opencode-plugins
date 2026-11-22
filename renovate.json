@@ -7,6 +7,7 @@
     ":separateMajorReleases",
     ":prImmediately"
   ],
+  "separateMinorPatch": true,
   "packageRules": [
     {
       "description": "Group GitHub Actions updates weekly",
@@ -21,10 +22,11 @@
       "groupName": "pre-commit hooks"
     },
     {
-      "description": "Automerge patch and digest updates",
+      "description": "Automerge patch, pin, and digest updates, and mark them in PR titles",
       "matchUpdateTypes": ["patch", "pin", "digest"],
       "automerge": true,
-      "automergeStrategy": "rebase"
+      "automergeStrategy": "rebase",
+      "commitMessageSuffix": "- `AUTOMERGE`"
     },
     {
       "description": "Update OpenTUI packages together, so only one @opentui/core version is installed",
