@@ -38,8 +38,9 @@ For example, a session working on issue `#12` and MR `!45` gets a title prefix s
 `[#12, !45]`. Several targets produce `[!101, !102]`, or `[!101, !102, !103, +3]` for a larger set.
 Your own title text is preserved.
 
-Without an explicit target, naming follows the checked-out branch and its open PR/MR. Ask the
-agent to return to branch-based naming when you want that behavior again. Default branches
+Run `/forge-detach` to clear all explicit targets without a model call. To remove only specific
+targets, pass their full URLs separated by spaces. After you remove the last target,
+Forgekeeper follows the checked-out branch and its open PR/MR again. Default branches
 get no branch-based prefix. Child sessions aren't renamed.
 
 See the reference for [target rules](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#session-targets) and

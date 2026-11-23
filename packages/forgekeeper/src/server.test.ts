@@ -1352,7 +1352,7 @@ describe('session targets', () => {
       { name: 'targetChanged', data: { sessionID: 'one' } },
     ]);
     await app.cleanup();
-    expect(app.disposed).toEqual(['tool', 'rpc']);
+    expect(app.disposed).toEqual(['command', 'tool', 'rpc']);
 
     const reloaded = await harness({ storage });
     await reloaded.set({ target: nextMr });
@@ -2016,10 +2016,18 @@ describe('PR/MR status lifecycle', () => {
 
   test('offers the status commands only with status on', async () => {
     const off = await harness();
-    expect(off.commandNames()).toEqual([]);
+    expect(off.commandNames()).toEqual(['forge-detach']);
+    const first = 'https://gitlab.com/group/project/-/merge_requests/1';
+    const second = 'https://gitlab.com/group/project/-/merge_requests/2';
+    await off.set({ targets: [first, second] });
+    expect(await off.runCommand('forge-detach', first)).toEqual([]);
+    expect(off.entries()['forgekeeper-session-target']).toContain(second);
+    expect(off.entries()['forgekeeper-session-target']).not.toContain(first);
+    expect(await off.runCommand('forge-detach')).toEqual([]);
+    expect(off.entries()['forgekeeper-session-target']).toContain('checked-out branch');
     await off.cleanup();
     const { app } = await watchedFeedback();
-    expect(app.commandNames()).toEqual(['forge-report', 'forge-inbox']);
+    expect(app.commandNames()).toEqual(['forge-detach', 'forge-report', 'forge-inbox']);
     await app.cleanup();
   });
 

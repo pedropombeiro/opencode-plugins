@@ -318,6 +318,33 @@ export async function setupServer(
     });
   }
 
+  async function changeTargets(sessionID: string, input: unknown) {
+    const change = parseTargetChange(input);
+    let result: { targets: Target[]; missing: string[] } = { targets: [], missing: [] };
+    await schedule(sessionID, async () => {
+      const session = await ctx.session.get({ sessionID });
+      if (session.parentID || session.location.directory !== ctx.location.directory) {
+        throw new Error('Session targets can only be set in the current root session.');
+      }
+      if (linkedOwner(session as DirectorySession))
+        throw new Error(
+          'This session runs a Forgekeeper task for another session, which keeps the targets. Set targets there.',
+        );
+      const state = await stateFor(sessionID);
+      result = applyTargetChange(state.targets, change);
+      await inferIssues(result.targets, state.targets);
+      await save(sessionID, {
+        targets: result.targets,
+        ...(state.prefix ? { prefix: state.prefix } : {}),
+      });
+      watcher?.targetsChanged(sessionID, result.targets);
+      await instruct(sessionID).catch(() => {});
+      await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
+      await update(sessionID);
+    });
+    return toolResult(result.targets, result.missing);
+  }
+
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
       name: 'set_session_target',
@@ -351,33 +378,7 @@ export async function setupServer(
         },
         additionalProperties: false,
       },
-      execute: async (input, { sessionID }) => {
-        const change = parseTargetChange(input);
-        let result: { targets: Target[]; missing: string[] } = { targets: [], missing: [] };
-        await schedule(sessionID, async () => {
-          const session = await ctx.session.get({ sessionID });
-          if (session.parentID || session.location.directory !== ctx.location.directory) {
-            throw new Error('Session targets can only be set in the current root session.');
-          }
-          // A target would make the linked session a second owner of the PR/MR.
-          if (linkedOwner(session as DirectorySession))
-            throw new Error(
-              'This session runs a Forgekeeper task for another session, which keeps the targets. Set targets there.',
-            );
-          const state = await stateFor(sessionID);
-          result = applyTargetChange(state.targets, change);
-          await inferIssues(result.targets, state.targets);
-          await save(sessionID, {
-            targets: result.targets,
-            ...(state.prefix ? { prefix: state.prefix } : {}),
-          });
-          watcher?.targetsChanged(sessionID, result.targets);
-          await instruct(sessionID).catch(() => {});
-          await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
-          await update(sessionID);
-        });
-        return { content: toolResult(result.targets, result.missing) };
-      },
+      execute: async (input, { sessionID }) => ({ content: await changeTargets(sessionID, input) }),
     });
     // Offered only in review summaries whose comments link to other notes;
     // the context hook removes it from every other request.
@@ -440,32 +441,41 @@ export async function setupServer(
     return feedbackReport(next, sessionID, note);
   }
 
-  // Without status, the commands have nothing to show, and the CLI's own
-  // commands explain why.
-  const commands = watcher
-    ? await ctx.command.transform((editor) => {
-        const status = watcher!;
-        editor.add({
-          name: STATUS_COMMAND,
-          description: 'Show the PR/MR status of this session in the conversation',
-          execute: async ({ sessionID }) =>
-            status.relay(sessionID, STATUS_TITLE, statusReport(await status.refresh(sessionID))),
-        });
-        editor.add({
-          name: FEEDBACK_COMMAND,
-          description: 'List, acknowledge, or summarize review updates in the conversation',
-          execute: async ({ sessionID, prompt }) => {
-            let report: string | undefined;
-            try {
-              report = await feedbackCommand(status, sessionID, prompt.text ?? '');
-            } catch (error) {
-              report = `Forgekeeper could not complete /${FEEDBACK_COMMAND}: ${error instanceof Error ? error.message : String(error)}`;
-            }
-            if (report) await status.relay(sessionID, FEEDBACK_TITLE, report);
-          },
-        });
-      })
-    : undefined;
+  const commands = await ctx.command.transform((editor) => {
+    editor.add({
+      name: 'forge-detach',
+      description: 'Remove explicit targets by full URL, or omit URLs to return to branch tracking',
+      execute: async ({ sessionID, prompt }) => {
+        const urls = (prompt.text ?? '').trim().split(/\s+/).filter(Boolean);
+        const message = await changeTargets(
+          sessionID,
+          urls.length ? { operation: 'remove', targets: urls } : { target: 'branch' },
+        );
+        await rpc.events.emit('notice', { sessionID, variant: 'info', message });
+      },
+    });
+    const status = watcher;
+    if (!status) return;
+    editor.add({
+      name: STATUS_COMMAND,
+      description: 'Show the PR/MR status of this session in the conversation',
+      execute: async ({ sessionID }) =>
+        status.relay(sessionID, STATUS_TITLE, statusReport(await status.refresh(sessionID))),
+    });
+    editor.add({
+      name: FEEDBACK_COMMAND,
+      description: 'List, acknowledge, or summarize review updates in the conversation',
+      execute: async ({ sessionID, prompt }) => {
+        let report: string | undefined;
+        try {
+          report = await feedbackCommand(status, sessionID, prompt.text ?? '');
+        } catch (error) {
+          report = `Forgekeeper could not complete /${FEEDBACK_COMMAND}: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        if (report) await status.relay(sessionID, FEEDBACK_TITLE, report);
+      },
+    });
+  });
 
   async function writeInstructions(sessionID: string): Promise<void> {
     if (closing) return;
