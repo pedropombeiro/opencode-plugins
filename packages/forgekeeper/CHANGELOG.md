@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.1.0...opencode-forgekeeper-5.1.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **forgekeeper:** scope feedback inbox to active session ([5b57bd4](https://github.com/pedropombeiro/opencode-plugins/commit/5b57bd4a79c0003389a181659452e08ca1f79347))
+
 ## [5.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.0.1...opencode-forgekeeper-5.1.0) (2026-11-23)
 
 
