@@ -6,6 +6,7 @@ import {
   feedbackTime,
   formatTime,
   linkOptions,
+  sessionItems,
   type InboxState,
   type FeedbackItem,
 } from './feedback-inbox';
@@ -71,6 +72,11 @@ describe('feedback inbox', () => {
     const paused = { ...state, paused: true };
     expect(feedbackFooter(paused, 'one')).toBe('2 review updates (paused)');
     expect(feedbackFooter(paused, 'other')).toBeUndefined();
+    expect(sessionItems(state, 'one').map((entry) => entry.id)).toEqual(['a', 'b']);
+    expect(sessionItems(state, 'two').map((entry) => entry.id)).toEqual(['c']);
+    expect(sessionItems(state, 'other')).toEqual([]);
+    expect(sessionItems(state, undefined)).toEqual([]);
+    expect(sessionItems(state, '')).toEqual([]);
   });
 
   test('selects automation only after persistence and suppresses summary delivery', async () => {

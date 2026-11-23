@@ -24,7 +24,13 @@ import { clientID, connectStatus, loadFeedback as fetchFeedback } from './client
 import { ForgeSessionRpc, HOME, type EventData } from './rpc';
 import { samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
-import { feedbackFooter, feedbackTime, linkOptions, type InboxState } from './feedback-inbox';
+import {
+  feedbackFooter,
+  feedbackTime,
+  linkOptions,
+  sessionItems,
+  type InboxState,
+} from './feedback-inbox';
 import type { Repository } from './git';
 import type { Lookup } from './store';
 
@@ -498,16 +504,17 @@ export default {
     }
 
     async function showFeedback() {
-      const directory = feedbackDirectory();
+      const place = currentPlace();
+      const directory = place.directory;
       const state = await loadFeedback(directory);
+      const items = sessionItems(state, place.key || undefined);
       const selected = await context.ui.dialog.select({
         title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
-        options: state.items.map((item) => ({
+        options: items.map((item) => ({
           title: item.title,
           // A lifecycle event's first fact, such as a proposed retarget, shows too.
           description: [
             item.read ? 'Read' : 'Unread',
-            context.data.session.get(item.sessionID)?.title ?? item.sessionID,
             feedbackTime(item),
             ...(item.automation
               ? [
@@ -591,7 +598,7 @@ export default {
             selection: 'none',
             onTrigger: async () => {
               await rpc.markFeedbackRead(
-                { ids: state.items.map((item) => item.id) },
+                { ids: items.map((item) => item.id) },
                 { location: { directory } },
               );
               context.ui.dialog.clear();
@@ -610,7 +617,7 @@ export default {
           },
         ],
       });
-      const item = state.items.find((entry) => entry.id === selected);
+      const item = items.find((entry) => entry.id === selected);
       if (!item) return;
       const link = await context.ui.dialog.select({
         title: item.title,

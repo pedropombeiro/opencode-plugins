@@ -1,4 +1,10 @@
-import { feedbackLinks, feedbackTime, type FeedbackItem, type InboxState } from './feedback-inbox';
+import {
+  feedbackLinks,
+  feedbackTime,
+  sessionItems,
+  type FeedbackItem,
+  type InboxState,
+} from './feedback-inbox';
 import { detailsMessage } from './format';
 import { createHash } from 'node:crypto';
 import type { Snapshot } from './store';
@@ -49,9 +55,6 @@ export function parseFeedbackAction(input: string): FeedbackAction {
     return { kind: 'summarize', which: argument };
   return { kind: 'invalid', input: input.trim() };
 }
-
-export const sessionItems = (state: InboxState, sessionID: string) =>
-  state.items.filter((item) => item.sessionID === sessionID);
 
 function describeItem(item: FeedbackItem, index: number): string[] {
   const facts = [feedbackTime(item)];

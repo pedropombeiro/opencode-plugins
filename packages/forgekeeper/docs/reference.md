@@ -235,9 +235,9 @@ OpenCode Desktop loads Forgekeeper's desktop part, so it matches the terminal UI
 - A pill above the composer shows the footer's indicators and the session's update count.
   Its menu opens the PR/MR and pipeline links, the status panel, and the inbox panel.
 - `/forge-status` opens a side panel with the status dialog's details and a refresh action.
-- `/forge-feedback` opens a side panel with the checkout's updates. Each update offers its
-  links and **Open session**, **Summarize in session**, **Act on feedback**, **Retry**, and
-  **Acknowledge**, and the panel can pause or resume monitoring.
+- `/forge-feedback` opens a side panel with the active session's updates. Each update offers its
+  links and **Summarize in session**, **Act on feedback**, **Retry**, and **Acknowledge**, and
+  the panel can pause or resume monitoring.
 - `/forge-open` opens the PR/MR in the browser, or asks which one to open.
 - Server notices appear as toasts, and as system notifications when no app window has
   focus, following **Settings > Notifications**.
@@ -480,13 +480,13 @@ monitoring preference takes precedence. **Mark all as read** (Ctrl+U) clears the
 for the displayed updates without acknowledging them or changing delivery.
 
 `/forge-feedback` lists pending feedback for
-the current checkout. Select an update to open its PR/MR or comment links, press Ctrl+D
+the active session. Select an update to open its PR/MR or comment links, press Ctrl+D
 to acknowledge it, press Ctrl+R to summarize it in its session in any delivery mode, or
 press Ctrl+S to pause or resume review monitoring. Acknowledgement
 only dismisses the local update; it does not reply to or resolve a remote discussion.
 A session's footer shows how many of its own updates are unread. The home screen, where
-new sessions start, shows no count. `/forge-feedback` lists the whole checkout's updates,
-and connected CLIs in the checkout show a toast even when the session's tab has never been
+new sessions start, shows no count and no updates in `/forge-feedback`. Connected CLIs in
+the checkout still show a toast even when the session's tab has never been
 visited. With session tabs on, those CLIs also reopen the session's tab, without leaving
 the session you're in.
 

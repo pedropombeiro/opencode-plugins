@@ -29,6 +29,7 @@ import {
   feedbackFooter,
   feedbackTime,
   linkOptions,
+  sessionItems,
   type FeedbackItem,
   type InboxState,
 } from './feedback-inbox';
@@ -377,11 +378,10 @@ export default Plugin.define({
       }
     }
 
-    function FeedbackItemView(props: { item: FeedbackItem; directory: string; current: string }) {
+    function FeedbackItemView(props: { item: FeedbackItem; directory: string }) {
       const item = () => props.item;
       const facts = () =>
         [
-          item().sessionID === props.current ? 'This session' : undefined,
           item().read ? 'Read' : 'Unread',
           feedbackTime(item()),
           item().automation
@@ -403,17 +403,6 @@ export default Plugin.define({
             </For>
           </section>
           <div class="fk-actions">
-            <Show when={item().sessionID !== props.current}>
-              <ui.Button
-                size="small"
-                onClick={() => {
-                  const server = current()?.server.id;
-                  if (server) ctx.tabs.open({ server, id: item().sessionID }, { focus: true });
-                }}
-              >
-                Open session
-              </ui.Button>
-            </Show>
             <ui.Button size="small" onClick={() => void run('summarizeFeedback')}>
               Summarize in session
             </ui.Button>
@@ -445,16 +434,17 @@ export default Plugin.define({
     function FeedbackView(props: { session: MountedSession }) {
       const directory = () => directoryOf(props.session);
       const state = () => inboxOf(directory());
+      const items = createMemo(() => sessionItems(state(), props.session.id));
       return (
         <div class="forgekeeper-panel">
           <header>
             <h2>Review updates{state().paused ? ' (monitoring paused)' : ''}</h2>
             <ui.Button
               size="small"
-              disabled={!state().items.some((item) => !item.read)}
+              disabled={!items().some((item) => !item.read)}
               onClick={() =>
                 void inboxAction(directory(), 'markFeedbackRead', {
-                  ids: state().items.map((item) => item.id),
+                  ids: items().map((item) => item.id),
                 })
               }
             >
@@ -477,21 +467,19 @@ export default Plugin.define({
             )}
           </Show>
           <Show
-            when={state().items.length}
+            when={items().length}
             fallback={
               <Show when={!inboxErrors[directory()]}>
                 <div class="fk-muted">
                   {inboxes[directory()]
-                    ? 'No pending review updates in this checkout.'
+                    ? 'No pending review updates for this session.'
                     : 'Loading review updates…'}
                 </div>
               </Show>
             }
           >
-            <For each={state().items}>
-              {(item) => (
-                <FeedbackItemView item={item} directory={directory()} current={props.session.id} />
-              )}
+            <For each={items()}>
+              {(item) => <FeedbackItemView item={item} directory={directory()} />}
             </For>
           </Show>
         </div>

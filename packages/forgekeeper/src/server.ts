@@ -7,11 +7,11 @@ import {
   feedbackRef,
   invalidFeedbackReport,
   parseFeedbackAction,
-  sessionItems,
   STATUS_COMMAND,
   STATUS_TITLE,
   statusReport,
 } from './commands';
+import { sessionItems } from './feedback-inbox';
 import type { TitleLookups } from './lookups';
 import { createKeyedQueue } from './keyed-queue';
 import { statusOptions } from './options';
