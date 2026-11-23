@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.0.1...opencode-forgekeeper-5.1.0) (2026-11-23)
+
+
+### Features
+
+* **forgekeeper:** detach session targets without a model call ([6332aba](https://github.com/pedropombeiro/opencode-plugins/commit/6332aba716bdc3a08efd718e40ec17bbd91277ce))
+
+
+### Bug Fixes
+
+* **forgekeeper:** return linked session reports to their owner ([ca5a6ec](https://github.com/pedropombeiro/opencode-plugins/commit/ca5a6ecfd6dc44a51c67a56dbdf96db0f0f60ad4))
+
 ## [5.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.0.0...opencode-forgekeeper-5.0.1) (2026-11-18)
 
 
