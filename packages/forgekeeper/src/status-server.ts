@@ -146,8 +146,7 @@ export async function setupStatus(
     select: (item) => automation.selectAutomatic(item),
     read: async () =>
       (await ctx.storage.get(`feedback-inbox/${encodeURIComponent(directory)}`)) as
-        | InboxState
-        | undefined,
+        InboxState | undefined,
     write: async (state) => {
       if (closed) throw new Error('The plugin stopped');
       await ctx.storage.set(`feedback-inbox/${encodeURIComponent(directory)}`, state as never);

@@ -618,8 +618,7 @@ export function createAutomationHost(
     if (owner.time.archived !== undefined || owner.location.directory !== ownerDirectory)
       throw canceled();
     const stored = (await ctx.storage.get(`sessions/${item.sessionID}`)) as
-      | { targets?: Target[] }
-      | undefined;
+      { targets?: Target[] } | undefined;
     if (!includesRequest(stored?.targets ?? [], item.url)) throw canceled();
   }
 
