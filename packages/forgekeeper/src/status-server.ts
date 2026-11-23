@@ -146,7 +146,8 @@ export async function setupStatus(
     select: (item) => automation.selectAutomatic(item),
     read: async () =>
       (await ctx.storage.get(`feedback-inbox/${encodeURIComponent(directory)}`)) as
-        InboxState | undefined,
+        | InboxState
+        | undefined,
     write: async (state) => {
       if (closed) throw new Error('The plugin stopped');
       await ctx.storage.set(`feedback-inbox/${encodeURIComponent(directory)}`, state as never);
@@ -313,6 +314,7 @@ export async function setupStatus(
   const automationController = new AbortController();
   const automationHost = createAutomationHost(ctx, deps, {
     rules: automationRules,
+    relay: summaries.relay,
     closing: () => closing,
     inbox,
     deliverable,
@@ -472,6 +474,8 @@ export async function setupStatus(
       const session = await ctx.session.get({ sessionID: key });
       if (session.time?.archived !== undefined)
         return { kind: 'none', reason: 'The session is archived' };
+      if (linkedOwner(session as DirectorySession))
+        return { kind: 'none', reason: 'The session runs a Forgekeeper task for another session' };
       if (session.location.directory !== directory) {
         // Not `markForeign`: invalidating would discard this very lookup.
         foreign.add(key);
@@ -650,6 +654,10 @@ export async function setupStatus(
         if (refusal) throw new Error(refusal);
       }
       event.system.push({ type: 'text', text: automationHost.instructions(started) });
+      if (started.execution && event.tools) {
+        delete event.tools.question;
+        delete event.tools.set_session_target;
+      }
       // The linked session's turn can't go on without its task.
       await automationHost.substitutePrompt(event, started);
       return true;

@@ -2,12 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import type { Plugin } from '@opencode/plugin';
 import {
   createAutomationHost,
+  LINKED_INSTRUCTIONS,
   ownerPolicy,
   pushNotice,
   readVerifiedFindings,
   storedPreparation,
   type AutomationDependencies,
 } from './review-automation-host';
+import { extractTurnReport } from './local-automation-environment';
+import { createSummaryDelivery } from './summary-delivery';
+import { SUMMARY_KIND } from './review-summary';
 import type { AutomationRule } from './options';
 import {
   automationReviewers,
@@ -64,6 +68,7 @@ async function fixture(messages: Message[], idle?: number, stored = record) {
       rules: [],
       closing: () => false,
       inbox: { list: async () => ({ items: [item], paused: false }), automation: async () => {} },
+      relay: async () => {},
       deliverable: async () => true,
       readFeedback: async () => undefined,
       scan: async () => [],
@@ -230,6 +235,7 @@ describe('review execution history', () => {
       readFeedback: async () => undefined,
       scan: async () => [],
       missingSession: (error) => error === missing,
+      relay: async () => {},
       redeliver: () => {},
       report: () => {},
       signal: new AbortController().signal,
@@ -269,6 +275,7 @@ describe('review execution history', () => {
       readFeedback: async () => undefined,
       scan: async () => [],
       missingSession: () => false,
+      relay: async () => {},
       redeliver: () => {},
       report: () => {},
       signal: new AbortController().signal,
@@ -416,6 +423,7 @@ describe('failed-job checks', () => {
       { ...deps, reviewClaims: claims },
       {
         rules: overrides.rules ?? [],
+        relay: async () => {},
         closing: () => false,
         inbox: {
           list: async () => ({ items: [failure, review], paused: false }),
@@ -766,6 +774,8 @@ describe('worktree automation', () => {
     sleep?: (ms: number) => Promise<void>;
     // The pages of sessions that listing the project returns.
     pages?: Array<Array<Record<string, unknown>>>;
+    // Transcripts by session ID, for `ctx.session.context`.
+    transcripts?: Record<string, Message[]>;
     // What `git status --short` reports in the worktree.
     status?: string;
   }
@@ -823,9 +833,15 @@ describe('worktree automation', () => {
     } as unknown as AutomationDependencies;
     const pages = options.pages ?? [[]];
     const listed: unknown[] = [];
+    const synthetic: Array<Record<string, unknown>> = [];
     const ctx = {
       location: { directory: '/repo', project: { id: 'project' } },
-      storage: { get: async (key: string) => storage[key] },
+      storage: {
+        get: async (key: string) => storage[key],
+        set: async (key: string, value: unknown) => {
+          storage[key] = value;
+        },
+      },
       plugin: {
         list: async () => ({ data: [{ id: PLUGIN_ID, state: { status: 'active' } }] }),
       },
@@ -834,6 +850,11 @@ describe('worktree automation', () => {
           const session = sessions[sessionID];
           if (!session) throw new Error('Session not found');
           return session;
+        },
+        context: async ({ sessionID }: { sessionID: string }) =>
+          options.transcripts?.[sessionID] ?? [],
+        synthetic: async (input: Record<string, unknown>) => {
+          synthetic.push(input);
         },
         list: async (input: { cursor?: number }) => {
           listed.push(input);
@@ -845,12 +866,21 @@ describe('worktree automation', () => {
         },
       },
     } as unknown as Plugin.Context;
+    const summaries = createSummaryDelivery(ctx, deps, {
+      closing: () => false,
+      inbox: async () => ({ items: [], paused: false }),
+      deliverable: async () => true,
+      scan: async () => [],
+      write: () => {},
+      report: () => {},
+    });
     const claims = createReviewClaims(':memory:');
     const automation = createAutomationHost(
       ctx,
       { ...deps, reviewClaims: claims },
       {
         rules: options.rules ?? [rule],
+        relay: summaries.relay,
         closing: () => false,
         inbox: {
           list: async () => ({ items: [review], paused: false }),
@@ -877,6 +907,8 @@ describe('worktree automation', () => {
       sessions,
       request,
       listed,
+      synthetic,
+      summaries,
       close: () => claims.close(),
     };
   }
@@ -1412,6 +1444,148 @@ describe('worktree automation', () => {
     } as unknown as Plugin.Context;
     expect(await storedPreparation(ctx, f.claims, 'linked')).toEqual(stored);
     await expect(storedPreparation(ctx, f.claims, 'one')).rejects.toThrow('unavailable');
+    f.close();
+  });
+
+  test('extracts the final assistant report for a linked turn, including after compaction', () => {
+    const assistant = (id: string, at: number, text: string) =>
+      message('assistant', id, at, { content: [{ type: 'text', text }] });
+    const toolOnly = (id: string, at: number) =>
+      message('assistant', id, at, { content: [{ type: 'tool', id: 't1', name: 'shell' }] });
+    expect(
+      extractTurnReport(
+        [
+          message('user', messageID, 10),
+          assistant('a1', 11, 'Checking pipeline logs...'),
+          toolOnly('a2', 12),
+          assistant('a3', 13, 'Root cause: missing coverage on collect_stats.'),
+          message('idle', 'i1', 14, { outcome: 'succeeded' }),
+          message('user', 'u2', 20),
+          assistant('a4', 21, 'Follow-up turn text that belongs to a later turn.'),
+        ],
+        { messageID, startedAt: 10 },
+      ),
+    ).toBe('Root cause: missing coverage on collect_stats.');
+    expect(
+      extractTurnReport(
+        [
+          message('compaction', 'c1', 15),
+          assistant('a1', 20, 'Compacted turn final report.'),
+          message('idle', 'i1', 25, { outcome: 'succeeded' }),
+          message('user', 'u2', 30),
+          assistant('a2', 35, 'Later turn.'),
+        ],
+        { messageID, startedAt: 10, ended: { outcome: 'succeeded', at: 25 } },
+      ),
+    ).toBe('Compacted turn final report.');
+    const huge = 'x'.repeat(5_000);
+    const clipped = extractTurnReport([message('user', messageID, 10), assistant('a1', 11, huge)], {
+      messageID,
+      startedAt: 10,
+    });
+    expect(clipped).toBeDefined();
+    expect(clipped!.length).toBeLessThanOrEqual(3_500);
+    expect(clipped).toContain('truncated');
+  });
+
+  test('surfaces linked-session reports and clear descriptions to the owning session', async () => {
+    const jobItem = { ...review, id: 'f1', kind: 'ci-failed' as const, pipeline: 'p1' };
+    const ownerMessages: Message[] = [];
+    const f = hostFixture({
+      sessions: linkedSessions,
+      status: ' M scripts/perf/gc/collect_gc_stats.rb',
+      transcripts: {
+        one: ownerMessages,
+        linked: [
+          message('user', messageID, 10),
+          message('assistant', 'a1', 12, {
+            content: [{ type: 'text', text: 'Undercover flagged collect_stats at 0% coverage.' }],
+          }),
+          message('idle', 'i1', 15, { outcome: 'succeeded' }),
+        ],
+      },
+    });
+    const startedAttempt: LinkedRecord = { ...linkedAttempt(jobItem), startedAt: 10 };
+    await f.host.notify!(startedAttempt, 'started');
+    await f.host.notify!(
+      {
+        ...startedAttempt,
+        state: 'completed',
+        reason: 'The investigation finished.',
+        ended: { outcome: 'succeeded', at: 15 },
+      },
+      'ended',
+    );
+    expect(f.synthetic).toHaveLength(2);
+    expect(f.synthetic[0]).toMatchObject({
+      sessionID: 'one',
+      description: 'Forgekeeper: investigating failed jobs for !1',
+      metadata: { forgekeeper: SUMMARY_KIND },
+      resume: false,
+    });
+    expect(f.synthetic[1]).toMatchObject({
+      sessionID: 'one',
+      description: 'Forgekeeper: failed-job investigation completed for !1',
+      metadata: { forgekeeper: SUMMARY_KIND },
+      resume: true,
+    });
+    expect(String(f.synthetic[1].text)).not.toContain('Undercover flagged');
+    const deliver = async (index: number) => {
+      ownerMessages.push(message('synthetic', String(f.synthetic[index].id), index + 20));
+      const request = {
+        sessionID: 'one',
+        messages: [],
+        options: {},
+        system: [],
+        tools: { bash: {} },
+      };
+      expect(await f.summaries.prepare(request)).toBe(true);
+      expect(Object.keys(request.tools)).toHaveLength(0);
+      return JSON.stringify(request.messages);
+    };
+    expect(await deliver(0)).not.toContain('Undercover flagged');
+    const completion = await deliver(1);
+    expect(completion).toContain('Undercover flagged collect_stats at 0% coverage.');
+    expect(completion).toContain('M scripts/perf/gc/collect_gc_stats.rb');
+
+    // An automatic attempt that failed before starting does not wake the owner.
+    await f.host.notify!(
+      {
+        ...linkedAttempt(jobItem),
+        state: 'failed',
+        reason: 'The pipeline no longer has failed jobs.',
+      },
+      'ended',
+    );
+    expect(f.synthetic[2]).toMatchObject({
+      description: 'Forgekeeper: failed-job investigation failed for !1',
+      resume: false,
+    });
+
+    await f.host.notify!(
+      {
+        ...linkedAttempt(jobItem),
+        execution: { stage: 'provisioning', provider: 'local-worktree', version: 1, state: {} },
+        state: 'failed',
+        manual: true,
+        reason: 'No worktree available.',
+      },
+      'ended',
+    );
+    expect(f.synthetic[3].resume).toBe(true);
+    expect(await deliver(3)).toContain('No worktree available.');
+
+    // An archived owning session is not woken or notified.
+    f.sessions.one = { id: 'one', time: { archived: 1 }, location: { directory: '/owner' } };
+    await f.host.notify!({ ...startedAttempt, state: 'completed' }, 'ended');
+    expect(f.synthetic).toHaveLength(4);
+    f.close();
+  });
+
+  test('appends non-interactive linked-session instructions only for environment executions', () => {
+    const f = hostFixture();
+    expect(f.instructions(record)).not.toContain(LINKED_INSTRUCTIONS);
+    expect(f.instructions(linkedAttempt())).toContain(LINKED_INSTRUCTIONS);
     f.close();
   });
 });

@@ -27,6 +27,7 @@ import { setupServer } from './server';
 import type { Snapshot } from './store';
 import { deferred, flush, until } from './testing';
 import { createReviewClaims } from './review-claim';
+import { linkedMetadata } from './linked-session';
 import { preparationMessageID } from './review-preparation';
 import type { AutomationRecord } from './review-automation';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -93,6 +94,7 @@ interface Options {
       location: { directory: string };
       parentID: string | undefined;
       fork?: { sessionID: string };
+      metadata?: Record<string, unknown>;
     }
   >;
   // The instance's checkout. Defaults to /repo.
@@ -379,7 +381,7 @@ async function harness(options: Options = {}) {
         if (next instanceof Error) throw next;
         await next;
         const session = sessions.get(sessionID);
-        return session ? { ...session, model, time: {} } : undefined;
+        return session ? { id: sessionID, ...session, model, time: {} } : undefined;
       },
       update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
         sessions.get(sessionID)!.title = title;
@@ -567,7 +569,12 @@ async function harness(options: Options = {}) {
     },
     // A full model request through the context hook, as the agent loop sends
     // it. Its step first delivers the oldest queued message, unless told not to.
-    request: async (sessionID = 'one', deliver = true, messages?: unknown[]) => {
+    request: async (
+      sessionID = 'one',
+      deliver = true,
+      messages?: unknown[],
+      extraTools?: Record<string, unknown>,
+    ) => {
       const transcript = transcripts.get(sessionID) ?? [];
       const next = transcript.find((message) => message.queued);
       // Like OpenCode, a delivered message joins the context after everything
@@ -588,6 +595,7 @@ async function harness(options: Options = {}) {
         tools: {
           read: { description: 'Read' },
           bash: { description: 'Run' },
+          ...extraTools,
           ...(linked ? { [LINKED_NOTE_TOOL]: { description: 'Linked' } } : {}),
         } as Record<string, unknown>,
         model,
@@ -624,14 +632,23 @@ async function harness(options: Options = {}) {
         () => undefined,
         (error: Error) => error.message,
       ),
-    permission: async (sessionID = 'one') => {
-      const event = { sessionID, effect: 'allow' } as {
+    permission: async (sessionID = 'one', effect = 'allow') => {
+      const event = { sessionID, effect } as {
         sessionID: string;
         effect: string;
         message?: string;
       };
       await permissionHook(event);
       return event.effect;
+    },
+    evaluatePermission: async (sessionID = 'one', effect = 'ask') => {
+      const event = { sessionID, effect } as {
+        sessionID: string;
+        effect: string;
+        message?: string;
+      };
+      await permissionHook(event);
+      return event;
     },
   };
 }
@@ -4351,5 +4368,188 @@ describe('review requests', () => {
     expect(text).toContain("The author's replies could not be read.");
     expect(text).not.toContain('wrote no replies');
     await app.cleanup();
+  });
+});
+
+describe('linked sessions', () => {
+  const batch = 'b'.repeat(64);
+  const linkedSessions = () => {
+    const sessions = defaultSessions() as Map<
+      string,
+      {
+        title: string;
+        location: { directory: string };
+        parentID: string | undefined;
+        fork?: { sessionID: string };
+        metadata?: Record<string, unknown>;
+      }
+    >;
+    sessions.set('linked', {
+      title: 'Forgekeeper: investigate https://gitlab.com/group/project/-/merge_requests/456',
+      location: { directory: '/repo' },
+      parentID: undefined,
+      metadata: linkedMetadata('one', batch, 'linked'),
+    });
+    sessions.set('linked-child', {
+      title: 'Subagent',
+      location: { directory: '/repo' },
+      parentID: 'linked',
+    });
+    sessions.set('normal-child', {
+      title: 'Normal subagent',
+      location: { directory: '/repo' },
+      parentID: 'one',
+    });
+    return sessions;
+  };
+
+  test('does not prefix linked session titles or store target state on turn end or rename', async () => {
+    const storage = new Map<string, unknown>();
+    const sessions = linkedSessions();
+    const initialTitle = sessions.get('linked')!.title;
+    const app = await harness({
+      storage,
+      sessions,
+      branch: { current: '123-feature', default: 'main' },
+      found: { branch: '123-feature', number: '456' },
+    });
+    app.emit({ type: 'session.execution.succeeded', data: { sessionID: 'linked' } });
+    app.emit({ type: 'session.renamed', data: { sessionID: 'linked' } });
+    app.emit({ type: 'session.execution.succeeded', data: { sessionID: 'two' } });
+    await settle();
+    expect(app.sessions.get('linked')!.title).toBe(initialTitle);
+    expect(app.sessions.get('two')!.title).toBe('[#123, !456] Other session');
+    expect(app.renames()).toBe(1);
+    expect(storage.has('sessions/linked')).toBe(false);
+    await app.cleanup();
+  });
+
+  test('never looks up or polls PR/MR status for linked sessions', async () => {
+    const forge = new StatusForge();
+    forge.set('group/project', '456');
+    const app = await harness({ status: forge, sessions: linkedSessions() });
+    const result = await app.refresh('linked');
+    expect(result.snapshot.lookup).toEqual({
+      kind: 'none',
+      reason: 'The session runs a Forgekeeper task for another session',
+    });
+    expect(forge.lookups).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('strips interactive and target tools for linked sessions and their subagents', async () => {
+    const app = await harness({ sessions: linkedSessions() });
+    const extraTools = {
+      set_session_target: { description: 'Set target' },
+      question: { description: 'Ask user' },
+    };
+    const linkedReq = await app.request('linked', false, undefined, extraTools);
+    expect(linkedReq.tools.set_session_target).toBeUndefined();
+    expect(linkedReq.tools.question).toBeUndefined();
+    expect(linkedReq.tools.read).toBeDefined();
+
+    const linkedChildReq = await app.request('linked-child', false, undefined, extraTools);
+    expect(linkedChildReq.tools.set_session_target).toBeUndefined();
+    expect(linkedChildReq.tools.question).toBeUndefined();
+
+    const normalChildReq = await app.request('normal-child', false, undefined, extraTools);
+    expect(normalChildReq.tools.set_session_target).toBeUndefined();
+    expect(normalChildReq.tools.question).toBeDefined();
+
+    const ownerReq = await app.request('one', false, undefined, extraTools);
+    expect(ownerReq.tools.set_session_target).toBeDefined();
+    expect(ownerReq.tools.question).toBeDefined();
+    await app.cleanup();
+  });
+
+  test('denies interactive permission prompts in linked sessions and their subagents', async () => {
+    const app = await harness({ sessions: linkedSessions() });
+    const linkedAsk = await app.evaluatePermission('linked', 'ask');
+    expect(linkedAsk.effect).toBe('deny');
+    expect(linkedAsk.message).toContain('background');
+
+    const childAsk = await app.evaluatePermission('linked-child', 'ask');
+    expect(childAsk.effect).toBe('deny');
+    expect(childAsk.message).toContain('background');
+
+    // Pre-approved actions still run, and normal sessions still prompt.
+    expect((await app.evaluatePermission('linked', 'allow')).effect).toBe('allow');
+    expect((await app.evaluatePermission('one', 'ask')).effect).toBe('ask');
+    expect((await app.evaluatePermission('normal-child', 'ask')).effect).toBe('ask');
+    const parent = app.sessions.get('linked')!;
+    app.sessions.delete('linked');
+    expect((await app.evaluatePermission('linked-child', 'ask')).effect).toBe('deny');
+    const unresolved = await app.request('linked-child', false, undefined, { question: {} });
+    expect(unresolved.tools.question).toBeUndefined();
+    app.sessions.set('linked', parent);
+    await app.cleanup();
+  });
+
+  test('injects linked-session instructions and strips interactive tools during an automated turn', async () => {
+    const claims = createReviewClaims(':memory:');
+    const msgID = preparationMessageID(batch, 1);
+    await claims.records.save({
+      batch,
+      messageID: msgID,
+      state: 'running',
+      startedAt: 10,
+      at: 1,
+      attempt: 1,
+      placement: 'environment',
+      execution: {
+        stage: 'submitting',
+        provider: 'local-worktree',
+        version: 1,
+        ownerDirectory: '/owner',
+        head: 'a'.repeat(40),
+        sourceProject: 'group/project',
+        sourceBranch: 'feature',
+        state: { directory: '/repo', sessionID: 'linked' },
+        prompt: 'Investigate failed job rspec:coverage.',
+      },
+      item: {
+        id: 'ci-1',
+        kind: 'ci-failed',
+        sessionID: 'one',
+        url: 'https://gitlab.com/group/project/-/merge_requests/456',
+        title: '!456: job rspec:coverage failed in its pipeline',
+        links: [],
+        pipeline: 'p1',
+        at: 1,
+      },
+    });
+    const app = await harness({
+      status: new StatusForge(),
+      reviewClaims: claims,
+      sessions: linkedSessions(),
+      transcripts: new Map([['linked', [{ type: 'user', id: msgID, time: { created: 10 } }]]]),
+    });
+    try {
+      const event = await app.request(
+        'linked',
+        false,
+        [
+          new ProviderMessage({
+            role: 'user',
+            content: [{ type: 'text', text: `Placeholder\n\n[forgekeeper:${msgID}]` }],
+          }),
+        ],
+        {
+          set_session_target: { description: 'Set target' },
+          question: { description: 'Ask user' },
+        },
+      );
+      expect(event.system.map((part) => part.text).join('\n')).toContain(
+        'background linked session',
+      );
+      expect(event.tools.question).toBeUndefined();
+      expect(event.tools.set_session_target).toBeUndefined();
+      expect(event.tools.read).toBeDefined();
+      expect(event.tools.bash).toBeDefined();
+      expect(textOf(event)).toBe('Investigate failed job rspec:coverage.');
+    } finally {
+      await app.cleanup();
+      claims.close();
+    }
   });
 });

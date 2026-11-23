@@ -269,7 +269,7 @@ export async function setupServer(
 
   async function update(sessionID: string): Promise<void> {
     const session = await ctx.session.get({ sessionID });
-    if (session.parentID || !session.title) return;
+    if (session.parentID || !session.title || linkedOwner(session as DirectorySession)) return;
 
     const directory = session.location.directory;
     if (directory !== ctx.location.directory) return;
@@ -540,8 +540,16 @@ export async function setupServer(
       return;
     } else orphaned.delete(event.sessionID);
     if (event.tools) delete event.tools[LINKED_NOTE_TOOL];
+    const session = await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined);
+    if (session && session.location.directory !== ctx.location.directory) return;
+    if (!session || session.parentID || linkedOwner(session as DirectorySession)) {
+      if (event.tools) {
+        delete event.tools.set_session_target;
+        if ((await sessionKind(session)) !== 'ordinary') delete event.tools.question;
+      }
+      return;
+    }
     try {
-      if (!(await ownsSession(event.sessionID))) return;
       event.system.push({ type: 'text', text: GUIDANCE.join('\n') });
       await instruct(event.sessionID);
     } catch {
@@ -569,6 +577,18 @@ export async function setupServer(
     }
   });
 
+  async function sessionKind(session: Awaited<ReturnType<typeof ctx.session.get>> | undefined) {
+    const seen = new Set<string>();
+    while (session) {
+      if (linkedOwner(session as DirectorySession)) return 'linked';
+      if (!session.parentID) return 'ordinary';
+      if (seen.has(session.parentID)) break;
+      seen.add(session.parentID);
+      session = await ctx.session.get({ sessionID: session.parentID }).catch(() => undefined);
+    }
+    return 'unknown';
+  }
+
   // Linked sessions get no target guidance: their owner keeps the targets.
   async function ownsSession(sessionID: string): Promise<boolean> {
     const session = await ctx.session.get({ sessionID });
@@ -591,9 +611,22 @@ export async function setupServer(
       throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
   });
   await ctx.permission.hook('evaluate', async (event) => {
-    if (!(await summarizing(event.sessionID))) return;
-    event.effect = 'deny';
-    event.message = 'Forgekeeper review summaries run without tools.';
+    if (await summarizing(event.sessionID)) {
+      event.effect = 'deny';
+      event.message = 'Forgekeeper review summaries run without tools.';
+      return;
+    }
+    if (event.effect !== 'ask') return;
+    const session = await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined);
+    if (session && session.location.directory !== ctx.location.directory) return;
+    const kind = await sessionKind(session);
+    if (kind !== 'ordinary') {
+      event.effect = 'deny';
+      event.message =
+        kind === 'unknown'
+          ? 'Forgekeeper could not verify session ownership. Retry when the session is available.'
+          : 'Forgekeeper linked sessions run in the background without interactive permission prompts. Use allowed tools or commands, or report what needs to be run so the owning session can handle it with the user.';
+    }
   });
 
   void (async () => {

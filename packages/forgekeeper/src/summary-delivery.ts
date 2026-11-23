@@ -312,7 +312,12 @@ export function createSummaryDelivery(
   // Starts a tool-free turn in which the model shows the developer a report,
   // such as a command's answer. Only the turn's request holds the report, so
   // it stays out of the session's history, like a summary's findings.
-  async function relay(sessionID: string, title: string, report: string): Promise<void> {
+  async function relay(
+    sessionID: string,
+    title: string,
+    report: string,
+    resume = true,
+  ): Promise<void> {
     const hash = createHash('sha256')
       .update(`${sessionID} ${title} ${now()} ${Math.random()}`)
       .digest('hex');
@@ -336,7 +341,7 @@ export function createSummaryDelivery(
       description: title,
       metadata: { forgekeeper: SUMMARY_KIND },
       delivery: 'queue',
-      resume: true,
+      resume,
     });
   }
 

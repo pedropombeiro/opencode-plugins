@@ -42,7 +42,7 @@ import {
 } from './review-automation';
 import { createReviewClaims, type ExecutionClaim } from './review-claim';
 import { findingsDigest, PREPARATION_INSTRUCTIONS, preparationBatch } from './review-preparation';
-import { boundedReport, isForgekeeperInput, turnInput } from './review-summary';
+import { isForgekeeperInput, turnInput } from './review-summary';
 import {
   freshPresence,
   linkedOwner,
@@ -65,6 +65,7 @@ export interface AutomationDependencies extends SummaryDependencies {
 }
 
 interface AutomationEnvironment {
+  relay: (sessionID: string, title: string, report: string, resume: boolean) => Promise<void>;
   rules: readonly AutomationRule[];
   closing: () => boolean;
   inbox: {
@@ -92,9 +93,11 @@ type Context = Plugin.Context;
 
 type ModelRef = { providerID: string; id: string; variant?: string };
 
-// The metadata kind of the notices that tell an owning session about its
-// linked session's turn.
-export const ENVIRONMENT_NOTICE = 'environment-notice';
+export const LINKED_INSTRUCTIONS = [
+  'This turn runs in a background linked session for another session, without interactive user prompts.',
+  'Do not ask the user questions directly or rely on commands that require interactive permission approval.',
+  'Report any design decisions, ambiguities, or commands needing user approval in your final response so the owning session can surface them to the user.',
+].join('\n');
 
 type SessionInfo = Awaited<ReturnType<Context['session']['get']>>;
 
@@ -615,7 +618,8 @@ export function createAutomationHost(
     if (owner.time.archived !== undefined || owner.location.directory !== ownerDirectory)
       throw canceled();
     const stored = (await ctx.storage.get(`sessions/${item.sessionID}`)) as
-      { targets?: Target[] } | undefined;
+      | { targets?: Target[] }
+      | undefined;
     if (!includesRequest(stored?.targets ?? [], item.url)) throw canceled();
   }
 
@@ -705,11 +709,18 @@ export function createAutomationHost(
 
   async function notify(record: AutomationRecord, phase: 'started' | 'ended') {
     if (!record.execution) return;
-    const details = await environmentProvider(environments, record).describe(record, phase);
-    if (!details.length) return;
-    const task = isJobFailure(record.item)
-      ? 'investigating the failed jobs of'
-      : 'preparing fixes for';
+    const owner = await ctx.session
+      .get({ sessionID: record.item.sessionID })
+      .catch(() => undefined);
+    if (!owner || owner.time?.archived !== undefined) return;
+    const details = await environmentProvider(environments, record)
+      .describe(record, phase)
+      .catch(() => []);
+    const job = isJobFailure(record.item);
+    const ref = parseUrl(record.item.url);
+    const label = ref ? traitsOf(ref).reference(ref.iid) : record.item.url;
+    const task = job ? 'investigating the failed jobs of' : 'preparing fixes for';
+    const wake = phase === 'ended' && (record.startedAt !== undefined || !!record.manual);
     const lines =
       phase === 'started'
         ? [
@@ -720,14 +731,11 @@ export function createAutomationHost(
             `Forgekeeper's linked session for ${record.item.url} ended: ${record.state}.${record.reason ? ` ${record.reason}` : ''}`,
             ...details,
           ];
-    await ctx.session.synthetic({
-      sessionID: record.item.sessionID,
-      text: boundedReport(lines.join('\n\n')),
-      description: `Forgekeeper environment: ${record.item.url}`,
-      metadata: { forgekeeper: ENVIRONMENT_NOTICE },
-      delivery: 'queue',
-      resume: false,
-    });
+    const description =
+      phase === 'started'
+        ? `Forgekeeper: ${job ? 'investigating failed jobs for' : 'preparing review fixes for'} ${label}`
+        : `Forgekeeper: ${job ? 'failed-job investigation' : 'review preparation'} ${record.state} for ${label}`;
+    await env.relay(record.item.sessionID, description, lines.join('\n\n'), wake);
   }
 
   async function assertPending(item: FeedbackItem) {
@@ -853,8 +861,12 @@ export function createAutomationHost(
     preparationFor: (sessionID: string) => storedPreparation(ctx, claims, sessionID),
 
     // The task instructions for the attempt's turn.
-    instructions: (record: AutomationRecord) =>
-      isJobFailure(record.item) ? INVESTIGATION_INSTRUCTIONS : PREPARATION_INSTRUCTIONS,
+    instructions: (record: AutomationRecord) => {
+      const base = isJobFailure(record.item)
+        ? INVESTIGATION_INSTRUCTIONS
+        : PREPARATION_INSTRUCTIONS;
+      return record.execution ? `${base}\n${LINKED_INSTRUCTIONS}` : base;
+    },
 
     // Checks, before the turn's first model request, that the attempt may
     // still run, that its prompt holds the current authorized findings, and
