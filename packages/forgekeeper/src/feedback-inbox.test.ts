@@ -474,4 +474,107 @@ describe('feedback inbox', () => {
     await expect(inbox.pause(true)).rejects.toThrow('disk full');
     expect(await inbox.list()).toEqual({ items: [], paused: false });
   });
+
+  test('retains unreleased approval receipts past 500 other insertions until durably retired', async () => {
+    let state: InboxState | undefined;
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+    });
+    const approval = (id: string): FeedbackItem => ({
+      id,
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      kind: 'approval',
+      title: id,
+      links: ['https://gitlab.com/g/p/-/merge_requests/1'],
+      reviewers: ['GitLabDuo'],
+      approverKind: 'automated',
+      at: 0,
+    });
+
+    const first = await inbox.record(approval('pending-outbox-event'));
+    expect(first.recorded).toBe(true);
+    await inbox.acknowledge('pending-outbox-event');
+
+    // Insert 510 intervening approval events and retire each of them cleanly.
+    for (let i = 0; i < 510; i++) {
+      const id = `other-${i}`;
+      await inbox.record(approval(id));
+      await inbox.acknowledge(id);
+      await inbox.releaseReceipts([id]);
+    }
+
+    // The unreleased receipt for `pending-outbox-event` still prevents replay.
+    const replay = await inbox.record(approval('pending-outbox-event'));
+    expect(replay.recorded).toBe(false);
+    expect((await inbox.list()).items).toEqual([]);
+
+    // Once its outbox entry is durably retired, the receipt is released.
+    await inbox.releaseReceipts(['pending-outbox-event']);
+    expect((await inbox.list()).delivered).toBeUndefined();
+  });
+
+  test('canActOnFeedback and listAllowsAct hide Act and Retry for human approvals, human-approval feedback, watch-only bots, and mixed inboxes', async () => {
+    const { canActOnFeedback, listAllowsAct } = await import('./feedback-inbox');
+    const humanApproval = {
+      kind: 'approval' as const,
+      approverKind: 'human' as const,
+      automationAllowed: true,
+    };
+    const humanApprovalComment = { humanApprovalOnly: true };
+    const reviewComment = {};
+    expect(canActOnFeedback(humanApproval)).toBe(false);
+    expect(canActOnFeedback(humanApprovalComment)).toBe(false);
+    expect(
+      canActOnFeedback({ kind: 'approval', approverKind: 'bot', automationAllowed: false }),
+    ).toBe(false);
+    expect(
+      canActOnFeedback({ kind: 'approval', approverKind: 'automated', automationAllowed: true }),
+    ).toBe(true);
+    expect(canActOnFeedback({ kind: 'approval', approverKind: 'bot', canAct: false })).toBe(false);
+    expect(canActOnFeedback({ kind: 'conflict' })).toBe(false);
+    expect(canActOnFeedback({ kind: 'ci-failed' })).toBe(true);
+    expect(canActOnFeedback(reviewComment)).toBe(true);
+    // Mixed inbox with a human approval and an actionable comment hides list-level Act/Retry
+    // while keeping per-item Act/Retry available on the comment row only.
+    expect(listAllowsAct([humanApproval, reviewComment])).toBe(false);
+    expect(listAllowsAct([reviewComment])).toBe(true);
+    expect(listAllowsAct([])).toBe(false);
+  });
+
+  test('retainReceipts preserves receipts recorded after the snapshot was taken', async () => {
+    let state: InboxState | undefined;
+    const inbox = createFeedbackInbox({
+      read: async () => state && structuredClone(state),
+      write: async (next) => void (state = structuredClone(next)),
+      changed: () => {},
+    });
+    const approval = (id: string): FeedbackItem => ({
+      id,
+      sessionID: 'one',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      kind: 'approval',
+      title: id,
+      links: ['https://gitlab.com/g/p/-/merge_requests/1'],
+      reviewers: ['GitLabDuo'],
+      approverKind: 'automated',
+      at: 0,
+    });
+
+    await inbox.record(approval('orphan-old'));
+    await inbox.acknowledge('orphan-old');
+    // Startup housekeeping snapshots existing receipts before scanning outbox.
+    const known = new Set(await inbox.receipts());
+    // Concurrent observation records a brand-new approval and user acknowledges it before outbox removes it.
+    await inbox.record(approval('concurrent-new'));
+    await inbox.acknowledge('concurrent-new');
+
+    // Startup finishes retaining only receipts in `known` that are still pending (none).
+    await inbox.retainReceipts(known, new Set());
+    // `orphan-old` was reclaimed, while `concurrent-new` survived so retry cannot replay it!
+    expect((await inbox.list()).delivered).toEqual(['concurrent-new']);
+    expect((await inbox.record(approval('concurrent-new'))).recorded).toBe(false);
+  });
 });

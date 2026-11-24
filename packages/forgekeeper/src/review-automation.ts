@@ -2,8 +2,15 @@
 // review batch, in the one session that targets the PR/MR. Each attempt is
 // stored, so a reload resumes or reconciles it instead of starting it again.
 import { createHash } from 'node:crypto';
-import type { FeedbackItem, InboxState } from './feedback-inbox';
-import type { CommentDetail, FailedJob, ReviewRef } from './forge';
+import { isApproval, type FeedbackItem, type InboxState } from './feedback-inbox';
+import {
+  approversOf,
+  type CommentDetail,
+  type FailedJob,
+  type ReviewerApproval,
+  type ReviewRef,
+  type ReviewRequest,
+} from './forge';
 import {
   failuresDigest,
   INVESTIGATION_QUIET_TIME,
@@ -23,7 +30,14 @@ import {
   type AutomationEnvironments,
   type ExecutionSource,
 } from './automation-environment';
-import { findingsDigest, preparationMessageID, preparationPrompt } from './review-preparation';
+import {
+  approvalDigest,
+  approvalPrompt,
+  findingsDigest,
+  preparationMessageID,
+  preparationPrompt,
+  readinessDigest,
+} from './review-preparation';
 
 export type AutomationState = 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
 
@@ -73,10 +87,15 @@ export interface AutomationRecord extends AutomationStatus {
   item: FeedbackItem;
   placement?: Placement;
   execution?: Execution;
+  // When the turn's prompt was submitted to the session, persisted only after
+  // submission succeeds so pre-delivery compaction cannot bind an unrelated turn.
+  submittedAt?: number;
   // When the coding turn's first model request passed its checks.
   startedAt?: number;
   // The findings the turn's prompt holds; see `findingsDigest`.
   digest?: string;
+  // Readiness snapshot hash last shown to the model in an approval turn.
+  readiness?: string;
   // The models the turn's requests may use, set when it starts. Without
   // them, any model may.
   models?: string[];
@@ -123,15 +142,29 @@ export const ADMISSION_CHECKS = 3;
 export const automationBatch = (item: FeedbackItem) =>
   isJobFailure(item)
     ? pipelineBatch(item)
-    : createHash('sha256')
-        .update(
-          JSON.stringify([
-            item.url,
-            [...(item.commentIDs ?? item.links)].sort(),
-            item.postedAt ?? item.at,
-          ]),
-        )
-        .digest('hex');
+    : isApproval(item)
+      ? createHash('sha256')
+          .update(
+            JSON.stringify([
+              item.url,
+              'approval',
+              item.approverID ?? null,
+              [...(item.reviewers ?? [])].map((name) => name.toLowerCase()).sort(),
+              item.approvalToken ?? null,
+              item.approvalCycle ?? null,
+              item.postedAt ?? item.at,
+            ]),
+          )
+          .digest('hex')
+      : createHash('sha256')
+          .update(
+            JSON.stringify([
+              item.url,
+              [...(item.commentIDs ?? item.links)].sort(),
+              item.postedAt ?? item.at,
+            ]),
+          )
+          .digest('hex');
 
 // The review rules that cover the PR/MR's project.
 const reviewRules = (rules: readonly AutomationRule[], ref: ReviewRef) =>
@@ -156,6 +189,16 @@ export function automationReviewers(rules: readonly AutomationRule[], ref: Revie
   return [...new Set(reviewRules(rules, ref).flatMap((rule) => rule.reviewers))];
 }
 
+export function matchesApprovalRule(
+  rules: readonly AutomationRule[],
+  ref: ReviewRef,
+  reviewers: readonly string[] | undefined,
+): boolean {
+  if (!reviewers?.length) return false;
+  const allowed = new Set(automationReviewers(rules, ref));
+  return reviewers.some((name) => allowed.has(name.toLowerCase()));
+}
+
 // The reviewers whose feedback only some models may act on. A manual action
 // tags their findings, so it honors the same restrictions.
 export function restrictedReviewers(rules: readonly AutomationRule[], ref: ReviewRef): string[] {
@@ -171,6 +214,13 @@ export function restrictedReviewers(rules: readonly AutomationRule[], ref: Revie
 // A finding, with the configured reviewer whose account wrote it, if any.
 export type ReviewFinding = CommentDetail & { reviewer?: string };
 
+export type VerifiedApproval = ReviewerApproval & { reviewer?: string };
+
+export interface ApprovalContext {
+  request: ReviewRequest;
+  approvers: VerifiedApproval[];
+}
+
 export const modelKey = (model: { providerID: string; id: string }) =>
   `${model.providerID}/${model.id}`;
 
@@ -180,7 +230,7 @@ export const modelKey = (model: { providerID: string; id: string }) =>
 export function allowedModelsFor(
   rules: readonly AutomationRule[],
   ref: ReviewRef,
-  findings: readonly ReviewFinding[],
+  findings: readonly { reviewer?: string }[],
 ): string[] | undefined {
   let allowed: string[] | undefined;
   for (const reviewer of new Set(findings.flatMap((finding) => finding.reviewer ?? []))) {
@@ -249,6 +299,12 @@ export interface AutomationHost {
     reviewers: string[] | undefined,
     tagged?: readonly string[],
   ) => Promise<ReviewFinding[]>;
+  approvals?: (
+    item: FeedbackItem,
+    reviewers: string[] | undefined,
+    tagged?: readonly string[],
+  ) => Promise<ApprovalContext>;
+  watchesApproval?: (item: FeedbackItem) => boolean;
   // The failed jobs of a failed-job update's pipeline. Rejects with
   // `Ineligible` once it's no longer the PR/MR's head pipeline or fails.
   failures: (item: FeedbackItem) => Promise<PipelineFailures>;
@@ -299,6 +355,7 @@ const handlesDelivery = (record: AutomationRecord | undefined) =>
 interface PreparedExecution {
   // Identifies the data the prompt holds; see `findingsDigest`.
   digest: string;
+  readiness?: string;
   text: string;
   placement: Placement;
   // The models that may run the turn, or undefined for any.
@@ -326,9 +383,12 @@ export function createReviewAutomation(host: AutomationHost) {
 
   // Whether a rule lets the update start a turn on its own.
   const ruleCovers = (item: FeedbackItem) => {
-    if (!isJobFailure(item)) return !item.kind && ruleReviewers(item).length > 0;
     const ref = host.ref(item.url);
-    return !!ref && investigatesJobs(host.rules, ref);
+    if (!ref) return false;
+    if (isJobFailure(item)) return investigatesJobs(host.rules, ref);
+    if (isApproval(item))
+      return item.approverKind !== 'human' && matchesApprovalRule(host.rules, ref, item.reviewers);
+    return !item.kind && ruleReviewers(item).length > 0;
   };
 
   // The reviewers whose findings count, and those whose findings name their
@@ -349,6 +409,11 @@ export function createReviewAutomation(host: AutomationHost) {
     const policy = findingsPolicy(item, manual, rules);
     return host.findings(item, policy.reviewers, policy.tagged);
   };
+  const readApprovals = (item: FeedbackItem, rules: readonly AutomationRule[]) => {
+    if (!host.approvals) throw new Error('Approval automation is unavailable');
+    const ref = host.ref(item.url);
+    return host.approvals(item, ref ? automationReviewers(rules, ref) : []);
+  };
 
   // Rejects with `Ineligible` when the session's model may not act on the
   // findings, or investigate the update's failed jobs, under `rules`.
@@ -356,7 +421,7 @@ export function createReviewAutomation(host: AutomationHost) {
   async function assertAllowedModel(
     item: FeedbackItem,
     rules: readonly AutomationRule[],
-    findings: readonly ReviewFinding[] = [],
+    findings: readonly { reviewer?: string }[] = [],
   ): Promise<string[] | undefined> {
     const ref = host.ref(item.url);
     const allowed =
@@ -524,9 +589,14 @@ export function createReviewAutomation(host: AutomationHost) {
     await assertPendingInboxItem(record.item);
     const conflict = await ownershipConflictReason(record.item);
     if (conflict) return { skip: conflict };
-    if (!record.manual && !ruleCovers(record.item))
+    if (isApproval(record.item) && host.watchesApproval && !host.watchesApproval(record.item))
+      return { skip: 'This reviewer approval is no longer watched.' };
+    if ((!record.manual || isApproval(record.item)) && !ruleCovers(record.item))
       return { skip: 'No automation rule matches this project now.' };
-    const { placement, rules } = await host.validate(record.item, !record.manual);
+    const { placement, rules } = await host.validate(
+      record.item,
+      !record.manual || isApproval(record.item),
+    );
     let prepared: Omit<PreparedExecution, 'placement'>;
     if (isJobFailure(record.item)) {
       const failures = await host.failures(record.item);
@@ -534,6 +604,18 @@ export function createReviewAutomation(host: AutomationHost) {
       prepared = {
         digest: failuresDigest(failures.jobs),
         text: investigationPrompt(record.item.url, failures),
+        ...(models ? { models } : {}),
+      };
+    } else if (isApproval(record.item)) {
+      const { request, approvers } = await readApprovals(record.item, rules);
+      if (!approvers.length)
+        return { skip: 'No active approval from authorized non-human reviewers.' };
+      const models = await assertAllowedModel(record.item, rules, approvers);
+      const statusApprovers = approversOf(request).length ? approversOf(request) : approvers;
+      prepared = {
+        digest: approvalDigest(approvers),
+        readiness: readinessDigest(request, statusApprovers),
+        text: approvalPrompt(request, statusApprovers),
         ...(models ? { models } : {}),
       };
     } else {
@@ -585,7 +667,10 @@ export function createReviewAutomation(host: AutomationHost) {
       await transitionAttempt(record, 'skipped', conflict);
       return undefined;
     }
-    const { placement } = await host.validate(record.item, !record.manual);
+    const { placement } = await host.validate(
+      record.item,
+      !record.manual || isApproval(record.item),
+    );
     // The owning checkout moved, so the attempt waits where it now runs.
     if (placement !== prepared.placement) return 'replaced';
     await assertPendingInboxItem(record.item);
@@ -600,6 +685,7 @@ export function createReviewAutomation(host: AutomationHost) {
       state: 'running',
       at: now(),
       digest: prepared.digest,
+      ...(prepared.readiness ? { readiness: prepared.readiness } : {}),
       ...(placement === 'environment' ? { placement } : {}),
     };
     if (placement === 'environment') {
@@ -631,7 +717,18 @@ export function createReviewAutomation(host: AutomationHost) {
     if (placement === 'environment') return submitLinked(running, prepared, admitting);
     admitting();
     await host.status(running.item, running);
+    const submittedAt = now();
     await host.submit(running, prepared.text);
+    const currentAfter = await host.read(running.batch);
+    if (
+      currentAfter &&
+      currentAfter.state === 'running' &&
+      currentAfter.messageID === running.messageID &&
+      currentAfter.submittedAt === undefined
+    ) {
+      const saved = { ...currentAfter, submittedAt };
+      if (await host.save(saved, currentAfter)) return saved;
+    }
     return running;
   }
 
@@ -765,10 +862,12 @@ export function createReviewAutomation(host: AutomationHost) {
       record,
       outcome,
       outcome === 'failed'
-        ? `The ${isJobFailure(record.item) ? 'investigation' : 'coding'} turn failed or was interrupted.`
+        ? `The ${isJobFailure(record.item) ? 'investigation' : isApproval(record.item) ? 'approval follow-up' : 'coding'} turn failed or was interrupted.`
         : isJobFailure(record.item)
           ? 'The investigation finished. See the session for its causes and recommended fixes.'
-          : 'The coding turn finished. See the session for changes, checks, and skipped findings.',
+          : isApproval(record.item)
+            ? 'The approval follow-up finished. See the session for the status and any actions taken.'
+            : 'The coding turn finished. See the session for changes, checks, and skipped findings.',
       { release: true },
     );
     return 'over';
@@ -852,7 +951,9 @@ export function createReviewAutomation(host: AutomationHost) {
   // stored.
   async function placeManual(record: AutomationRecord): Promise<AutomationRecord> {
     if (!record.manual || record.placement) return record;
-    const validation = await host.validate(record.item, false).catch(() => undefined);
+    const validation = await host
+      .validate(record.item, isApproval(record.item))
+      .catch(() => undefined);
     if (validation?.placement !== 'environment') return record;
     const placed: AutomationRecord = { ...record, placement: 'environment' };
     return (await host.save(placed, record)) ? placed : record;
@@ -992,6 +1093,40 @@ export function createReviewAutomation(host: AutomationHost) {
           if (record) resume(record);
           return true;
         }
+        if (isApproval(item)) {
+          if (host.watchesApproval && !host.watchesApproval(item)) {
+            await startAttempt(item, undefined, {
+              manual: false,
+              skip: 'This reviewer approval is no longer watched.',
+            });
+            return false;
+          }
+          let approval: ApprovalContext;
+          try {
+            approval = await readApprovals(item, rules);
+          } catch (error) {
+            if (!(error instanceof Ineligible)) throw error;
+            await startAttempt(item, undefined, { manual: false, skip: error.message });
+            return false;
+          }
+          if (!approval.approvers.length) {
+            await startAttempt(item, undefined, {
+              manual: false,
+              skip: 'No active approval from authorized non-human reviewers.',
+            });
+            return false;
+          }
+          try {
+            await assertAllowedModel(item, rules, approval.approvers);
+          } catch (error) {
+            if (!(error instanceof Ineligible)) throw error;
+            await startAttempt(item, undefined, { manual: false, skip: error.message });
+            return false;
+          }
+          const record = await startAttempt(item, undefined, { manual: false, placement });
+          if (record) resume(record);
+          return true;
+        }
         const findings = await readFindings(item, false, rules);
         if (!findings.length) {
           await startAttempt(item, undefined, {
@@ -1016,8 +1151,22 @@ export function createReviewAutomation(host: AutomationHost) {
     // Acts on an update on request, without an automation rule. A batch that
     // already ran needs `retry`.
     async act(item: FeedbackItem, retry = false): Promise<void> {
-      if (item.kind && !isJobFailure(item))
-        throw new Error('Act on feedback is available only for review and failed-job updates');
+      if (item.humanApprovalOnly)
+        throw new Error('Human reviewer approvals cannot start a turn with tools');
+      if (item.kind && !isJobFailure(item) && !isApproval(item))
+        throw new Error(
+          'Act on feedback is available only for review, approval, and failed-job updates',
+        );
+      if (isApproval(item)) {
+        if (item.approverKind === 'human')
+          throw new Error('Human reviewer approvals cannot start a turn with tools');
+        if (host.watchesApproval && !host.watchesApproval(item))
+          throw new Error('This reviewer approval is no longer watched');
+        if (!ruleCovers(item))
+          throw new Error(
+            'No automation rule authorizes follow-up turns for this reviewer approval',
+          );
+      }
       const batch = automationBatch(item);
       await queue.run(batch, async () => {
         let existing = await host.read(batch);

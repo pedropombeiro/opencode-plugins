@@ -51,6 +51,14 @@ export const unlistedFailure = (pipeline: Pipeline | undefined) =>
 export const pipelineFails = (pipeline: Pipeline | undefined) =>
   !!pipeline?.failedJobs?.length || unlistedFailure(pipeline);
 
+export interface ReviewerApproval {
+  id?: string;
+  username: string;
+  bot?: boolean;
+  automated?: boolean;
+  reviewID?: string;
+}
+
 interface Common {
   iid: string;
   title: string;
@@ -67,9 +75,12 @@ interface Common {
   awaitingReviewers: string[];
   // False when more reviewers exist than the adapter fetches.
   reviewersComplete: boolean;
+  // False when approval sources are truncated or could not be paginated completely.
+  approvalsComplete?: boolean;
   // The account IDs of the PR/MR's reviewers, requested or done, in the form
   // the forge's `viewerID` reports. Absent when the forge doesn't say.
   reviewerIDs?: string[];
+  approvers?: ReviewerApproval[];
   targetProject: string;
   targetBranch: string;
   // Where the PR/MR's commits come from. Absent when the forge doesn't say,
@@ -110,6 +121,17 @@ export interface CopilotReview {
 }
 
 export type ReviewRequest = GitLabMergeRequest | GitHubPullRequest;
+
+export function approversOf(request: ReviewRequest): ReviewerApproval[] {
+  if (request.approvers) return request.approvers;
+  if (request.forge === 'gitlab' && request.duoReviewState === 'APPROVED') {
+    return [{ username: 'GitLabDuo', bot: true, automated: true }];
+  }
+  return [];
+}
+
+export const approvalsComplete = (request: ReviewRequest): boolean =>
+  request.approvalsComplete !== false && request.reviewersComplete !== false;
 
 // A PR/MR identified by URL, independent of the checked-out branch.
 export interface ReviewRef {
@@ -218,6 +240,8 @@ export interface ReviewComment {
   // The thread the comment is in, so replies can be matched to threads the
   // viewer took part in. Absent when the forge doesn't say.
   discussionID?: string;
+  // State of the submitting review (e.g. GitHub's APPROVED / COMMENTED / CHANGES_REQUESTED).
+  reviewState?: string;
 }
 
 export interface FeedbackSnapshot {
@@ -320,6 +344,8 @@ export interface CommentDetail {
   url: string;
   username: string;
   authorID?: string;
+  bot?: boolean;
+  reviewState?: string;
   body: string;
   // Whether the comment's thread is resolved, when the forge says.
   resolved?: boolean;
@@ -412,4 +438,9 @@ export interface Forge {
   findNumberByBranch(repository: Repository): Promise<string | undefined>;
   // The branch a PR/MR was opened from. Undefined when the PR/MR doesn't exist.
   sourceBranch(ref: ReviewRef): Promise<string | undefined>;
+  // Marks a draft PR/MR ready for review.
+  markReady?(
+    ref: ReviewRef,
+    options?: { beforeMutate?: () => Promise<void> | void },
+  ): Promise<void>;
 }

@@ -519,11 +519,20 @@ removed target never triggers a notification.
 | An automated review finished with feedback | GitLab Duo                       | GitHub Copilot |
 | Comments from review bots                  | Security reviewers, `reviewBots` | `reviewBots`   |
 | New human review feedback                  | MR comments                      | PR comments    |
+| Reviewer approvals                         | Duo, humans, and `reviewBots`    | Reviewers      |
 
+- **Reviewer approvals**: when an automated reviewer (such as GitLab Duo), a human reviewer, or a
+  configured `reviewBot` newly approves an open target PR/MR, Forgekeeper records an approval
+  update in `/forge-feedback` with current readiness facts (such as whether the PR/MR is still a
+  draft, has unresolved threads, or awaits other reviewers). Pre-existing approvals become the
+  initial baseline on the first complete lookup, self-approvals are skipped, and a re-approval
+  after a push or re-review request produces a new update. Approval updates follow
+  `watch.automatedReviews`, `watch.humanReviews`, `watch.reviewBots`, and `delivery.reviews`, and
+  clear automatically if the reviewer's approval is reset or the PR/MR closes or merges.
 - **Duo reviews**: new unresolved inline findings from the GitLab Duo bot create inbox
   updates after the findings remain unchanged for four minutes. Forgekeeper does not need
-  to observe the review running. Summary-only reviews, approvals without inline findings,
-  system notes, and resolved findings send nothing. Comment IDs persist independently of
+  to observe the review running. Summary-only reviews, system notes, and resolved findings send
+  nothing; Duo approvals are reported through reviewer approvals above. Comment IDs persist independently of
   human feedback, including an empty baseline when monitoring starts without findings.
   Existing findings become the initial baseline; new findings posted while OpenCode is
   offline are detected after monitoring resumes if a baseline was already stored.
@@ -873,6 +882,42 @@ request to a bot or asks one to merge it, such as `gitlab-release-tools-bot` for
 merge requests, and it never marks checklist tasks or attestations as done. Unlike restricted
 summaries, preparation includes reviewer text in the session's history and permits tools.
 
+Matching `"on": "review"` rules also authorize a restricted approval follow-up turn when a watched,
+listed non-human reviewer (an automated reviewer such as `GitLabDuo` or `copilot-pull-request-reviewer[bot]`,
+or a bot listed in both `reviewBots` and the rule's `reviewers`) explicitly approves the PR/MR.
+Upgrading an existing `"on": "review"` rule grants those restricted turns access to
+`forgekeeper_mark_ready` without a configuration change; to keep automated fix preparation while
+blocking approval draft-ready mutations, deny `forgekeeper_mark_ready` in your OpenCode session or
+agent permissions (globally or per URL pattern). On GitHub, use exact canonical bot usernames with
+`[bot]` (for example `sec[bot]`). Only explicit approvals trigger approval events; a completed
+review without approval (such as GitLab Duo ending in `REVIEWED`) does not. On GitLab servers
+older than 19.4 (without `approvedAt`) or for approvals recorded only in `approvedBy` without a
+reviewer entry, Forgekeeper still reports ordinary approval transitions, but cannot detect a
+revoke-and-reapprove cycle that finishes completely between two polls.
+
+Approval follow-ups always run directly in the owning session, where conversation context lives,
+even when the local checkout is on another branch or the rule sets `"execution": "environment"`.
+The owning session must use a coding agent (not `plan`) and an allowed model; otherwise the attempt
+is skipped and falls back to the configured summary or passive notice. During an approval follow-up,
+Forgekeeper removes all general tools (`bash`, file edits, `set_session_target`, and other forge
+tools) and enforces that restriction at tool execution and permission evaluation, including after
+compaction (even if compaction runs before the first model request). Only two target-bound tools
+are exposed: `forgekeeper_approval_status` (re-reads live status for the verified PR/MR, including
+draft state, conflicts, unresolved threads, CI status, awaiting reviewers, GitLab
+`approvalRequirementsSatisfied`, and GitHub `reviewDecision`) and `forgekeeper_mark_ready` (asserts
+session permission for the bound PR/MR URL, re-checks cancellation, agent, model, watch settings,
+ownership, rules, author scope, and the active approval, and marks only that verified draft PR/MR
+ready). The rule authorizes the turn, not the mutation itself: the model calls
+`forgekeeper_mark_ready` only when the owning session's prior instructions ask for it and every
+condition the user gave is verified.
+
+Approval follow-ups require a matching rule covering the project, PR/MR author, active watch
+settings, and verified non-human reviewer account ID on automatic selection, manual **Act on
+feedback**, explicit retry, and tool execution; watch-only bots remain informational. Human
+reviewer approvals are never eligible for automation or **Act on feedback** (which clients hide for
+human approvals) and stay strictly informational (inbox and tool-free summaries only), even if a
+rule lists that reviewer's username or the GitHub approval includes body text.
+
 Automation works with inbox-only delivery and replaces automatic summary delivery for selected
 batches. A skipped batch, such as one without findings from authorized reviewers, keeps its
 normal delivery. So does an automatic attempt that ends before its coding turn starts, such as
@@ -1211,11 +1256,14 @@ those links name. No mode executes commands from
 review content, edits repository files, commits, pushes, posts replies, or resolves
 discussions.
 
-Forgekeeper changes nothing on a forge. For stacked PRs/MRs, it only proposes retargets.
-See [Stacked PRs/MRs](#stacked-prsmrs).
-Comment links are opened only after user selection and must use HTTPS on the target's
-origin without embedded credentials. Review bodies remain external data, not trusted
-instructions. Analysis and remediation are outside this feature's scope.
+Monitoring and review summaries change nothing on a forge, and stacked PRs/MRs only propose
+retargets (see [Stacked PRs/MRs](#stacked-prsmrs)). The only forge write Forgekeeper itself exposes
+is `forgekeeper_mark_ready` during an authorized non-human approval follow-up turn under a matching
+`"on": "review"` automation rule: it marks only that verified draft PR/MR ready for review after
+evaluating session permissions for the bound URL, and can be blocked globally or per URL by denying
+`forgekeeper_mark_ready` in OpenCode permissions. Comment links are opened only after user selection
+and must use HTTPS on the target's origin without embedded credentials. Review bodies remain
+external data, not trusted instructions. Analysis and remediation are outside this feature's scope.
 
 Pending updates are stored locally through OpenCode's plugin storage. Conversation history
 is inspected locally only to find the latest user-message timestamp, with at most four
@@ -1382,10 +1430,10 @@ If you set options for `opencode-forgekeeper` 2.x, also see
 - `src/locate.ts` picks each key's PRs/MRs. `src/store.ts` caches lookups, polls, backs off
   after failures, and discards lookups that started before a change. `src/format.ts`
   renders the footer and dialog.
-- `src/automated-review-watch.ts` and `src/human-review-watch.ts` decide when to notify the
-  agent. `src/review-request-watch.ts` finds new requests for your review and selects the
-  author's replies for context. `src/adapters/gitlab/review-requests.ts` reads them from
-  GitLab's activity notes.
+- `src/automated-review-watch.ts`, `src/human-review-watch.ts`, and `src/approval-watch.ts` decide
+  when to notify the agent about review feedback and reviewer approvals. `src/review-request-watch.ts`
+  finds new requests for your review and selects the author's replies for context.
+  `src/adapters/gitlab/review-requests.ts` reads them from GitLab's activity notes.
 - `src/review-monitoring.ts` configures the review watchers, stores their state, and records
   review updates in the inbox.
 - `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and

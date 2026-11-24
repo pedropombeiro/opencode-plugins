@@ -403,4 +403,31 @@ describe('createStatusService', () => {
     app.service.watch('cli', ['ses_1']);
     expect(app.service.polling('ses_1')).toBe(false);
   });
+
+  test('excludes failed targets from approval observation on partial multi-target lookups including mixed case URLs', async () => {
+    const observedApprovals: string[][] = [];
+    const mrA = mr({ iid: '1', url: 'https://gitlab.com/group/project/-/merge_requests/1' });
+    const mrB = mr({ iid: '2', url: 'https://gitlab.com/group/project/-/merge_requests/2' });
+    const service = createStatusService({
+      load: async () => ({
+        kind: 'found',
+        explicitTarget: true,
+        requests: [mrA, mrB],
+        failed: [{ url: 'https://gitlab.com/Group/Project/-/merge_requests/1', reason: 'timeout' }],
+      }),
+      isTarget: () => true,
+      owns: () => true,
+      publish: () => {},
+      approvals: {
+        observe: async (_key, requests) => {
+          observedApprovals.push(requests.map((request) => request.url));
+        },
+      },
+      interval: 10_000,
+    });
+    service.watch('cli', ['ses_1'], 'ses_1');
+    await flush();
+    expect(observedApprovals).toEqual([[mrB.url]]);
+    await service.dispose();
+  });
 });

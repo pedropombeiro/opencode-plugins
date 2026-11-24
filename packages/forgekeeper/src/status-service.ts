@@ -4,9 +4,10 @@ import {
   type AutomatedReviewWatcher,
 } from './automated-review-watch';
 import type { ReviewRequest } from './forge';
-import { traitsOf } from './forges';
+import { parseUrl, traitsOf } from './forges';
 import { HOME, LEASE_TIME } from './rpc';
 import { createStatusStore, unresolved, type Lookup, type Snapshot } from './store';
+import { sameRef } from './target';
 
 // A status key is a session ID, or HOME for the checkout outside a session.
 // Keys don't depend on the title or the targets, so a hidden session keeps
@@ -34,6 +35,7 @@ export interface StatusServiceOptions {
   feedbackTargets?: (sessionID: string, requests: ReviewRequest[]) => void;
   // Receives each lookup's targets, in every state, for lifecycle events.
   lifecycle?: { observe: (sessionID: string, requests: ReviewRequest[]) => Promise<unknown> };
+  approvals?: { observe: (sessionID: string, requests: ReviewRequest[]) => Promise<unknown> };
   onWatchError?: (error: unknown) => void;
   interval?: number;
   activeInterval?: number;
@@ -171,6 +173,21 @@ export function createStatusService(options: StatusServiceOptions) {
     const current = targets(key, next);
     if (!feedbackPaused && options.lifecycle && current.length)
       track(options.lifecycle.observe(key, current).catch(report));
+    const failed = next.kind === 'found' ? (next.failed ?? []) : [];
+    const failedRefs = failed
+      .map((entry) => parseUrl(entry.url))
+      .filter((ref): ref is NonNullable<typeof ref> => ref !== undefined);
+    const failedUrls = new Set(failed.map((entry) => entry.url));
+    const isFailed = (url: string) => {
+      if (failedUrls.has(url)) return true;
+      const ref = parseUrl(url);
+      return !!ref && failedRefs.some((candidate) => sameRef(candidate, ref));
+    };
+    const freshApprovals = failed.length
+      ? current.filter((request) => !isFailed(request.url))
+      : current;
+    if (!feedbackPaused && options.approvals && freshApprovals.length)
+      track(options.approvals.observe(key, freshApprovals).catch(report));
     for (const request of feedbackPaused ? [] : watchedForFeedback(key, next)) {
       track(
         Promise.resolve()

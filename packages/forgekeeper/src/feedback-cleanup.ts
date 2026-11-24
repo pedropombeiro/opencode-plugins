@@ -1,18 +1,27 @@
+import { matchesApproval } from './approval-watch';
 import { isReviewRequest, type FeedbackItem } from './feedback-inbox';
-import { pipelineFails, type FeedbackSnapshot } from './forge';
+import { approvalsComplete, approversOf, pipelineFails, type FeedbackSnapshot } from './forge';
 import type { Lookup } from './store';
 import { commentIDsOf } from './summary-delivery';
 
 export function settledFeedback(
-  item: Pick<FeedbackItem, 'url' | 'kind' | 'pipeline'>,
+  item: Pick<
+    FeedbackItem,
+    'url' | 'kind' | 'pipeline' | 'reviewers' | 'approverID' | 'approvalToken' | 'approverKind'
+  >,
   lookup: Lookup | undefined,
 ): boolean {
-  if (item.kind !== 'conflict' && item.kind !== 'ci-failed') return false;
+  if (item.kind !== 'conflict' && item.kind !== 'ci-failed' && item.kind !== 'approval')
+    return false;
   const request =
     lookup?.kind === 'found' ? lookup.requests.find((entry) => entry.url === item.url) : undefined;
   if (!request) return false;
   if (request.state !== 'opened') return true;
   if (item.kind === 'conflict') return request.conflictsKnown && !request.conflicts;
+  if (item.kind === 'approval') {
+    if (!approvalsComplete(request) || !item.reviewers?.length) return false;
+    return !approversOf(request).some((approver) => matchesApproval(item, approver));
+  }
   const pipeline = request.pipeline;
   return !!pipeline?.id && (pipeline.id !== item.pipeline || !pipelineFails(pipeline));
 }

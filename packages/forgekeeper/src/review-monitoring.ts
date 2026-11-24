@@ -1,5 +1,14 @@
 import type { Plugin } from '@opencode/plugin';
 import {
+  APPROVAL_RETENTION,
+  approvalDetails,
+  approverKey,
+  approverKind,
+  createApprovalWatcher,
+  matchesApproverEvent,
+  type ApprovalRecord,
+} from './approval-watch';
+import {
   automatedReview,
   createAutomatedReviewWatcher,
   reviewTitle,
@@ -9,12 +18,15 @@ import {
   type ReviewHistory,
 } from './automated-review-watch';
 import type { FeedbackItem } from './feedback-inbox';
-import type {
-  FeedbackSnapshot,
-  ReviewComment,
-  ReviewRequest,
-  ReviewRequestEvent,
-  ReviewRequestHistory,
+import {
+  approvalsComplete,
+  approversOf,
+  type FeedbackSnapshot,
+  type ReviewerApproval,
+  type ReviewComment,
+  type ReviewRequest,
+  type ReviewRequestEvent,
+  type ReviewRequestHistory,
 } from './forge';
 import {
   authorReplies,
@@ -35,6 +47,7 @@ import {
 } from './human-review-watch';
 import { matchesReviewBot, type StatusOptions } from './options';
 import type { Notice } from './rpc';
+import { includesRequest, type Target } from './target';
 
 const PENDING_PREFIX = 'status/pending/';
 const FEEDBACK_PREFIX = 'status/feedback/';
@@ -44,21 +57,42 @@ const pendingKey = (sessionID: string, url: string) =>
 const feedbackRecordKey = (key: string) => `${FEEDBACK_PREFIX}${encodeURIComponent(key)}`;
 const REQUEST_PREFIX = 'status/review-requests/';
 const requestRecordKey = (key: string) => `${REQUEST_PREFIX}${encodeURIComponent(key)}`;
+const APPROVAL_PREFIX = 'status/approvals/';
+const approvalPrefix = (sessionID: string) => `${APPROVAL_PREFIX}${encodeURIComponent(sessionID)}/`;
+const approvalKey = (sessionID: string, url: string) =>
+  `${approvalPrefix(sessionID)}${encodeURIComponent(url)}`;
 const reviewHistoryKey = (sessionID: string, url: string) =>
   `status/reviews/${encodeURIComponent(sessionID)}/${encodeURIComponent(url)}`;
 
 interface ReviewHost {
   current: (sessionID: string, requests: ReviewRequest[]) => Promise<ReviewRequest[]>;
   isTarget: (sessionID: string, url: string) => boolean;
+  targets?: (sessionID: string, url: string) => Promise<Target[] | undefined>;
+  storedTargets?: (sessionID: string) => Promise<Target[]>;
+  sessionOwnership?: (
+    sessionIDs: readonly string[],
+  ) => Promise<{ here: string[]; deleted: string[] }>;
+  onSessionsDeleted?: (sessionIDs: readonly string[]) => Promise<void>;
+  receipts?: () => Promise<string[]>;
+  releaseReceipts?: (ids: readonly string[]) => Promise<void>;
+  retainReceipts?: (known: ReadonlySet<string>, pending: ReadonlySet<string>) => Promise<void>;
+  fresh?: (url: string) => Promise<ReviewRequest | undefined>;
+  closing?: () => boolean;
+  viewerID?: (url: string) => Promise<string | undefined>;
   fetch: (request: ReviewRequest) => Promise<FeedbackSnapshot | undefined>;
   reviewRequests: (request: ReviewRequest) => Promise<ReviewRequestHistory | undefined>;
   interval: (request: ReviewRequest) => number;
   accepted: (url: string, snapshot: FeedbackSnapshot | undefined) => void;
   scan: (prefix: string) => Promise<{ key: string; value: unknown }[]>;
   write: (task: () => Promise<void>) => void;
-  record: (item: FeedbackItem) => Promise<void>;
+  record: (
+    item: FeedbackItem,
+    supersedes?: (entry: FeedbackItem) => boolean,
+    accept?: () => boolean,
+  ) => Promise<boolean | void>;
   notice: (notice: Notice) => void;
   error: (error: unknown) => void;
+  approvalError?: (error: unknown) => void;
 }
 
 export function createReviewMonitoring(
@@ -72,7 +106,12 @@ export function createReviewMonitoring(
     requests: ReviewRequest[],
     title: (requests: ReviewRequest[]) => string,
     links: string[] = [],
-    comments: { identity?: string; ids?: string[]; postedAt?: number } = {},
+    comments: {
+      identity?: string;
+      ids?: string[];
+      postedAt?: number;
+      humanApprovalOnly?: boolean;
+    } = {},
   ): Promise<ReviewRequest[]> {
     const current = await host.current(sessionID, requests);
     if (current.length === 0) return [];
@@ -92,6 +131,7 @@ export function createReviewMonitoring(
         links: links.length ? links : [request.url],
         ...(comments.ids?.length ? { commentIDs: comments.ids } : {}),
         ...(comments.postedAt !== undefined ? { postedAt: comments.postedAt } : {}),
+        ...(comments.humanApprovalOnly ? { humanApprovalOnly: true } : {}),
         ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
         at: now(),
       });
@@ -208,6 +248,10 @@ export function createReviewMonitoring(
                 : JSON.stringify(['human', group.map((comment) => comment.id).sort()]),
               ids: group.map((comment) => comment.id),
               postedAt: Math.max(...group.map((comment) => comment.editedAt)),
+              ...(group.length > 0 &&
+              group.every((comment) => !comment.bot && comment.reviewState === 'APPROVED')
+                ? { humanApprovalOnly: true }
+                : {}),
             },
           );
           if (sent.length > 0)
@@ -321,8 +365,157 @@ export function createReviewMonitoring(
   const asksForReviews = (request: ReviewRequest) =>
     !!requests && !!traitsOf(request).feedback?.reviewRequests;
 
+  const watchesApprovals =
+    settings.watch.automatedReviews ||
+    settings.watch.humanReviews ||
+    Object.values(reviewBots).some((names) => names.length);
+  const watchesApprover = (url: string, approver: ReviewerApproval) => {
+    if (approver.automated) return settings.watch.automatedReviews;
+    if (approver.bot) {
+      const hostName = commentHost(url);
+      return !!hostName && matchesReviewBot(reviewBots, hostName, approver.username);
+    }
+    return settings.watch.humanReviews;
+  };
+  const readApprovals = async (prefix: string) =>
+    (await host.scan(prefix)).map(({ value }) => value as ApprovalRecord);
+  const removeApprovalSession = async (sessionID: string) => {
+    const retiredIDs: string[] = [];
+    for (const { key, value } of await host.scan(approvalPrefix(sessionID))) {
+      for (const event of (value as ApprovalRecord).pending) retiredIDs.push(event.id);
+      await storage.remove(key);
+    }
+    if (retiredIDs.length) await host.releaseReceipts?.(retiredIDs).catch(() => {});
+  };
+  const approvals = watchesApprovals
+    ? createApprovalWatcher({
+        records: (sessionID) => readApprovals(approvalPrefix(sessionID)),
+        write: async (record) => {
+          if (host.closing?.()) throw new Error('The plugin stopped');
+          await storage.set(approvalKey(record.sessionID, record.url), record as never);
+        },
+        remove: async (record) => {
+          if (host.closing?.()) throw new Error('The plugin stopped');
+          await storage.remove(approvalKey(record.sessionID, record.url));
+        },
+        retired: (ids) => host.releaseReceipts?.(ids) ?? Promise.resolve(),
+        waiting: async () => {
+          const waiting = (await readApprovals(APPROVAL_PREFIX)).filter(
+            (record) => record.pending.length,
+          );
+          if (!host.sessionOwnership || !waiting.length) return waiting;
+          const { here, deleted } = await host.sessionOwnership([
+            ...new Set(waiting.map((record) => record.sessionID)),
+          ]);
+          if (deleted.length) {
+            for (const sessionID of deleted) await removeApprovalSession(sessionID);
+            await host.onSessionsDeleted?.(deleted).catch(() => {});
+          }
+          return waiting.filter((record) => here.includes(record.sessionID));
+        },
+        deliver: async (record, event, freshRequest) => {
+          if (host.targets) {
+            const targets = await host.targets(record.sessionID, record.url);
+            if (!targets) return;
+          } else if (!host.isTarget(record.sessionID, record.url)) {
+            return;
+          }
+          if (!watchesApprover(record.url, event.approver)) return;
+          const reviewerLower = event.approver.username.toLowerCase();
+          let live = freshRequest;
+          if (!live && host.fresh) {
+            live = await host.fresh(record.url);
+            if (!live) return;
+          }
+          if (live) {
+            if (live.state !== 'opened') return { reconcile: live };
+            if (!approvalsComplete(live)) return 'defer';
+            const matched = approversOf(live).find((approver) =>
+              matchesApproverEvent(event.approver, approver),
+            );
+            if (!matched) return { reconcile: live };
+            if (!watchesApprover(live.url, matched)) return;
+          } else if (
+            record.state !== 'opened' ||
+            (!record.approvers.includes(approverKey(event.approver)) &&
+              !record.approvers.includes(reviewerLower))
+          ) {
+            return;
+          }
+          const kind = approverKind(event.approver);
+          if (kind === 'human' && event.approver.id && host.viewerID) {
+            const viewer = await host.viewerID(record.url);
+            if (viewer && event.approver.id === viewer) return;
+            if (host.targets) {
+              const latestTargets = await host.targets(record.sessionID, record.url);
+              if (!latestTargets) return;
+            } else if (!host.isTarget(record.sessionID, record.url)) {
+              return;
+            }
+          }
+          const details = live ? approvalDetails(live) : (event.details ?? []);
+          const item: FeedbackItem = {
+            id: event.id,
+            kind: 'approval',
+            sessionID: record.sessionID,
+            url: record.url,
+            title: event.title,
+            links: [record.url],
+            reviewers: [event.approver.username],
+            approverKind: kind,
+            ...(event.approver.id ? { approverID: event.approver.id } : {}),
+            ...(event.approver.reviewID ? { approvalToken: event.approver.reviewID } : {}),
+            ...(event.cycle !== undefined ? { approvalCycle: event.cycle } : {}),
+            ...(details.length ? { details } : {}),
+            ...(event.delivery ? { delivery: event.delivery } : {}),
+            at: event.detectedAt,
+          };
+          const sameApprover = (entry: FeedbackItem) =>
+            entry.kind === 'approval' &&
+            entry.sessionID === item.sessionID &&
+            entry.url === item.url &&
+            (item.approverID && entry.approverID
+              ? entry.approverID === item.approverID
+              : !!entry.reviewers?.some((name) => name.toLowerCase() === reviewerLower));
+          const recorded = await host.record(item, sameApprover, () =>
+            host.isTarget(record.sessionID, record.url),
+          );
+          if (recorded === false) return;
+          host.notice({
+            sessionID: record.sessionID,
+            title: event.title,
+            message: 'New review approval in /forge-feedback.',
+            variant: 'info',
+          });
+        },
+        reference,
+        watches: (request, approver) => watchesApprover(request.url, approver),
+        delivery: () => settings.delivery.reviews,
+        onError: host.approvalError ?? host.error,
+        now,
+      })
+    : undefined;
+
   return {
     automated,
+    approvals,
+    watchesApprover,
+    reconcileApproval: (sessionID: string, live: ReviewRequest, fetchedAt: number) =>
+      approvals ? approvals.reconcile(sessionID, live, fetchedAt) : Promise.resolve(),
+    retireApprovals: async (sessionID: string, keep?: (url: string) => boolean) => {
+      if (approvals) {
+        await approvals.retire(sessionID, keep);
+        return;
+      }
+      const retiredIDs: string[] = [];
+      for (const { key, value } of await host.scan(approvalPrefix(sessionID))) {
+        const record = value as ApprovalRecord;
+        if (keep?.(record.url)) continue;
+        for (const event of record.pending) retiredIDs.push(event.id);
+        await storage.remove(key);
+      }
+      if (retiredIDs.length) await host.releaseReceipts?.(retiredIDs).catch(() => {});
+    },
     feedback:
       human || publishedFeedback || requests
         ? {
@@ -361,6 +554,38 @@ export function createReviewMonitoring(
       for (const { key, value } of await host.scan(REQUEST_PREFIX)) {
         if (isRequestRecordExpired(value as RequestRecord, at)) await storage.remove(key);
       }
+      const knownReceipts = new Set((await host.receipts?.().catch(() => [])) ?? []);
+      const approvalEntries = await host.scan(APPROVAL_PREFIX);
+      const deletedList =
+        host.sessionOwnership && approvalEntries.length
+          ? (
+              await host.sessionOwnership([
+                ...new Set(approvalEntries.map(({ value }) => (value as ApprovalRecord).sessionID)),
+              ])
+            ).deleted
+          : [];
+      const deletedSessions = new Set(deletedList);
+      const remainingPending = new Set<string>();
+      for (const { key, value } of approvalEntries) {
+        const record = value as ApprovalRecord;
+        if (deletedSessions.has(record.sessionID)) {
+          await storage.remove(key);
+          continue;
+        }
+        if (record.pending.length) {
+          for (const event of record.pending) remainingPending.add(event.id);
+          continue;
+        }
+        if (at - record.at < APPROVAL_RETENTION) continue;
+        if (!host.storedTargets) {
+          await storage.remove(key);
+          continue;
+        }
+        const targets = await host.storedTargets(record.sessionID).catch(() => undefined);
+        if (targets && !includesRequest(targets, record.url)) await storage.remove(key);
+      }
+      if (deletedList.length) await host.onSessionsDeleted?.(deletedList).catch(() => {});
+      await host.retainReceipts?.(knownReceipts, remainingPending).catch(() => {});
     },
   };
 }

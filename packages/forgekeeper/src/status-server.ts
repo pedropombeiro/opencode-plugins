@@ -1,9 +1,11 @@
 import type { Plugin } from '@opencode/plugin';
+import { approvalDetails, matchesApproval } from './approval-watch';
 import { automatedReview } from './automated-review-watch';
 import { createRequestCache } from './request-cache';
 import { createFeedbackSubscriptions, RECONCILE_INTERVAL } from './feedback-subscriptions';
 import {
   createFeedbackInbox,
+  isApproval,
   isLifecycle,
   type FeedbackItem,
   type InboxState,
@@ -12,14 +14,19 @@ import { closedFeedback, resolvedFeedback, settledFeedback } from './feedback-cl
 import { createSummaryDelivery, type SummaryDependencies } from './summary-delivery';
 import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
 import { createLifecycleNotifications } from './lifecycle-notifications';
+import { APPROVAL_TOOLS } from './review-preparation';
 import { createReviewMonitoring } from './review-monitoring';
 import {
   automationReviewers,
   createReviewAutomation,
+  matchesApprovalRule,
   modelKey,
-  modelRefusal,
 } from './review-automation';
-import { createAutomationHost, type AutomationDependencies } from './review-automation-host';
+import {
+  createAutomationHost,
+  type AutomationDependencies,
+  type MarkReadyInvocation,
+} from './review-automation-host';
 import {
   linkedOwner,
   PRESENCE_INTERVAL,
@@ -27,13 +34,20 @@ import {
   type DirectorySession,
   type Presence,
 } from './linked-session';
-import type { FeedbackSnapshot, ReviewRequest, ReviewRequestHistory } from './forge';
+import {
+  approvalsComplete,
+  approversOf,
+  type FeedbackSnapshot,
+  type ReviewerApproval,
+  type ReviewRequest,
+  type ReviewRequestHistory,
+} from './forge';
 import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
 import { investigatesJobs, isJobFailure } from './job-investigation';
 import { REQUEST_INTERVAL } from './review-request-watch';
 import { locate } from './locate';
-import type { StatusOptions } from './options';
+import { matchesReviewBot, type StatusOptions } from './options';
 import type { Notice } from './rpc';
 import type { MonitoringStatus } from './monitoring-status';
 import { createStatusService, HOME } from './status-service';
@@ -106,7 +120,7 @@ export async function setupStatus(
 ) {
   const directory = ctx.location.directory;
   const requestKey = (ref: { forge: string; host: string; project: string; iid: string }) =>
-    JSON.stringify([ref.forge, ref.host, ref.project, ref.iid]);
+    JSON.stringify([ref.forge, ref.host, ref.project.toLowerCase(), ref.iid]);
   const statusCache = createRequestCache<ReviewRequest | undefined>({
     now: deps.now,
     classify: (request) => (request ? 'usable' : 'unavailable'),
@@ -141,9 +155,131 @@ export async function setupStatus(
   // watches them, even if a CLI still leases them here.
   const foreign = new Set<string>();
   let invalidate: (sessionID: string) => void = () => {};
+  const activeReviewBots = settings.watch.reviewBots ? settings.reviewBots : {};
+  const watchesApprover = (url: string, approver: ReviewerApproval) => {
+    if (approver.automated) return settings.watch.automatedReviews;
+    if (approver.bot) {
+      const hostName = parseUrl(url)?.host;
+      return !!hostName && matchesReviewBot(activeReviewBots, hostName, approver.username);
+    }
+    return settings.watch.humanReviews;
+  };
+  const watchesApprovalItem = (item: FeedbackItem) => {
+    if (item.approverKind === 'automated') return settings.watch.automatedReviews;
+    if (item.approverKind === 'bot') {
+      const hostName = parseUrl(item.url)?.host;
+      return (
+        !!hostName &&
+        !!item.reviewers?.some((name) => matchesReviewBot(activeReviewBots, hostName, name))
+      );
+    }
+    if (item.approverKind === 'human') return settings.watch.humanReviews;
+    return false;
+  };
+
+  async function freshRequest(url: string): Promise<ReviewRequest | undefined> {
+    const ref = parseUrl(url);
+    const forge = ref && deps.forges.forHost(ref.host, directory);
+    if (!ref || !forge) return undefined;
+    return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
+  }
+
+  type FreshLookup = { live: ReviewRequest | undefined; fetchedAt: number };
+  let freshBatch: Map<string, Promise<FreshLookup>> | undefined;
+  const recentSelectionFresh = new Map<string, FreshLookup>();
+
+  async function loadFreshApproval(item: FeedbackItem, shareBatch: boolean): Promise<FreshLookup> {
+    if (shareBatch) {
+      const reused = recentSelectionFresh.get(item.id);
+      if (reused) {
+        recentSelectionFresh.delete(item.id);
+        return reused;
+      }
+      const ref = parseUrl(item.url);
+      if (freshBatch && ref) {
+        const key = requestKey(ref);
+        let pending = freshBatch.get(key);
+        if (!pending) {
+          const fetchedAt = (deps.now ?? Date.now)();
+          pending = freshRequest(item.url).then((live) => ({ live, fetchedAt }));
+          freshBatch.set(key, pending);
+        }
+        return pending;
+      }
+    }
+    const fetchedAt = (deps.now ?? Date.now)();
+    return { live: await freshRequest(item.url), fetchedAt };
+  }
+
+  const mayAutomateApproval = (item: FeedbackItem): boolean => {
+    if (item.approverKind === 'human') return false;
+    if (!item.automationAllowed) return false;
+    if (item.automation) return false;
+    if (!watchesApprovalItem(item)) return false;
+    const ref = parseUrl(item.url);
+    return !!ref && matchesApprovalRule(automationRules, ref, item.reviewers);
+  };
+
+  // Revalidates an approval item against live uncached forge state before
+  // delivery, automation, or manual summary. Revoked approvals or closed
+  // PRs/MRs reconcile the watcher baseline and are pruned immediately.
+  async function revalidateApproval(
+    item: FeedbackItem,
+    {
+      checkWatch = true,
+      shareBatch = false,
+      stashForNotify = false,
+    }: { checkWatch?: boolean; shareBatch?: boolean; stashForNotify?: boolean } = {},
+  ): Promise<
+    | { state: 'valid'; item: FeedbackItem; fresh?: FreshLookup }
+    | { state: 'stale' | 'defer' | 'unwatched' }
+  > {
+    if (checkWatch && !watchesApprovalItem(item)) return { state: 'unwatched' };
+    const fresh = await loadFreshApproval(item, shareBatch);
+    const { live, fetchedAt } = fresh;
+    if (!live || settledFeedback(item, { kind: 'found', requests: [live] })) {
+      if (live) await reviews.reconcileApproval(item.sessionID, live, fetchedAt).catch(() => {});
+      await inbox.prune((entry) => entry.id === item.id);
+      return { state: 'stale' };
+    }
+    if (!approvalsComplete(live)) return { state: 'defer' };
+    const matching = approversOf(live).filter((approver) => matchesApproval(item, approver));
+    if (checkWatch && !matching.some((approver) => watchesApprover(live.url, approver)))
+      return { state: 'unwatched' };
+    const details = approvalDetails(live);
+    return {
+      state: 'valid',
+      item: { ...item, ...(details.length ? { details } : { details: undefined }) },
+      ...(stashForNotify ? { fresh } : {}),
+    };
+  }
+
   const inbox = createFeedbackInbox({
     initiallyPaused: !settings.inbox && !settings.automation.rules.length,
-    select: (item) => automation.selectAutomatic(item),
+    select: async (item) => {
+      if (isApproval(item)) {
+        if (item.automation) return item.automation.state !== 'skipped';
+        if (!mayAutomateApproval(item)) return false;
+        const checked = await revalidateApproval(item, {
+          checkWatch: true,
+          shareBatch: true,
+          stashForNotify: true,
+        });
+        if (checked.state !== 'valid') return true;
+        const selected = await automation.selectAutomatic(checked.item);
+        if (
+          !selected &&
+          checked.fresh &&
+          item.notifiedAt === undefined &&
+          item.delivery &&
+          settings.delivery.reviews !== 'inbox'
+        ) {
+          recentSelectionFresh.set(item.id, checked.fresh);
+        }
+        return selected;
+      }
+      return automation.selectAutomatic(item);
+    },
     read: async () =>
       (await ctx.storage.get(`feedback-inbox/${encodeURIComponent(directory)}`)) as
         InboxState | undefined,
@@ -159,7 +295,20 @@ export async function setupStatus(
     ...(settings.delivery.reviews === 'inbox' && settings.delivery.lifecycle === 'inbox'
       ? {}
       : {
-          notify: async (item) => void (await summaries.deliver(item)),
+          notify: async (item) => {
+            if (isApproval(item)) {
+              const checked = await revalidateApproval(item, {
+                checkWatch: true,
+                shareBatch: true,
+              });
+              if (checked.state === 'stale' || checked.state === 'unwatched') return;
+              if (checked.state === 'defer')
+                throw new Error('Approval status is incomplete; will retry');
+              if (checked.state === 'valid') await summaries.deliver(checked.item);
+              return;
+            }
+            await summaries.deliver(item);
+          },
           enabled: (item) =>
             (isLifecycle(item) ? settings.delivery.lifecycle : settings.delivery.reviews) !==
             'inbox',
@@ -182,7 +331,19 @@ export async function setupStatus(
   // announced for the PR/MR is over: it no longer conflicts, its pipeline no
   // longer fails or another one replaced it, or it merged or closed. Without
   // a lookup of it, the update counts as current, and merges always do.
-  function settled(item: Pick<FeedbackItem, 'sessionID' | 'url' | 'kind' | 'pipeline'>): boolean {
+  function settled(
+    item: Pick<
+      FeedbackItem,
+      | 'sessionID'
+      | 'url'
+      | 'kind'
+      | 'pipeline'
+      | 'reviewers'
+      | 'approverID'
+      | 'approvalToken'
+      | 'approverKind'
+    >,
+  ): boolean {
     return settledFeedback(item, service.get(item.sessionID).lookup);
   }
 
@@ -213,15 +374,24 @@ export async function setupStatus(
     return includesRequest(targets, item.url);
   }
 
-  // Retries the updates that haven't reached their sessions.
+  // Retries the updates that haven't reached their sessions, sharing one fresh
+  // forge lookup per target across items handled in the same pass.
   const notifyPending = () =>
     tracked(
-      inbox
-        .notifyPending()
-        .then(() => {})
-        .catch((error) =>
-          reportOnce('notification', 'Could not post review updates to sessions', error),
-        ),
+      (async () => {
+        const ownsBatch = !freshBatch;
+        if (ownsBatch) freshBatch = new Map();
+        try {
+          await inbox.notifyPending();
+        } finally {
+          if (ownsBatch) {
+            freshBatch = undefined;
+            recentSelectionFresh.clear();
+          }
+        }
+      })().catch((error) =>
+        reportOnce('notification', 'Could not post review updates to sessions', error),
+      ),
     );
 
   // Clears the PR/MR's updates whose comments are all resolved. A comment the
@@ -324,6 +494,9 @@ export async function setupStatus(
     report: (error) =>
       reportOnce('review-automation', 'Could not coordinate review automation', error),
     warn: (message) => notice({ message, variant: 'error' }),
+    watchesApprover,
+    watchesApprovalItem,
+    markedReady: (ref) => statusCache.invalidate(requestKey(ref)),
     signal: automationController.signal,
   });
   const automation = createReviewAutomation(automationHost.host);
@@ -363,17 +536,30 @@ export async function setupStatus(
     });
   };
 
-  const record = async (item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) => {
+  const record = async (
+    item: FeedbackItem,
+    supersedes?: (entry: FeedbackItem) => boolean,
+    accept?: () => boolean,
+  ): Promise<boolean> => {
     const ref = parseUrl(item.url);
     if (
       ref &&
+      !item.humanApprovalOnly &&
       (item.kind
-        ? isJobFailure(item) && investigatesJobs(automationRules, ref)
+        ? (isJobFailure(item) && investigatesJobs(automationRules, ref)) ||
+          (isApproval(item) &&
+            item.approverKind !== 'human' &&
+            matchesApprovalRule(automationRules, ref, item.reviewers))
         : automationReviewers(automationRules, ref).length)
     )
       item = { ...item, automationAllowed: true };
-    const { delivery } = await inbox.record(item, supersedes);
+    const { recorded, delivery } = await inbox.record(
+      item,
+      supersedes,
+      accept ? () => accept() && !settled(item) : undefined,
+    );
     void tracked(delivery.catch((error) => deliveryFailed(item.sessionID, error)));
+    return recorded;
   };
 
   const readFeedback =
@@ -407,12 +593,87 @@ export async function setupStatus(
     },
   });
 
+  async function sessionTargets(sessionID: string, url: string) {
+    if (closing) throw new Error('The plugin stopped');
+    let session;
+    try {
+      session = await ctx.session.get({ sessionID });
+    } catch (error) {
+      if (missingSession(error)) return undefined;
+      throw error;
+    }
+    if (!session || session.time?.archived !== undefined) return undefined;
+    if (session.location.directory !== directory)
+      throw new Error('The session moved to another checkout');
+    if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
+    const targets = (await host.state(sessionID)).targets;
+    return includesRequest(targets, url) ? targets : undefined;
+  }
+
+  async function sessionOwnership(sessionIDs: readonly string[]) {
+    const here: string[] = [];
+    const deleted: string[] = [];
+    await Promise.all(
+      sessionIDs.map(async (sessionID) => {
+        try {
+          const session = await ctx.session.get({ sessionID });
+          if (!session) deleted.push(sessionID);
+          else if (session.location.directory === directory) here.push(sessionID);
+        } catch (error) {
+          if (missingSession(error)) deleted.push(sessionID);
+        }
+      }),
+    );
+    return { here, deleted };
+  }
+
+  const viewerIDs = new Map<string, Promise<string | undefined>>();
+  const viewerIDFor = (url: string) => {
+    const ref = parseUrl(url);
+    if (!ref) return Promise.resolve(undefined);
+    const key = `${ref.forge}:${ref.host}`;
+    const existing = viewerIDs.get(key);
+    if (existing) return existing;
+    const task = Promise.resolve()
+      .then(() =>
+        deps.viewerID
+          ? deps.viewerID(ref)
+          : traitsOf(ref).feedback?.viewerID?.(deps.exec, directory, ref.host),
+      )
+      .then((id) => {
+        if (!id) viewerIDs.delete(key);
+        return id;
+      })
+      .catch((error) => {
+        viewerIDs.delete(key);
+        throw error;
+      });
+    viewerIDs.set(key, task);
+    return task;
+  };
+
+  const pruneDeletedSessions = async (sessionIDs: readonly string[]) => {
+    if (!sessionIDs.length) return;
+    const deleted = new Set(sessionIDs);
+    await inbox.prune((item) => deleted.has(item.sessionID));
+  };
+
   const reviews = createReviewMonitoring(
     ctx.storage,
     settings,
     {
       current: currentReviews,
       isTarget,
+      targets: sessionTargets,
+      storedTargets: host.storedTargets,
+      sessionOwnership,
+      onSessionsDeleted: pruneDeletedSessions,
+      receipts: inbox.receipts,
+      releaseReceipts: inbox.releaseReceipts,
+      retainReceipts: inbox.retainReceipts,
+      fresh: freshRequest,
+      closing: () => closing,
+      viewerID: viewerIDFor,
       fetch: async (request) => {
         if (closing) return undefined;
         const ref = parseUrl(request.url);
@@ -436,36 +697,36 @@ export async function setupStatus(
       notice,
       error: (error) =>
         reportOnce('feedback-fetch', 'Could not check PR/MR review feedback', error),
+      approvalError: (error) => reportOnce('approvals', 'Could not record review approvals', error),
     },
     deps.now,
   );
+  const retryApprovals = () =>
+    reviews.approvals ? tracked(reviews.approvals.retry()) : Promise.resolve();
 
   const lifecycle = createLifecycleNotifications(ctx, settings, deps, {
-    async targets(sessionID, url) {
-      if (closing) throw new Error('The plugin stopped');
-      let session;
-      try {
-        session = await ctx.session.get({ sessionID });
-      } catch (error) {
-        if (missingSession(error)) return undefined;
-        throw error;
-      }
-      if (!session || session.time?.archived !== undefined) return undefined;
-      if (session.location.directory !== directory)
-        throw new Error('The session moved to another checkout');
-      if ((await inbox.list()).paused) throw new Error('Feedback monitoring is paused');
-      const targets = (await host.state(sessionID)).targets;
-      return includesRequest(targets, url) ? targets : undefined;
-    },
+    targets: sessionTargets,
     storedTargets: host.storedTargets,
     closing: () => closing,
     scan: scanAll,
-    record,
+    record: async (item, supersedes) => {
+      await record(item, supersedes);
+    },
     notice,
     error: (error) => reportOnce('lifecycle', 'Could not record merge request changes', error),
   });
   const retryLifecycle = () =>
     lifecycle.watcher ? tracked(lifecycle.watcher.retry()) : Promise.resolve();
+  const retryEvents = () =>
+    tracked(
+      inbox
+        .list()
+        .then((state) => {
+          if (closing || state.paused) return;
+          return Promise.all([retryLifecycle(), retryApprovals()]).then(() => {});
+        })
+        .catch(() => {}),
+    );
 
   const service = createStatusService({
     async load(key, previous) {
@@ -501,6 +762,7 @@ export async function setupStatus(
     human: reviews.feedback,
     feedbackTargets: (sessionID, requests) => subscriptions.update(sessionID, requests),
     ...(lifecycle.watcher ? { lifecycle: lifecycle.watcher } : {}),
+    ...(reviews.approvals ? { approvals: reviews.approvals } : {}),
     onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
@@ -561,7 +823,7 @@ export async function setupStatus(
       await notifyPending();
       // Events found before a reload or a failure, such as a merge, which
       // ends polling, still go.
-      if (!state.paused) await retryLifecycle();
+      if (!state.paused) await Promise.all([retryLifecycle(), retryApprovals()]);
       return discovery.refresh();
     })
     .catch((error) => reportOnce('discovery', 'Could not restore feedback monitoring', error));
@@ -599,26 +861,57 @@ export async function setupStatus(
     if (closing) return;
     if (!restored) void tracked(restoreAutomation());
     void notifyPending();
-    void retryLifecycle();
+    void retryEvents();
   }, FETCH_INTERVAL);
   // Housekeeping, on the write queue so it doesn't hold up setup: removes
-  // feedback records not seen for a long time.
+  // feedback records not seen for a long time and inbox items for confirmed
+  // deleted sessions.
   write(async () => {
     await reviews.prune();
     await summaries.prune();
     await lifecycle.prune();
+    const state = await inbox.list();
+    if (state.items.length) {
+      const { deleted } = await sessionOwnership([
+        ...new Set(state.items.map((item) => item.sessionID)),
+      ]);
+      if (deleted.length) await pruneDeletedSessions(deleted);
+    }
+  });
+
+  const canActItem = (item: FeedbackItem): boolean => {
+    if (item.humanApprovalOnly) return false;
+    if (isApproval(item)) {
+      if (item.approverKind === 'human') return false;
+      if (!watchesApprovalItem(item)) return false;
+      const ref = parseUrl(item.url);
+      return !!ref && matchesApprovalRule(automationRules, ref, item.reviewers);
+    }
+    if (item.kind && !isJobFailure(item)) return false;
+    return true;
+  };
+  const decorateInbox = (state: InboxState): InboxState => ({
+    ...state,
+    items: state.items.map((item) => ({ ...item, canAct: canActItem(item) })),
   });
 
   return {
     service,
     inbox,
+    decorateInbox,
+    feedbackState: async () => decorateInbox(await inbox.list()),
     discovery,
+    retryPending: () => {
+      statusCache.clear();
+      void notifyPending();
+      void retryEvents();
+    },
     // Acts on an update on request, or retries one that already ran.
     async act(id: string, retry = false): Promise<InboxState> {
       const item = (await inbox.list()).items.find((item) => item.id === id);
       if (!item) throw new Error('The update is no longer in the feedback inbox');
       await automation.act(item, retry);
-      return inbox.list();
+      return decorateInbox(await inbox.list());
     },
     // Adds the task instructions to a preparation turn's model requests, and
     // returns whether the request is one. It's checked before summaries, so
@@ -649,18 +942,47 @@ export async function setupStatus(
           throw error;
         }
       } else {
-        const refusal = modelRefusal(record.models, model, 'inspect');
-        if (refusal) throw new Error(refusal);
+        await automationHost.authorizeContinuation(record, model);
       }
       event.system.push({ type: 'text', text: automationHost.instructions(started) });
-      if (started.execution && event.tools) {
-        delete event.tools.question;
-        delete event.tools.set_session_target;
+      if (isApproval(started.item)) {
+        if (event.tools) {
+          for (const name of Object.keys(event.tools)) {
+            if (!APPROVAL_TOOLS.has(name)) delete event.tools[name];
+          }
+        }
+      } else {
+        if (event.tools) {
+          for (const name of APPROVAL_TOOLS) delete event.tools[name];
+        }
+        if (started.execution && event.tools) {
+          delete event.tools.question;
+          delete event.tools.set_session_target;
+        }
       }
       // The linked session's turn can't go on without its task.
       await automationHost.substitutePrompt(event, started);
       return true;
     },
+    async approvalTurn(sessionID: string): Promise<boolean> {
+      try {
+        const record = await automationHost.preparationFor(sessionID);
+        return !!record && isApproval(record.item);
+      } catch {
+        try {
+          const active = (await automationHost.restorable()).some(
+            (record) => record.item.sessionID === sessionID && isApproval(record.item),
+          );
+          return active;
+        } catch {
+          return true;
+        }
+      }
+    },
+    approvalStatus: (sessionID: string, signal?: AbortSignal): Promise<string> =>
+      tracked(automationHost.approvalStatus(sessionID, signal)),
+    markApprovalReady: (invocation: MarkReadyInvocation): Promise<string> =>
+      tracked(automationHost.markApprovalReady(invocation)),
     // Keeps a linked session's task in its compaction, so the summary, and
     // the requests after it, still have the findings to act on.
     async prepareCompaction(event: { sessionID: string; messages: unknown[] }) {
@@ -679,9 +1001,18 @@ export async function setupStatus(
           const item = state.items.find((entry) => entry.id === id);
           if (!item) throw new Error('The update is no longer in the feedback inbox');
           if (state.paused) throw new Error('Feedback monitoring is paused');
-          if (!(await summaries.deliver(item, true)))
+          let current = item;
+          if (isApproval(item)) {
+            const checked = await revalidateApproval(item, { checkWatch: false });
+            if (checked.state === 'stale')
+              throw new Error('This reviewer approval is no longer current');
+            if (checked.state === 'defer')
+              throw new Error('Current approval status is incomplete; try again later');
+            if (checked.state === 'valid') current = checked.item;
+          }
+          if (!(await summaries.deliver(current, true)))
             throw new Error("The update's session no longer targets this PR/MR here");
-          return inbox.list();
+          return decorateInbox(await inbox.list());
         })(),
       ),
     // Whether the session's current step is Forgekeeper's, whose tools and
@@ -764,6 +1095,19 @@ export async function setupStatus(
         sessionID,
         classified.some((target) => target.kind === 'merge-request'),
       );
+      // Retire dropped targets and invalidate cached status BEFORE triggering a
+      // fresh lookup so re-added targets always baseline from live forge state.
+      void tracked(
+        reviews
+          .retireApprovals(sessionID, (url) => includesRequest(targets, url))
+          .catch((error) =>
+            reportOnce('approvals', 'Could not clear stale approval watches', error),
+          ),
+      );
+      for (const target of targets) {
+        const ref = parseUrl(target.url);
+        if (ref) statusCache.invalidate(requestKey(ref));
+      }
       service.invalidate(sessionID);
       // Updates for dropped targets go now, even for a session that nothing
       // polls, whose lookups would never report the change.
@@ -771,6 +1115,17 @@ export async function setupStatus(
         .prune((item) => item.sessionID === sessionID && !includesRequest(targets, item.url))
         .catch((error) => reportOnce('inbox', 'Could not clear stale review updates', error));
       void discovery.refresh(sessionID);
+    },
+    // Confirmed session deletion retires approval watches and prunes inbox items.
+    sessionDeleted(sessionID: string) {
+      service.invalidate(sessionID);
+      reviews.forget(sessionID);
+      void tracked(
+        Promise.all([
+          reviews.retireApprovals(sessionID),
+          inbox.prune((item) => item.sessionID === sessionID),
+        ]).catch(() => {}),
+      );
     },
     // A title reference only counts without targets.
     async titleChanged(sessionID: string) {

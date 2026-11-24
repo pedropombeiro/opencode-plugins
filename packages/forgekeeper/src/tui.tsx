@@ -25,9 +25,11 @@ import { ForgeSessionRpc, HOME, type EventData } from './rpc';
 import { samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
 import {
+  canActOnFeedback,
   feedbackFooter,
   feedbackTime,
   linkOptions,
+  listAllowsAct,
   sessionItems,
   type InboxState,
 } from './feedback-inbox';
@@ -508,6 +510,48 @@ export default {
       const directory = place.directory;
       const state = await loadFeedback(directory);
       const items = sessionItems(state, place.key || undefined);
+      const triggerAct = async (id: string, retry = false) => {
+        if (retry) {
+          const confirmed = await context.ui.dialog.select({
+            title: 'Retry may repeat earlier changes. Inspect the session first.',
+            options: [
+              { title: 'Cancel', value: 'cancel' },
+              { title: 'Retry feedback work', value: 'retry' },
+            ],
+          });
+          if (confirmed !== 'retry') return;
+        }
+        try {
+          await rpc.actOnFeedback(
+            { id, ...(retry ? { retry: true } : {}) },
+            { location: { directory } },
+          );
+          context.ui.dialog.clear();
+          void showFeedback();
+        } catch (error) {
+          context.ui.toast.show({ message: String(error), variant: 'error' });
+        }
+      };
+      const triggerSummarize = async (id: string) => {
+        context.ui.dialog.clear();
+        try {
+          await rpc.summarizeFeedback({ id }, { location: { directory } });
+          context.ui.toast.show({
+            message: 'Summarizing the update in its session, without tools.',
+            variant: 'info',
+          });
+        } catch (error) {
+          context.ui.toast.show({
+            message: `Could not summarize: ${error instanceof Error ? error.message : String(error)}`,
+            variant: 'error',
+          });
+        }
+      };
+      const triggerAcknowledge = async (id: string) => {
+        await rpc.acknowledgeFeedback({ id }, { location: { directory } });
+        context.ui.dialog.clear();
+        void showFeedback();
+      };
       const selected = await context.ui.dialog.select({
         title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
         options: items.map((item) => ({
@@ -530,67 +574,29 @@ export default {
           value: item.id,
         })),
         actions: [
-          {
-            bind: 'ctrl+a',
-            title: 'Act on feedback',
-            onTrigger: async (id) => {
-              try {
-                await rpc.actOnFeedback({ id }, { location: { directory } });
-                context.ui.dialog.clear();
-                void showFeedback();
-              } catch (error) {
-                context.ui.toast.show({ message: String(error), variant: 'error' });
-              }
-            },
-          },
-          {
-            bind: 'ctrl+t',
-            title: 'Retry feedback work',
-            onTrigger: async (id) => {
-              const confirmed = await context.ui.dialog.select({
-                title: 'Retry may repeat earlier changes. Inspect the session first.',
-                options: [
-                  { title: 'Cancel', value: 'cancel' },
-                  { title: 'Retry feedback work', value: 'retry' },
-                ],
-              });
-              if (confirmed !== 'retry') return;
-              try {
-                await rpc.actOnFeedback({ id, retry: true }, { location: { directory } });
-                context.ui.dialog.clear();
-                void showFeedback();
-              } catch (error) {
-                context.ui.toast.show({ message: String(error), variant: 'error' });
-              }
-            },
-          },
+          ...(listAllowsAct(items)
+            ? [
+                {
+                  bind: 'ctrl+a',
+                  title: 'Act on feedback',
+                  onTrigger: (id: string) => void triggerAct(id, false),
+                },
+                {
+                  bind: 'ctrl+t',
+                  title: 'Retry feedback work',
+                  onTrigger: (id: string) => void triggerAct(id, true),
+                },
+              ]
+            : []),
           {
             bind: 'ctrl+d',
             title: 'Acknowledge',
-            onTrigger: async (id) => {
-              await rpc.acknowledgeFeedback({ id }, { location: { directory } });
-              context.ui.dialog.clear();
-              void showFeedback();
-            },
+            onTrigger: (id) => void triggerAcknowledge(id),
           },
           {
             bind: 'ctrl+r',
             title: 'Summarize in session',
-            onTrigger: async (id) => {
-              context.ui.dialog.clear();
-              try {
-                await rpc.summarizeFeedback({ id }, { location: { directory } });
-                context.ui.toast.show({
-                  message: 'Summarizing the update in its session, without tools.',
-                  variant: 'info',
-                });
-              } catch (error) {
-                context.ui.toast.show({
-                  message: `Could not summarize: ${error instanceof Error ? error.message : String(error)}`,
-                  variant: 'error',
-                });
-              }
-            },
+            onTrigger: (id) => void triggerSummarize(id),
           },
           {
             bind: 'ctrl+u',
@@ -622,6 +628,36 @@ export default {
       const link = await context.ui.dialog.select({
         title: item.title,
         options: linkOptions(item),
+        actions: [
+          ...(canActOnFeedback(item)
+            ? [
+                {
+                  bind: 'ctrl+a',
+                  title: 'Act on feedback',
+                  selection: 'none' as const,
+                  onTrigger: () => void triggerAct(item.id, false),
+                },
+                {
+                  bind: 'ctrl+t',
+                  title: 'Retry feedback work',
+                  selection: 'none' as const,
+                  onTrigger: () => void triggerAct(item.id, true),
+                },
+              ]
+            : []),
+          {
+            bind: 'ctrl+r',
+            title: 'Summarize in session',
+            selection: 'none',
+            onTrigger: () => void triggerSummarize(item.id),
+          },
+          {
+            bind: 'ctrl+d',
+            title: 'Acknowledge',
+            selection: 'none',
+            onTrigger: () => void triggerAcknowledge(item.id),
+          },
+        ],
       });
       if (link) openUrl(link);
     }

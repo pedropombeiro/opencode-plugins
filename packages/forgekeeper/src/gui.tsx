@@ -26,6 +26,7 @@ import {
   type ForgeRpcClient,
 } from './client-core';
 import {
+  canActOnFeedback,
   feedbackFooter,
   feedbackTime,
   linkOptions,
@@ -406,23 +407,25 @@ export default Plugin.define({
             <ui.Button size="small" onClick={() => void run('summarizeFeedback')}>
               Summarize in session
             </ui.Button>
-            <ui.Button size="small" onClick={() => void run('actOnFeedback')}>
-              Act on feedback
-            </ui.Button>
-            <ui.Button
-              size="small"
-              onClick={async () => {
-                const confirmed = await ctx.dialogs.confirm({
-                  title: 'Retry feedback work?',
-                  description: 'Retry may repeat earlier changes. Inspect the session first.',
-                  confirm: 'Retry',
-                  danger: true,
-                });
-                if (confirmed) await run('actOnFeedback', { retry: true });
-              }}
-            >
-              Retry
-            </ui.Button>
+            <Show when={canActOnFeedback(item())}>
+              <ui.Button size="small" onClick={() => void run('actOnFeedback')}>
+                Act on feedback
+              </ui.Button>
+              <ui.Button
+                size="small"
+                onClick={async () => {
+                  const confirmed = await ctx.dialogs.confirm({
+                    title: 'Retry feedback work?',
+                    description: 'Retry may repeat earlier changes. Inspect the session first.',
+                    confirm: 'Retry',
+                    danger: true,
+                  });
+                  if (confirmed) await run('actOnFeedback', { retry: true });
+                }}
+              >
+                Retry
+              </ui.Button>
+            </Show>
             <ui.Button size="small" onClick={() => void run('acknowledgeFeedback')}>
               Acknowledge
             </ui.Button>

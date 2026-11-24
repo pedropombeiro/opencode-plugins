@@ -121,7 +121,7 @@ describe('toIssueComment', () => {
 });
 
 describe('toReview', () => {
-  test.each(['COMMENTED', 'CHANGES_REQUESTED', 'APPROVED'])('counts a %s summary', (state) => {
+  test.each(['COMMENTED', 'CHANGES_REQUESTED'])('counts a %s summary', (state) => {
     expect(toReview(review('R_1', { state }))).toMatchObject({
       id: 'R_1',
       order: Date.parse('2026-10-09T10:02:00Z'),
@@ -130,7 +130,7 @@ describe('toReview', () => {
     });
   });
 
-  test.each(['PENDING', 'DISMISSED'])('skips a %s review', (state) => {
+  test.each(['PENDING', 'DISMISSED', 'APPROVED'])('skips a %s review', (state) => {
     expect(toReview(review('R_1', { state }))).toBeUndefined();
   });
 
@@ -597,5 +597,121 @@ describe('fetchDetails', () => {
     expect(hunk).toHaveLength(21);
     expect(hunk.at(-1)).toBe(' line 29');
     expect(details[0].code?.path).toBe('src/a.ts');
+  });
+
+  test('normalizes GraphQL Bot logins to canonical [bot] usernames while leaving human Users unchanged', async () => {
+    const botComment = toIssueComment(
+      issueComment('IC_BOT', { author: { __typename: 'Bot', login: 'sec', id: 'B_SEC' } }),
+    );
+    const humanComment = toIssueComment(
+      issueComment('IC_HUMAN', { author: { __typename: 'User', login: 'sec', id: 'U_SEC' } }),
+    );
+    expect(botComment).toMatchObject({ bot: true, username: 'sec[bot]' });
+    expect(humanComment).toMatchObject({ bot: false, username: 'sec' });
+
+    const details = await fetchDetails(
+      async () => ({
+        nodes: [
+          {
+            __typename: 'IssueComment',
+            id: 'IC_BOT',
+            url: 'https://github.com/o/r/pull/1#issuecomment-1',
+            body: 'Security note',
+            author: { __typename: 'Bot', id: 'B_SEC', login: 'sec' },
+          },
+        ],
+      }),
+      'github.com',
+      ['IC_BOT'],
+    );
+    expect(details[0]?.username).toBe('sec[bot]');
+  });
+
+  test('skips APPROVED PullRequestReview nodes on live detail re-read', async () => {
+    const transport: GraphQL = async () => ({
+      nodes: [
+        {
+          __typename: 'PullRequestReview',
+          id: 'PRR_APPROVED',
+          url: 'https://github.com/o/r/pull/1#pullrequestreview-1',
+          state: 'APPROVED',
+          body: 'LGTM',
+          author: { id: 'U_ALICE', login: 'alice' },
+        },
+        {
+          __typename: 'PullRequestReview',
+          id: 'PRR_CHANGES',
+          url: 'https://github.com/o/r/pull/1#pullrequestreview-2',
+          state: 'CHANGES_REQUESTED',
+          body: 'Fix this',
+          author: { id: 'U_ALICE', login: 'alice' },
+        },
+      ],
+    });
+    const details = await fetchDetails(transport, 'github.com', ['PRR_APPROVED', 'PRR_CHANGES']);
+    expect(details.map((entry) => entry.id)).toEqual(['PRR_CHANGES']);
+  });
+
+  test('carries parent reviewState and bot flag on PullRequestReviewComment discovery and details', async () => {
+    const approvedInline = toInlineComment(
+      inline('RC_APPROVED', {
+        author: { __typename: 'User', login: 'alice', id: 'U_ALICE' },
+        pullRequestReview: { state: 'APPROVED' },
+      }),
+      false,
+    );
+    const commentedInline = toInlineComment(
+      inline('RC_COMMENTED', {
+        author: { __typename: 'User', login: 'alice', id: 'U_ALICE' },
+        pullRequestReview: { state: 'COMMENTED' },
+      }),
+      false,
+    );
+    expect(approvedInline).toMatchObject({
+      id: 'RC_APPROVED',
+      bot: false,
+      reviewState: 'APPROVED',
+    });
+    expect(commentedInline).toMatchObject({
+      id: 'RC_COMMENTED',
+      bot: false,
+      reviewState: 'COMMENTED',
+    });
+
+    const details = await fetchDetails(
+      async () => ({
+        nodes: [
+          {
+            __typename: 'PullRequestReviewComment',
+            id: 'RC_APPROVED',
+            url: 'https://github.com/o/r/pull/1#discussion_r1',
+            body: 'LGTM, minor nit',
+            pullRequestReview: { state: 'APPROVED' },
+            author: { __typename: 'User', id: 'U_ALICE', login: 'alice' },
+          },
+          {
+            __typename: 'PullRequestReviewComment',
+            id: 'RC_BOT',
+            url: 'https://github.com/o/r/pull/1#discussion_r2',
+            body: 'Bot note',
+            pullRequestReview: { state: 'APPROVED' },
+            author: { __typename: 'Bot', id: 'B_SEC', login: 'sec' },
+          },
+        ],
+      }),
+      'github.com',
+      ['RC_APPROVED', 'RC_BOT'],
+    );
+    expect(details[0]).toMatchObject({
+      id: 'RC_APPROVED',
+      reviewState: 'APPROVED',
+    });
+    expect(details[0]?.bot).toBeUndefined();
+    expect(details[1]).toMatchObject({
+      id: 'RC_BOT',
+      username: 'sec[bot]',
+      bot: true,
+      reviewState: 'APPROVED',
+    });
   });
 });

@@ -22,6 +22,7 @@ const pull = (number = 1) => ({
     nodes: [{ requestedReviewer: { login: 'human' } }],
     pageInfo: { hasNextPage: false },
   },
+  latestOpinionatedReviews: { nodes: [], pageInfo: { hasNextPage: false } },
   commits: {
     nodes: [
       {
@@ -449,6 +450,241 @@ test('deduplicates old failures after reading later check pages', async () => {
   });
 });
 
+test('normalizes active GitHub approvers and excludes pending re-reviews', async () => {
+  const pr = await byNumber(async () => ({
+    repository: {
+      pullRequest: {
+        ...pull(),
+        reviewRequests: {
+          nodes: [
+            { requestedReviewer: { __typename: 'User', id: 'U_BOB', login: 'bob' } },
+            { requestedReviewer: { __typename: 'Bot', id: 'B_PENDING', login: 'pending-bot' } },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+        latestReviews: {
+          nodes: [
+            {
+              id: 'R_ALICE_COMMENT',
+              state: 'COMMENTED',
+              author: { __typename: 'User', id: 'U_ALICE', login: 'alice' },
+            },
+            {
+              id: 'R_MANNEQUIN',
+              state: 'COMMENTED',
+              author: { __typename: 'Mannequin', id: 'M_1', login: 'ghost' },
+            },
+          ],
+        },
+        latestOpinionatedReviews: {
+          nodes: [
+            {
+              id: 'R_ALICE',
+              state: 'APPROVED',
+              author: { __typename: 'User', id: 'U_ALICE', login: 'alice' },
+            },
+            {
+              id: 'R_BOB',
+              state: 'APPROVED',
+              author: { __typename: 'User', id: 'U_BOB', login: 'bob' },
+            },
+            {
+              id: 'R_CAROL',
+              state: 'CHANGES_REQUESTED',
+              author: { __typename: 'User', id: 'U_CAROL', login: 'carol' },
+            },
+            {
+              id: 'R_SEC',
+              state: 'APPROVED',
+              author: { __typename: 'Bot', id: 'B_SEC', login: 'sec' },
+            },
+            {
+              id: 'R_PENDING',
+              state: 'APPROVED',
+              author: { __typename: 'Bot', id: 'B_PENDING', login: 'pending-bot' },
+            },
+            {
+              id: 'R_1',
+              state: 'APPROVED',
+              author: {
+                __typename: 'Bot',
+                id: 'B_COPILOT',
+                login: 'copilot-pull-request-reviewer',
+              },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+        copilotReviews: {
+          nodes: [
+            {
+              id: 'R_1',
+              state: 'APPROVED',
+              comments: { totalCount: 0 },
+              author: {
+                __typename: 'Bot',
+                id: 'B_COPILOT',
+                login: 'copilot-pull-request-reviewer',
+              },
+            },
+          ],
+        },
+      },
+    },
+  }));
+  expect(pr?.approvers).toEqual([
+    { id: 'U_ALICE', username: 'alice', reviewID: 'R_ALICE' },
+    { id: 'B_SEC', username: 'sec[bot]', bot: true, reviewID: 'R_SEC' },
+    {
+      id: 'B_COPILOT',
+      username: 'copilot-pull-request-reviewer[bot]',
+      bot: true,
+      automated: true,
+      reviewID: 'R_1',
+    },
+  ]);
+  expect(pr?.reviewerIDs).toEqual(['U_BOB', 'U_ALICE', 'U_CAROL']);
+  expect(pr?.approvalsComplete).toBe(true);
+});
+
+test('never classifies a human User as Copilot or Bot and matches pending requests by ID first', async () => {
+  const pr = await byNumber(async () => ({
+    repository: {
+      pullRequest: {
+        ...pull(),
+        reviewRequests: {
+          nodes: [{ requestedReviewer: { __typename: 'User', id: 'U_SEC', login: 'sec' } }],
+          pageInfo: { hasNextPage: false },
+        },
+        latestOpinionatedReviews: {
+          nodes: [
+            {
+              id: 'R_HUMAN_COPILOT',
+              state: 'APPROVED',
+              author: {
+                __typename: 'User',
+                id: 'U_COPILOT',
+                login: 'copilot-pull-request-reviewer',
+              },
+            },
+            {
+              id: 'R_BOT_SEC',
+              state: 'APPROVED',
+              author: { __typename: 'Bot', id: 'B_SEC', login: 'sec' },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+        copilotReviews: {
+          nodes: [
+            {
+              id: 'R_HUMAN_COPILOT',
+              state: 'APPROVED',
+              comments: { totalCount: 0 },
+              author: {
+                __typename: 'User',
+                id: 'U_COPILOT',
+                login: 'copilot-pull-request-reviewer',
+              },
+            },
+          ],
+        },
+      },
+    },
+  }));
+  // Human User keeps bare login and has neither bot nor automated flags.
+  // Bot `sec[bot]` is NOT suppressed by pending human User `sec` with distinct ID.
+  expect(pr?.approvers).toEqual([
+    { id: 'U_COPILOT', username: 'copilot-pull-request-reviewer', reviewID: 'R_HUMAN_COPILOT' },
+    { id: 'B_SEC', username: 'sec[bot]', bot: true, reviewID: 'R_BOT_SEC' },
+  ]);
+});
+
+test('paginates latestOpinionatedReviews and marks truncated pages incomplete', async () => {
+  const pr = await byNumber(async (_host, query, variables) => {
+    if (query.includes('latestOpinionatedReviews(first:100,after:$after)')) {
+      expect(variables.after).toBe('rev-1');
+      return {
+        repository: {
+          pullRequest: {
+            latestOpinionatedReviews: {
+              nodes: [
+                {
+                  id: 'R_BOB',
+                  state: 'APPROVED',
+                  author: { __typename: 'User', id: 'U_BOB', login: 'bob' },
+                },
+              ],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        },
+      };
+    }
+    return {
+      repository: {
+        pullRequest: {
+          ...pull(),
+          latestOpinionatedReviews: {
+            nodes: [
+              {
+                id: 'R_ALICE',
+                state: 'APPROVED',
+                author: { __typename: 'User', id: 'U_ALICE', login: 'alice' },
+              },
+            ],
+            pageInfo: { hasNextPage: true, endCursor: 'rev-1' },
+          },
+        },
+      },
+    };
+  });
+  expect(pr?.approvalsComplete).toBe(true);
+  expect(pr?.approvers?.map((entry) => entry.username)).toEqual(['alice', 'bob']);
+
+  const truncated = await byNumber(async () => ({
+    repository: {
+      pullRequest: {
+        ...pull(),
+        latestOpinionatedReviews: {
+          nodes: [],
+          pageInfo: { hasNextPage: true },
+        },
+      },
+    },
+  }));
+  expect(truncated?.approvalsComplete).toBe(false);
+
+  // Null first connection is never treated as a complete empty list.
+  const missing = await byNumber(async () => ({
+    repository: {
+      pullRequest: {
+        ...pull(),
+        latestOpinionatedReviews: null,
+      },
+    },
+  }));
+  expect(missing?.approvalsComplete).toBe(false);
+});
+
+test('markReady runs markPullRequestReadyForReview for a draft GitHub PR', async () => {
+  const queries: string[] = [];
+  const forge = new GitHubForge(async (_host, query) => {
+    queries.push(query);
+    if (query.includes('markPullRequestReadyForReview')) {
+      return {
+        markPullRequestReadyForReview: { pullRequest: { id: 'PR_1', isDraft: false } },
+      };
+    }
+    return {
+      repository: { pullRequest: { id: 'PR_1', isDraft: true, state: 'OPEN' } },
+    };
+  });
+  await forge.markReady({ forge: 'github', host: 'github.com', project: 'o/r', iid: '7' });
+  expect(queries).toHaveLength(2);
+  expect(queries[1]).toContain('markPullRequestReadyForReview');
+});
+
 test('check rollup distinguishes passed, skipped, and neutral checks', () => {
   const passed = [
     { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
@@ -739,4 +975,34 @@ test("lists requested reviewers' and past reviewers' account IDs once each", asy
     },
   }));
   expect(pr?.reviewerIDs).toEqual(['U_1', 'U_2']);
+});
+
+test('markReady runs beforeMutate after lookup and aborts before sending the mutation', async () => {
+  let releaseLookup!: () => void;
+  let lookupStarted!: () => void;
+  const started = new Promise<void>((resolve) => (lookupStarted = resolve));
+  const mutations: string[] = [];
+  const transport: GraphQL = async (_host, queryText) => {
+    if (queryText.includes('markPullRequestReadyForReview')) {
+      mutations.push(queryText);
+      return { markPullRequestReadyForReview: { pullRequest: { id: 'PR_1', isDraft: false } } };
+    }
+    lookupStarted();
+    await new Promise<void>((resolve) => (releaseLookup = resolve));
+    return { repository: { pullRequest: { id: 'PR_1', isDraft: true, state: 'OPEN' } } };
+  };
+  let cancelled = false;
+  const pending = new GitHubForge(transport).markReady(
+    { forge: 'github', host: 'github.com', project: 'owner/repo', iid: '1' },
+    {
+      beforeMutate: () => {
+        if (cancelled) throw new Error('Approval follow-up was cancelled.');
+      },
+    },
+  );
+  await started;
+  cancelled = true;
+  releaseLookup();
+  await expect(pending).rejects.toThrow('cancelled');
+  expect(mutations).toEqual([]);
 });

@@ -2,12 +2,16 @@
 // which findings are verified, whether the checkout matches, and how a
 // coding turn ended.
 import type { Plugin } from '@opencode/plugin';
-import type { FeedbackItem, InboxState } from './feedback-inbox';
+import { matchesApproval } from './approval-watch';
+import { isApproval, type FeedbackItem, type InboxState } from './feedback-inbox';
 import {
+  approvalsComplete,
+  approversOf,
   pipelineFails,
   pipelineRunning,
   unlistedFailure,
   type FeedbackSnapshot,
+  type ReviewerApproval,
   type ReviewRef,
   type ReviewRequest,
 } from './forge';
@@ -25,11 +29,13 @@ import {
   allowedModelsFor,
   automationReviewers,
   Ineligible,
+  matchesApprovalRule,
   modelKey,
   modelRefusal,
   RECHECK_INTERVAL,
   restrictedReviewers,
   environmentExecution,
+  type ApprovalContext,
   type ReviewFinding,
   type AutomationHost,
   type AutomationRecord,
@@ -38,10 +44,21 @@ import {
   type PipelineFailures,
   type Placement,
   type Validation,
+  type VerifiedApproval,
   type LinkedRecord,
 } from './review-automation';
 import { createReviewClaims, type ExecutionClaim } from './review-claim';
-import { findingsDigest, PREPARATION_INSTRUCTIONS, preparationBatch } from './review-preparation';
+import {
+  APPROVAL_INSTRUCTIONS,
+  APPROVAL_STATUS_TOOL,
+  approvalDigest,
+  approvalStatusData,
+  findingsDigest,
+  MARK_READY_TOOL,
+  PREPARATION_INSTRUCTIONS,
+  preparationBatch,
+  readinessDigest,
+} from './review-preparation';
 import { isForgekeeperInput, turnInput } from './review-summary';
 import {
   freshPresence,
@@ -83,6 +100,11 @@ interface AutomationEnvironment {
   report: (error: unknown) => void;
   // Shows a configuration problem, such as a rule author that can't be resolved.
   warn?: (message: string) => void;
+  // Current watch policy for reviewer approvals, enforced on automatic, manual, retry, and execution paths.
+  watchesApprover?: (url: string, approver: ReviewerApproval) => boolean;
+  watchesApprovalItem?: (item: FeedbackItem) => boolean;
+  // Called after an approval turn marks a PR/MR ready so status caches invalidate.
+  markedReady?: (ref: ReviewRef) => void;
   // Aborts when the plugin stops, which ends waits and sleeps.
   signal: AbortSignal;
   // Replaces the timer-based sleep, for tests.
@@ -140,15 +162,28 @@ export function pushNotice(sourceBranch: string, remote: string | undefined) {
   ].join('\n\n');
 }
 
-// The stored attempt whose prompt started the session's current turn. When a
-// compaction removed that prompt, an attempt counts only if it started after
-// the session was last idle: a later turn, such as an unrelated task, can't
-// take on the instructions of an attempt that already ended.
-export async function storedPreparation(
+export interface MarkReadyInvocation {
+  sessionID: string;
+  agent?: string;
+  messageID?: string;
+  callID?: string;
+  signal?: AbortSignal;
+}
+
+interface ResolvedPreparation {
+  record: AutomationRecord;
+  compacted: boolean;
+  messages: Awaited<ReturnType<Context['session']['context']>>;
+  promptIndex: number;
+}
+
+const boundAtOf = (record: AutomationRecord) => record.submittedAt ?? record.startedAt;
+
+async function resolvePreparation(
   ctx: Context,
   claims: ReturnType<typeof createReviewClaims>,
   sessionID: string,
-): Promise<AutomationRecord | undefined> {
+): Promise<ResolvedPreparation | undefined> {
   const messages = await ctx.session.context({ sessionID });
   const input = turnInput(messages);
   const batch = input && preparationBatch(input.id);
@@ -156,24 +191,41 @@ export async function storedPreparation(
     const record = await claims.records.read(batch);
     if (!record || record.messageID !== input.id || runnerOf(record) !== sessionID)
       throw new Error('Review automation execution instructions are unavailable');
-    return record;
+    const promptIndex = messages.findLastIndex((message) => message.id === input.id);
+    return { record, compacted: false, messages, promptIndex };
   }
   if (input || !messages.some((message) => message.type === 'compaction')) return undefined;
-  const started = (await claims.records.list()).filter(
-    (record) =>
-      runnerOf(record) === sessionID &&
-      record.startedAt !== undefined &&
-      (record.state === 'running' || record.state === 'failed') &&
-      messages.some(
-        (message) => message.type === 'compaction' && message.time.created >= record.startedAt!,
-      ),
-  );
-  if (!started.length) return undefined;
+  const active = (await claims.records.list()).filter((record) => {
+    if (runnerOf(record) !== sessionID) return false;
+    if (record.ended) return false;
+    const boundAt = boundAtOf(record);
+    if (boundAt === undefined) return false;
+    const eligibleState =
+      record.state === 'running' || (record.state === 'failed' && record.startedAt !== undefined);
+    if (!eligibleState) return false;
+    return messages.some(
+      (message) => message.type === 'compaction' && message.time.created >= boundAt,
+    );
+  });
+  if (!active.length) return undefined;
   const idle = (await ctx.session.get({ sessionID })).time.idle;
-  const candidates = started.filter((record) => idle === undefined || idle < record.startedAt!);
+  const candidates = active.filter((record) => idle === undefined || idle < boundAtOf(record)!);
   if (candidates.length > 1)
     throw new Error('Review preparation ownership is uncertain after compaction');
-  return candidates[0];
+  const record = candidates[0];
+  return record ? { record, compacted: true, messages, promptIndex: -1 } : undefined;
+}
+
+// The stored attempt whose prompt started the session's current turn. When a
+// compaction removed that prompt (including before the first model request),
+// an attempt counts only if its prompt was already submitted or started after
+// the session was last idle and the attempt has not ended.
+export async function storedPreparation(
+  ctx: Context,
+  claims: ReturnType<typeof createReviewClaims>,
+  sessionID: string,
+): Promise<AutomationRecord | undefined> {
+  return (await resolvePreparation(ctx, claims, sessionID))?.record;
 }
 
 const sameStatus = (a: AutomationStatus | undefined, b: AutomationStatus) =>
@@ -265,22 +317,85 @@ export async function readVerifiedFindings(
       wanted.has(comment.id) &&
       !comment.resolved &&
       (!allowed || allowed.has(comment.authorID)) &&
-      (!comment.automated || comment.automated.finding),
+      (!comment.automated || comment.automated.finding) &&
+      !(comment.reviewState === 'APPROVED' && !comment.bot),
   );
   const ids = comments.map((comment) => comment.id);
   const details = await (deps.details
     ? deps.details(target, ids)
     : capability.details(deps.exec, directory, target, ids));
+  const approvedHumanIDs = new Set<string>();
   const verified = details.filter((detail) => {
     const comment = comments.find((entry) => entry.id === detail.id);
-    return !!comment && detail.authorID === comment.authorID && detail.url === comment.url;
+    if (!comment || detail.authorID !== comment.authorID || detail.url !== comment.url)
+      return false;
+    if (detail.reviewState === 'APPROVED' && !detail.bot) {
+      approvedHumanIDs.add(detail.id);
+      return false;
+    }
+    return true;
   });
-  if (verified.length !== comments.length)
+  if (verified.length + approvedHumanIDs.size !== comments.length)
     throw new Error('Some review findings could not be verified; retry after a complete fetch');
   return verified.map((detail) => {
     const reviewer = detail.authorID && accounts.get(detail.authorID);
     return reviewer ? { ...detail, reviewer } : detail;
   });
+}
+
+export async function readVerifiedApprovals(
+  ctx: Context,
+  deps: AutomationDependencies,
+  item: FeedbackItem,
+  reviewers: readonly string[] | undefined,
+  tagged: readonly string[] = [],
+  watchesApprover?: (url: string, approver: ReviewerApproval) => boolean,
+): Promise<ApprovalContext> {
+  if (item.approverKind === 'human')
+    throw new Ineligible('Human reviewer approvals cannot start a turn with tools.');
+  const directory = ctx.location.directory;
+  const target = feedbackTarget(item.url);
+  const ref = parseUrl(item.url);
+  if (!target || !ref) throw new Error('The review target is invalid');
+  const request = await currentRequest(deps, directory, item.url);
+  if (!request || request.state !== 'opened') throw new Ineligible('The PR/MR is no longer open');
+  if (!approvalsComplete(request))
+    throw new Error('Current approvals are incomplete; no follow-up turn was started');
+  const capability = traitsOf(target).feedback;
+  const matching = approversOf(request).filter((approver) => {
+    if (item.approverID && approver.id !== item.approverID) return false;
+    return matchesApproval(item, approver);
+  });
+  const nonHuman = matching.filter(
+    (approver) => approver.automated === true || approver.bot === true,
+  );
+  if (matching.length > 0 && nonHuman.length === 0)
+    throw new Ineligible('Human reviewer approvals cannot start a turn with tools.');
+  const watched = watchesApprover
+    ? nonHuman.filter((approver) => watchesApprover(request.url, approver))
+    : nonHuman;
+  if (!watched.length) return { request, approvers: [] };
+  const named = [...new Set([...(reviewers ?? []), ...tagged])];
+  const resolved = named.length
+    ? await resolveReviewerIDs(
+        (name) =>
+          deps.reviewerID
+            ? deps.reviewerID(ref, name)
+            : (capability?.reviewerID?.(deps.exec, directory, ref.host, name) ??
+              Promise.resolve(undefined)),
+        named,
+      )
+    : [];
+  const accounts = new Map(resolved);
+  const allowed =
+    reviewers && new Set(resolved.filter(([, name]) => reviewers.includes(name)).map(([id]) => id));
+  const verified = watched
+    .filter((approver) => !allowed || (!!approver.id && allowed.has(approver.id)))
+    .map((approver): VerifiedApproval => {
+      const reviewer = approver.id ? accounts.get(approver.id) : undefined;
+      return reviewer ? { ...approver, reviewer } : approver;
+    });
+  return { request, approvers: verified };
 }
 
 // The PR/MR as the forge reports it now, or undefined when it can't be found.
@@ -328,6 +443,7 @@ async function authorRules(
   ref: ReviewRef,
   request: ReviewRequest,
   jobs: boolean,
+  approval = false,
 ): Promise<readonly AutomationRule[]> {
   const viewer = await (deps.viewerID
     ? deps.viewerID(ref)
@@ -354,7 +470,9 @@ async function authorRules(
     throw new Ineligible(
       jobs
         ? 'You neither wrote nor review this PR/MR, and no automation rule lists its author, so automatic investigation is skipped. Use Act on feedback to investigate anyway.'
-        : 'You did not write this PR/MR, and no automation rule lists its author, so automatic action is skipped. Use Act on feedback to act anyway.',
+        : approval
+          ? 'You did not write this PR/MR, and no automation rule lists its author, so approval follow-up is not authorized.'
+          : 'You did not write this PR/MR, and no automation rule lists its author, so automatic action is skipped. Use Act on feedback to act anyway.',
     );
   return rules.filter(
     (rule) => !matching(rule) || !!rule.authors?.some((name) => matched.has(name)),
@@ -370,9 +488,9 @@ interface Policy {
 }
 
 // Checks that the PR/MR is open, reports its source, and, for failed jobs,
-// that the update's pipeline is still the head commit's. Automatic runs need
-// a rule that covers the PR/MR's author; see `authorRules`. A manual run is
-// under all the rules.
+// that the update's pipeline is still the head commit's. Automatic runs and
+// approval follow-ups need a rule that covers the PR/MR's author; see
+// `authorRules`. Other manual runs are under all the rules.
 async function resolvePolicy(
   deps: AutomationDependencies,
   directory: string,
@@ -386,14 +504,16 @@ async function resolvePolicy(
   if (!ref || !request || request.state !== 'opened')
     throw new Ineligible('The PR/MR is no longer open');
   const jobs = isJobFailure(item);
-  const applicable = automatic
-    ? await authorRules(deps, directory, rules, resolveAuthor, ref, request, jobs)
-    : rules;
+  const approval = isApproval(item);
+  const applicable =
+    automatic || approval
+      ? await authorRules(deps, directory, rules, resolveAuthor, ref, request, jobs, approval)
+      : rules;
   if (jobs) {
     const mismatch = pipelineMismatch(request, item);
     if (mismatch) throw new Ineligible(mismatch);
   }
-  if (!request.sourceProject || !request.sourceBranch)
+  if (!approval && (!request.sourceProject || !request.sourceBranch))
     throw new Ineligible('The checkout does not match the PR/MR source project and branch');
   return { ref, request, rules: applicable };
 }
@@ -528,6 +648,11 @@ export function createAutomationHost(
     reviewers: readonly string[] | undefined,
     tagged?: readonly string[],
   ) => readVerifiedFindings(ctx, deps, env, item, reviewers, tagged);
+  const approvals = (
+    item: FeedbackItem,
+    reviewers: readonly string[] | undefined,
+    tagged?: readonly string[],
+  ) => readVerifiedApprovals(ctx, deps, item, reviewers, tagged, env.watchesApprover);
   // The session's own model, or else its agent's, or else the default.
   const modelOf = async (session: {
     model?: ModelRef;
@@ -579,7 +704,9 @@ export function createAutomationHost(
     if (session.parentID) throw new Ineligible('Subagents cannot own review automation');
     const policy = await resolvePolicy(deps, directory, configured, resolveAuthor, item, automatic);
     const { rules } = policy;
-    const mismatch = await checkoutMismatch(deps, directory, policy, isJobFailure(item));
+    const mismatch = isApproval(item)
+      ? undefined
+      : await checkoutMismatch(deps, directory, policy, isJobFailure(item));
     let placement: Placement = 'session';
     if (mismatch) {
       if (!environmentExecution(rules, policy.ref, item)) throw new Ineligible(mismatch);
@@ -820,6 +947,8 @@ export function createAutomationHost(
     associations,
     exists,
     findings,
+    approvals,
+    watchesApproval: env.watchesApprovalItem,
     failures: (item) => readFailures(deps, directory, item),
     pipelineDone,
     model,
@@ -835,7 +964,11 @@ export function createAutomationHost(
         id: record.messageID,
         text,
         metadata: {
-          forgekeeper: isJobFailure(record.item) ? 'job-investigate' : 'review-prepare',
+          forgekeeper: isJobFailure(record.item)
+            ? 'job-investigate'
+            : isApproval(record.item)
+              ? 'review-approval'
+              : 'review-prepare',
           batch: record.batch,
         },
         delivery: 'queue',
@@ -863,7 +996,9 @@ export function createAutomationHost(
     instructions: (record: AutomationRecord) => {
       const base = isJobFailure(record.item)
         ? INVESTIGATION_INSTRUCTIONS
-        : PREPARATION_INSTRUCTIONS;
+        : isApproval(record.item)
+          ? APPROVAL_INSTRUCTIONS
+          : PREPARATION_INSTRUCTIONS;
       return record.execution ? `${base}\n${LINKED_INSTRUCTIONS}` : base;
     },
 
@@ -917,6 +1052,29 @@ export function createAutomationHost(
           if (await save(started, current)) return started;
         }
       }
+      if (isApproval(record.item)) {
+        const configured = await start.rules();
+        if (env.watchesApprovalItem && !env.watchesApprovalItem(record.item))
+          throw new Error('This reviewer approval is no longer watched');
+        if (!ref || !matchesApprovalRule(configured, ref, record.item.reviewers))
+          throw new Error('The review automation rule is no longer enabled');
+        const rules = await start.check(record.item, true, configured);
+        const current = await approvals(record.item, automationReviewers(rules, ref));
+        if (!current.approvers.length || approvalDigest(current.approvers) !== record.digest)
+          throw new Error(
+            'The reviewer approval changed after the task was queued. Explicitly retry to act on the current approval.',
+          );
+        const models = allowedModelsFor(rules, ref, current.approvers);
+        const refusal = modelRefusal(models, requested, 'retry');
+        if (refusal) throw new Error(refusal);
+        await start.pending(record.item);
+        await assertSoleOwner(record.item);
+        await start.admit();
+        const started = startedRecord(record, models);
+        if (!(await save(started, record)))
+          throw new Error('Review automation changed before the approval turn');
+        return started;
+      }
       const configured = await start.rules();
       if (!ref || (!record.manual && automationReviewers(configured, ref).length === 0))
         throw new Error('The review automation rule is no longer enabled');
@@ -939,6 +1097,235 @@ export function createAutomationHost(
       if (!(await save(started, record)))
         throw new Error('Review automation changed before the coding turn');
       return started;
+    },
+
+    // Re-verifies current approval policy (agent, watch, author-scoped rule,
+    // active approval, and narrowed allowed models) on every continuation of an
+    // already-started approval turn.
+    async authorizeContinuation(record: AutomationRecord, requested: string): Promise<void> {
+      if (!isApproval(record.item)) {
+        const refusal = modelRefusal(record.models, requested, 'inspect');
+        if (refusal) throw new Error(refusal);
+        return;
+      }
+      if (record.ended || record.state !== 'running')
+        throw new Error('Approval follow-up is no longer active.');
+      const session = await ctx.session.get({ sessionID: record.item.sessionID });
+      if (session.agent === 'plan')
+        throw new Error(
+          'Switch the owning session to a coding agent before continuing approval follow-up.',
+        );
+      if (env.watchesApprovalItem && !env.watchesApprovalItem(record.item))
+        throw new Error('This reviewer approval is no longer watched.');
+      const ref = parseUrl(record.item.url);
+      if (!ref || !matchesApprovalRule(env.rules, ref, record.item.reviewers))
+        throw new Error('The review automation rule is no longer enabled.');
+      const policy = await resolvePolicy(
+        deps,
+        directory,
+        env.rules,
+        resolveAuthor,
+        record.item,
+        true,
+      );
+      if (!matchesApprovalRule(policy.rules, ref, record.item.reviewers))
+        throw new Error('The review automation rule is no longer enabled.');
+      const current = await approvals(record.item, automationReviewers(policy.rules, ref));
+      if (!current.approvers.length || approvalDigest(current.approvers) !== record.digest)
+        throw new Error('The reviewer approval is no longer current.');
+      const currentAllowed = allowedModelsFor(policy.rules, ref, current.approvers);
+      const effectiveModels =
+        record.models && currentAllowed
+          ? record.models.filter((entry) => currentAllowed.includes(entry))
+          : (currentAllowed ?? record.models);
+      const refusal = modelRefusal(effectiveModels, requested, 'inspect');
+      if (refusal) throw new Error(refusal);
+    },
+
+    // Reads live status for the PR/MR bound to the active approval follow-up turn
+    // and updates the turn's last-inspected readiness snapshot.
+    async approvalStatus(sessionID: string, signal?: AbortSignal): Promise<string> {
+      const checkAborted = () => {
+        if (signal?.aborted || env.signal.aborted || env.closing())
+          throw new Error('Approval follow-up was cancelled.');
+      };
+      checkAborted();
+      const record = await storedPreparation(ctx, claims, sessionID);
+      if (
+        !record ||
+        record.startedAt === undefined ||
+        record.state !== 'running' ||
+        record.ended ||
+        !isApproval(record.item)
+      )
+        throw new Error(
+          'This tool is only available during an active Forgekeeper review approval follow-up.',
+        );
+      await assertPending(record.item);
+      await assertSoleOwner(record.item);
+      checkAborted();
+      const request = await currentRequest(deps, directory, record.item.url);
+      checkAborted();
+      if (!request) throw new Error('The PR/MR could not be read from the forge.');
+      const currentApprovers = approversOf(request);
+      const data = approvalStatusData(request, currentApprovers);
+      const nextReadiness = readinessDigest(request, currentApprovers);
+      const latest = await read(record.batch);
+      if (
+        latest &&
+        latest.state === 'running' &&
+        latest.messageID === record.messageID &&
+        !latest.ended &&
+        latest.readiness !== nextReadiness
+      ) {
+        await save({ ...latest, readiness: nextReadiness }, latest).catch(() => {});
+      }
+      return JSON.stringify(data);
+    },
+
+    // Marks the verified draft PR/MR for the active approval follow-up turn ready
+    // for review, asserting session permission and re-checking authorization,
+    // turn identity, cancellation, ownership, active approval, and readiness
+    // snapshot freshness both before and after permission, and immediately before
+    // dispatching the forge write.
+    async markApprovalReady(invocation: MarkReadyInvocation): Promise<string> {
+      const { sessionID, signal } = invocation;
+      const checkAborted = () => {
+        if (signal?.aborted || env.signal.aborted || env.closing())
+          throw new Error('Approval follow-up was cancelled.');
+      };
+      const verifyTurn = async (expected?: AutomationRecord) => {
+        checkAborted();
+        if (!invocation.messageID || !invocation.callID)
+          throw new Error('Missing tool invocation identity; refusing to mark the PR/MR ready.');
+        const resolved = await resolvePreparation(ctx, claims, sessionID);
+        if (!resolved || resolved.compacted)
+          throw new Error(
+            'Approval turn identity could not be verified from the active transcript; refusing to mark the PR/MR ready.',
+          );
+        const { record, messages, promptIndex } = resolved;
+        if (
+          record.startedAt === undefined ||
+          record.state !== 'running' ||
+          record.ended ||
+          !isApproval(record.item)
+        )
+          throw new Error(
+            'This tool is only available during an active Forgekeeper review approval follow-up.',
+          );
+        if (
+          expected &&
+          (record.batch !== expected.batch || record.messageID !== expected.messageID)
+        )
+          throw new Error('Approval follow-up is no longer active.');
+        const session = await ctx.session.get({ sessionID });
+        if (invocation.agent === 'plan' || session.agent === 'plan')
+          throw new Error(
+            'Switch the owning session to a coding agent before marking a PR/MR ready.',
+          );
+        const promptMessage = promptIndex >= 0 ? messages[promptIndex] : undefined;
+        if (!promptMessage)
+          throw new Error('Approval prompt is no longer active in the session transcript.');
+        const afterPrompt = messages.slice(promptIndex + 1);
+        if (afterPrompt.some((message) => message.type === 'idle'))
+          throw new Error('Approval follow-up turn has already ended.');
+        if (
+          session.time.idle !== undefined &&
+          promptMessage.time?.created !== undefined &&
+          session.time.idle >= promptMessage.time.created
+        )
+          throw new Error('Approval follow-up turn has already ended.');
+        const callerIndex = messages.findIndex((message) => message.id === invocation.messageID);
+        if (callerIndex >= 0 && callerIndex <= promptIndex)
+          throw new Error('Tool call does not belong to the active approval follow-up turn.');
+        const assistantsAfter = afterPrompt.filter((message) => message.type === 'assistant');
+        if (assistantsAfter.length > 0 && assistantsAfter.at(-1)!.id !== invocation.messageID)
+          throw new Error(
+            'Tool call does not belong to the active assistant response for this approval follow-up.',
+          );
+        await assertPending(record.item);
+        await assertSoleOwner(record.item);
+        if (env.watchesApprovalItem && !env.watchesApprovalItem(record.item))
+          throw new Error('This reviewer approval is no longer watched.');
+        const ref = parseUrl(record.item.url);
+        if (!ref || !matchesApprovalRule(env.rules, ref, record.item.reviewers))
+          throw new Error('The review automation rule is no longer enabled.');
+        return { record, ref };
+      };
+      const verifyLivePolicy = async (record: AutomationRecord, ref: ReviewRef) => {
+        const policy = await resolvePolicy(
+          deps,
+          directory,
+          env.rules,
+          resolveAuthor,
+          record.item,
+          true,
+        );
+        checkAborted();
+        if (!matchesApprovalRule(policy.rules, ref, record.item.reviewers))
+          throw new Error('The review automation rule is no longer enabled.');
+        const current = await approvals(record.item, automationReviewers(policy.rules, ref));
+        checkAborted();
+        if (!current.approvers.length || approvalDigest(current.approvers) !== record.digest)
+          throw new Error(
+            'The reviewer approval is no longer current; refusing to mark the PR/MR ready.',
+          );
+        const currentAllowed = allowedModelsFor(policy.rules, ref, current.approvers);
+        const effectiveModels =
+          record.models && currentAllowed
+            ? record.models.filter((entry) => currentAllowed.includes(entry))
+            : (currentAllowed ?? record.models);
+        if (effectiveModels !== undefined) {
+          const currentModel = await model(sessionID);
+          const refusal = modelRefusal(effectiveModels, currentModel, 'inspect');
+          if (refusal) throw new Error(refusal);
+        }
+        const statusApprovers = approversOf(current.request).length
+          ? approversOf(current.request)
+          : current.approvers;
+        const liveReadiness = readinessDigest(current.request, statusApprovers);
+        if (record.readiness && liveReadiness !== record.readiness) {
+          throw new Error(
+            `Readiness status changed since it was last inspected; refusing to mark the PR/MR ready. Call ${APPROVAL_STATUS_TOOL} and re-evaluate the updated status before retrying:\n${JSON.stringify(approvalStatusData(current.request, statusApprovers))}`,
+          );
+        }
+        return current;
+      };
+
+      const initial = await verifyTurn();
+      const before = await verifyLivePolicy(initial.record, initial.ref);
+      if (!before.request.draft) return `${before.request.url} is already marked ready for review.`;
+      checkAborted();
+      await ctx.permission.assert({
+        sessionID,
+        ...(invocation.agent ? { agent: invocation.agent } : {}),
+        source: { type: 'tool', messageID: invocation.messageID!, id: invocation.callID! },
+        action: MARK_READY_TOOL,
+        resources: [before.request.url],
+        save: [before.request.url],
+        metadata: {
+          url: before.request.url,
+          forge: initial.ref.forge,
+          project: initial.ref.project,
+          iid: initial.ref.iid,
+        },
+      });
+      // Re-verify active attempt, cancellation, agent, pending item, sole owner,
+      // author-scoped policy, live approval, model, readiness snapshot, and draft
+      // state after permission returns and immediately before dispatching.
+      const afterTurn = await verifyTurn(initial.record);
+      const after = await verifyLivePolicy(afterTurn.record, afterTurn.ref);
+      if (!after.request.draft) return `${after.request.url} is already marked ready for review.`;
+      checkAborted();
+      const forge = deps.forges.forHost(afterTurn.ref.host, directory);
+      if (!forge?.markReady) throw new Error('This forge does not support marking PRs/MRs ready.');
+      await forge.markReady(afterTurn.ref, {
+        beforeMutate: async () => {
+          await verifyTurn(initial.record);
+        },
+      });
+      env.markedReady?.(afterTurn.ref);
+      return `Marked ${after.request.url} as ready for review.`;
     },
 
     // The stored attempts this checkout's instance continues after a reload:

@@ -11,6 +11,7 @@ import {
   type Forge,
   type ForgeTraits,
   type GitLabMergeRequest,
+  type ReviewerApproval,
   type ReviewRef,
 } from '../../forge';
 import type { RemoteProject, Repository } from '../../git';
@@ -26,6 +27,17 @@ interface DiscussionPage {
   nodes: Array<{ resolvable: boolean; resolved: boolean }>;
 }
 
+interface ConnectionPage<T> {
+  pageInfo?: { hasNextPage: boolean; endCursor?: string | null } | null;
+  nodes: T[];
+}
+
+interface ApprovedByNode {
+  id: string;
+  username?: string | null;
+  bot?: boolean;
+}
+
 interface MergeRequestNode {
   iid: string;
   title: string;
@@ -34,7 +46,7 @@ interface MergeRequestNode {
   draft: boolean;
   conflicts: boolean;
   approved: boolean | null;
-  approvedBy: { nodes: Array<{ id: string; bot?: boolean }> } | null;
+  approvedBy: ConnectionPage<ApprovedByNode> | null;
   mergeStatusEnum?: string | null;
   detailedMergeStatus: string | null;
   diffHeadSha: string | null;
@@ -61,7 +73,7 @@ interface MergeRequestNode {
     } | null;
   } | null;
   discussions: DiscussionPage;
-  reviewers?: { nodes: ReviewerNode[] } | null;
+  reviewers?: ConnectionPage<ReviewerNode> | null;
 }
 
 // What `mergeRequestNumbersQuery` selects.
@@ -76,7 +88,11 @@ interface ReviewerNode {
   type: string;
   username?: string;
   bot?: boolean;
-  mergeRequestInteraction: { reviewState: string | null; approved?: boolean | null } | null;
+  mergeRequestInteraction: {
+    reviewState: string | null;
+    approved?: boolean | null;
+    approvedAt?: string | null;
+  } | null;
 }
 
 const DISCUSSIONS = 'pageInfo { hasNextPage endCursor } nodes { resolvable resolved }';
@@ -98,9 +114,13 @@ const RECHECKING = new Set(['CHECKING', 'UNCHECKED', 'PREPARING']);
 // reads false and the detailed status still says CONFLICT, until a recheck.
 const CONFLICT_RECHECK = 'CANNOT_BE_MERGED_RECHECK';
 
-const MERGE_REQUEST_FIELDS = `
+const REVIEWER_FIELDS = (includeApprovedAt: boolean) =>
+  `pageInfo { hasNextPage endCursor } nodes { id type username bot mergeRequestInteraction { reviewState approved${includeApprovedAt ? ' approvedAt' : ''} } }`;
+const APPROVED_BY_FIELDS = 'pageInfo { hasNextPage endCursor } nodes { id username bot }';
+
+const mergeRequestFields = (includeApprovedAt: boolean) => `
   iid title webUrl state draft conflicts approved mergeStatusEnum detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
-  approvedBy(first: 100) { nodes { id bot } }
+  approvedBy(first: ${PAGE_SIZE}) { ${APPROVED_BY_FIELDS} }
   sourceProject { fullPath }
   targetProject { fullPath }
   author { id }
@@ -108,7 +128,7 @@ const MERGE_REQUEST_FIELDS = `
     id status path detailedStatus { label }
     jobs(statuses: [FAILED], retried: false, first: ${FIRST_FAILED_JOBS}) { ${FAILED_JOBS} }
   }
-  reviewers(first: 100) { nodes { id type username bot mergeRequestInteraction { reviewState approved } } }
+  reviewers(first: ${PAGE_SIZE}) { ${REVIEWER_FIELDS(includeApprovedAt)} }
   discussions(first: ${PAGE_SIZE}) { ${DISCUSSIONS} }
 `;
 
@@ -118,7 +138,9 @@ type Projects<T> = { [alias: `p${number}`]: T | null | undefined };
 
 export function mergeRequestsQuery(
   projectCount: number,
+  includeApprovedAt = true,
 ): Query<Projects<{ mergeRequests?: { nodes: MergeRequestNode[] } | null }>> {
+  const fields = mergeRequestFields(includeApprovedAt);
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
@@ -126,7 +148,7 @@ export function mergeRequestsQuery(
     { length: projectCount },
     (_, index) =>
       `p${index}: project(fullPath: $p${index}) {
-        mergeRequests(sourceBranches: [$branch], state: opened, first: 20) { nodes { ${MERGE_REQUEST_FIELDS} } }
+        mergeRequests(sourceBranches: [$branch], state: opened, first: 20) { nodes { ${fields} } }
       }`,
   ).join('\n');
   return query(`query($branch: String!, ${variables}) {\n${projects}\n}`);
@@ -134,14 +156,16 @@ export function mergeRequestsQuery(
 
 export function mergeRequestQuery(
   projectCount: number,
+  includeApprovedAt = true,
 ): Query<Projects<{ mergeRequest?: MergeRequestNode | null }>> {
+  const fields = mergeRequestFields(includeApprovedAt);
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
   const projects = Array.from(
     { length: projectCount },
     (_, index) =>
-      `p${index}: project(fullPath: $p${index}) { mergeRequest(iid: $iid) { ${MERGE_REQUEST_FIELDS} } }`,
+      `p${index}: project(fullPath: $p${index}) { mergeRequest(iid: $iid) { ${fields} } }`,
   ).join('\n');
   return query(`query($iid: String!, ${variables}) {\n${projects}\n}`);
 }
@@ -176,6 +200,44 @@ export const DISCUSSIONS_QUERY = query<{
     mergeRequest(iid: $iid) { discussions(first: ${PAGE_SIZE}, after: $after) { ${DISCUSSIONS} } }
   }
 }`);
+
+const reviewersQuery = (includeApprovedAt: boolean) =>
+  query<{
+    project?: { mergeRequest?: { reviewers?: ConnectionPage<ReviewerNode> | null } | null } | null;
+  }>(`query($project: ID!, $iid: String!, $after: String) {
+  project(fullPath: $project) {
+    mergeRequest(iid: $iid) { reviewers(first: ${PAGE_SIZE}, after: $after) { ${REVIEWER_FIELDS(includeApprovedAt)} } }
+  }
+}`);
+
+const APPROVED_BY_QUERY = query<{
+  project?: {
+    mergeRequest?: { approvedBy?: ConnectionPage<ApprovedByNode> | null } | null;
+  } | null;
+}>(`query($project: ID!, $iid: String!, $after: String) {
+  project(fullPath: $project) {
+    mergeRequest(iid: $iid) { approvedBy(first: ${PAGE_SIZE}, after: $after) { ${APPROVED_BY_FIELDS} } }
+  }
+}`);
+
+const MARK_READY_MUTATION = query<{
+  mergeRequestSetDraft?: {
+    mergeRequest?: { draft?: boolean | null } | null;
+    errors?: string[] | null;
+  } | null;
+}>(`mutation($project: ID!, $iid: String!) {
+  mergeRequestSetDraft(input: { projectPath: $project, iid: $iid, draft: false }) {
+    mergeRequest { draft }
+    errors
+  }
+}`);
+
+const unsupportedApprovedAtHosts = new Set<string>();
+
+const isMissingApprovedAt = (error: unknown) =>
+  /approvedAt.*(?:doesn't exist|not defined|unknown)|(?:undefinedField|unknown field).*approvedAt/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
 
 export function classifyError(message: string, code: number): ForgeError {
   const text = message.trim().replace(/^glab:\s*/, '') || `glab exited with code ${code}`;
@@ -239,7 +301,8 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
   ci: 'pipeline',
   // Self-managed instances are usually named gitlab.<domain>.
   recognizes: (host) => /(^|\.)gitlab\./.test(host),
-  open: (run, directory) => new GitLabForge(glabGraphQL(run, directory)),
+  open: (run, directory) =>
+    new GitLabForge(glabGraphQL(run, directory), unsupportedApprovedAtHosts),
   owns: ownedBy('gitlab'),
   parseUrl: (url) => parseWebUrl('gitlab', url, /^\/(.+)\/-\/merge_requests\/([1-9]\d*)\/?$/),
   // Issues can also be opened as work items.
@@ -364,21 +427,130 @@ function duoState(state: string): AutomatedReviewState {
   return DUO_FEEDBACK.has(state) ? 'feedback' : 'settled';
 }
 
+function normalizeApprovers(
+  reviewers: readonly ReviewerNode[],
+  approvedBy: readonly ApprovedByNode[],
+): ReviewerApproval[] {
+  const byId = new Map<string, ReviewerNode>();
+  const byUsername = new Map<string, ReviewerNode>();
+  for (const reviewer of reviewers) {
+    if (reviewer.id) byId.set(reviewer.id, reviewer);
+    if (reviewer.username) byUsername.set(reviewer.username.toLowerCase(), reviewer);
+  }
+  const isDuo = (reviewer?: ReviewerNode, username?: string, bot?: boolean) =>
+    reviewer?.type === 'DUO_CODE_REVIEW_BOT' ||
+    (bot === true && username?.toLowerCase() === 'gitlabduo');
+  const inactiveReview = (reviewer?: ReviewerNode) => {
+    const state = reviewer?.mergeRequestInteraction?.reviewState;
+    return !!state && state !== 'APPROVED';
+  };
+  const found: ReviewerApproval[] = [];
+  const add = (entry: ReviewerApproval) => {
+    const lower = entry.username.toLowerCase();
+    const index = found.findIndex((existing) =>
+      entry.id && existing.id
+        ? existing.id === entry.id
+        : existing.username.toLowerCase() === lower && (!entry.id || !existing.id),
+    );
+    if (index < 0) {
+      found.push(entry);
+      return;
+    }
+    const existing = found[index];
+    found[index] = {
+      ...existing,
+      ...entry,
+      ...(existing.id || entry.id ? { id: entry.id ?? existing.id } : {}),
+      ...(existing.bot || entry.bot ? { bot: true } : {}),
+      ...(existing.automated || entry.automated ? { automated: true } : {}),
+      ...(existing.reviewID || entry.reviewID
+        ? { reviewID: entry.reviewID ?? existing.reviewID }
+        : {}),
+    };
+  };
+
+  for (const reviewer of reviewers) {
+    const interaction = reviewer.mergeRequestInteraction;
+    const approving =
+      interaction?.reviewState === 'APPROVED' ||
+      (!interaction?.reviewState && interaction?.approved === true);
+    if (!approving) continue;
+    const duo = isDuo(reviewer, reviewer.username, reviewer.bot);
+    const username = reviewer.username ?? (duo ? 'GitLabDuo' : undefined);
+    if (!username) continue;
+    const bot = reviewer.bot === true || duo;
+    add({
+      ...(reviewer.id ? { id: reviewer.id } : {}),
+      username,
+      ...(bot ? { bot: true } : {}),
+      ...(duo ? { automated: true } : {}),
+      ...(interaction?.approvedAt ? { reviewID: interaction.approvedAt } : {}),
+    });
+  }
+
+  for (const approver of approvedBy) {
+    const matched =
+      (approver.id ? byId.get(approver.id) : undefined) ??
+      (approver.username ? byUsername.get(approver.username.toLowerCase()) : undefined);
+    if (inactiveReview(matched)) continue;
+    const duo = isDuo(
+      matched,
+      approver.username ?? matched?.username,
+      approver.bot ?? matched?.bot,
+    );
+    const username = approver.username ?? matched?.username ?? (duo ? 'GitLabDuo' : undefined);
+    if (!username) continue;
+    const bot = approver.bot === true || matched?.bot === true || duo;
+    add({
+      ...(approver.id || matched?.id ? { id: approver.id ?? matched?.id ?? undefined } : {}),
+      username,
+      ...(bot ? { bot: true } : {}),
+      ...(duo ? { automated: true } : {}),
+    });
+  }
+
+  return found;
+}
+
 // Reads GitLab merge requests through `glab api graphql`, using glab's login.
 export class GitLabForge implements Forge {
   readonly traits = gitlabTraits;
 
   private readonly graphql: Typed<Variables>;
 
-  constructor(graphql: GraphQL) {
+  constructor(
+    graphql: GraphQL,
+    private readonly unsupportedApprovedAt: Set<string> = new Set(),
+  ) {
     this.graphql = typed(graphql);
+  }
+
+  private async queryWithApprovedAt<T>(
+    host: string,
+    build: (includeApprovedAt: boolean) => Query<T>,
+    variables: Variables,
+  ): Promise<T> {
+    if (this.unsupportedApprovedAt.has(host)) {
+      return this.graphql(host, build(false), variables);
+    }
+    try {
+      return await this.graphql(host, build(true), variables);
+    } catch (error) {
+      if (!isMissingApprovedAt(error)) throw error;
+      this.unsupportedApprovedAt.add(host);
+      return this.graphql(host, build(false), variables);
+    }
   }
 
   async findByBranch(repository: Repository): Promise<GitLabMergeRequest[]> {
     const { source, targets, sourceBranch } = repository;
     const variables: Record<string, string> = { branch: sourceBranch };
     targets.forEach((target, index) => (variables[`p${index}`] = target.path));
-    const data = await this.graphql(source.host, mergeRequestsQuery(targets.length), variables);
+    const data = await this.queryWithApprovedAt(
+      source.host,
+      (includeApprovedAt) => mergeRequestsQuery(targets.length, includeApprovedAt),
+      variables,
+    );
 
     const sourcePath = source.path.toLowerCase();
     const seen = new Set<string>();
@@ -427,6 +599,21 @@ export class GitLabForge implements Forge {
     return typeof branch === 'string' && branch ? branch : undefined;
   }
 
+  async markReady(
+    ref: ReviewRef,
+    options?: { beforeMutate?: () => Promise<void> | void },
+  ): Promise<void> {
+    await options?.beforeMutate?.();
+    const data = await this.graphql(ref.host, MARK_READY_MUTATION, {
+      project: ref.project,
+      iid: ref.iid,
+    });
+    const result = data.mergeRequestSetDraft;
+    if (result?.errors?.length) throw new ForgeError('request', result.errors[0]);
+    if (!result?.mergeRequest || result.mergeRequest.draft !== false)
+      throw new ForgeError('request', 'Could not mark the GitLab merge request as ready');
+  }
+
   async findByNumber(
     projects: readonly RemoteProject[],
     iid: string,
@@ -435,7 +622,11 @@ export class GitLabForge implements Forge {
     const host = projects[0].host;
     const variables: Record<string, string> = { iid };
     projects.forEach((project, index) => (variables[`p${index}`] = project.path));
-    const data = await this.graphql(host, mergeRequestQuery(projects.length), variables);
+    const data = await this.queryWithApprovedAt(
+      host,
+      (includeApprovedAt) => mergeRequestQuery(projects.length, includeApprovedAt),
+      variables,
+    );
     for (let index = 0; index < projects.length; index++) {
       const node = data[`p${index}`]?.mergeRequest;
       if (node) return this.normalize(host, node);
@@ -462,13 +653,63 @@ export class GitLabForge implements Forge {
     return { count, complete: !page.hasNextPage };
   }
 
+  private async allReviewers(host: string, node: MergeRequestNode) {
+    if (!node.reviewers?.pageInfo)
+      return { nodes: [...(node.reviewers?.nodes ?? [])], complete: false };
+    const nodes = [...node.reviewers.nodes];
+    let page: { hasNextPage: boolean; endCursor?: string | null } = node.reviewers.pageInfo;
+    let pages = 1;
+    while (page.hasNextPage && page.endCursor && pages < MAX_DISCUSSION_PAGES) {
+      const data = await this.queryWithApprovedAt(
+        host,
+        (includeApprovedAt) => reviewersQuery(includeApprovedAt),
+        {
+          project: node.targetProject.fullPath,
+          iid: node.iid,
+          after: page.endCursor,
+        },
+      );
+      const next = data.project?.mergeRequest?.reviewers;
+      if (!next?.pageInfo) return { nodes, complete: false };
+      nodes.push(...next.nodes);
+      page = next.pageInfo;
+      pages++;
+    }
+    return { nodes, complete: !page.hasNextPage };
+  }
+
+  private async allApprovedBy(host: string, node: MergeRequestNode) {
+    if (!node.approvedBy?.pageInfo)
+      return { nodes: [...(node.approvedBy?.nodes ?? [])], complete: false };
+    const nodes = [...node.approvedBy.nodes];
+    let page: { hasNextPage: boolean; endCursor?: string | null } = node.approvedBy.pageInfo;
+    let pages = 1;
+    while (page.hasNextPage && page.endCursor && pages < MAX_DISCUSSION_PAGES) {
+      const data = await this.graphql(host, APPROVED_BY_QUERY, {
+        project: node.targetProject.fullPath,
+        iid: node.iid,
+        after: page.endCursor,
+      });
+      const next = data.project?.mergeRequest?.approvedBy;
+      if (!next?.pageInfo) return { nodes, complete: false };
+      nodes.push(...next.nodes);
+      page = next.pageInfo;
+      pages++;
+    }
+    return { nodes, complete: !page.hasNextPage };
+  }
+
   private async normalize(host: string, node: MergeRequestNode): Promise<GitLabMergeRequest> {
-    const threads = await this.unresolvedThreads(host, node);
+    const [threads, reviewersPage, approvedByPage] = await Promise.all([
+      this.unresolvedThreads(host, node),
+      this.allReviewers(host, node),
+      this.allApprovedBy(host, node),
+    ]);
     const pipeline = node.headPipeline;
     // A bot approval, such as Duo's when its review finds nothing, can satisfy
     // rules that require no approvals, so only people's approvals count.
-    const hasApprovals = (node.approvedBy?.nodes ?? []).some((approver) => approver.bot !== true);
-    const awaitingReviewers = (node.reviewers?.nodes ?? [])
+    const hasApprovals = approvedByPage.nodes.some((approver) => approver.bot !== true);
+    const awaitingReviewers = reviewersPage.nodes
       .filter(
         (reviewer) =>
           reviewer.bot !== true &&
@@ -495,8 +736,10 @@ export class GitLabForge implements Forge {
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
       awaitingReviewers,
-      reviewersComplete: true,
-      reviewerIDs: (node.reviewers?.nodes ?? []).flatMap((reviewer) => reviewer.id ?? []),
+      reviewersComplete: reviewersPage.complete,
+      approvalsComplete: reviewersPage.complete && approvedByPage.complete,
+      reviewerIDs: reviewersPage.nodes.flatMap((reviewer) => reviewer.id ?? []),
+      approvers: normalizeApprovers(reviewersPage.nodes, approvedByPage.nodes),
       mergeStatus: node.detailedMergeStatus ?? undefined,
       targetProject: node.targetProject.fullPath,
       targetBranch: node.targetBranch,
@@ -517,7 +760,7 @@ export class GitLabForge implements Forge {
       unresolvedThreads: threads.count,
       threadsComplete: threads.complete,
       duoReviewState:
-        node.reviewers?.nodes.find((reviewer) => reviewer.type === 'DUO_CODE_REVIEW_BOT')
+        reviewersPage.nodes.find((reviewer) => reviewer.type === 'DUO_CODE_REVIEW_BOT')
           ?.mergeRequestInteraction?.reviewState ?? undefined,
     };
   }

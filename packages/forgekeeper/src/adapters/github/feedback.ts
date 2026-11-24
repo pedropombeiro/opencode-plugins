@@ -1,5 +1,5 @@
 import type { CommentDetail, FeedbackSnapshot, ReviewComment } from '../../forge';
-import type { GraphQL } from './adapter';
+import { botUsername, type GraphQL } from './adapter';
 import { query, typed, type Query, type Typed } from '../../graphql';
 import { EXCERPT_RADIUS } from '../../review-summary';
 
@@ -34,6 +34,7 @@ interface InlineCommentNode extends CommentNode {
   state: string;
   createdAt: string;
   publishedAt: string | null;
+  pullRequestReview?: { state?: string | null } | null;
 }
 
 interface ThreadNode {
@@ -61,7 +62,7 @@ const MAX_FETCH_REQUESTS = 200;
 const author =
   'author { __typename login ... on User { id } ... on Bot { id } ... on Mannequin { id } }';
 const page = 'pageInfo { hasPreviousPage startCursor }';
-const INLINE_FIELDS = `id url state createdAt publishedAt lastEditedAt isMinimized ${author}`;
+const INLINE_FIELDS = `id url state createdAt publishedAt lastEditedAt isMinimized pullRequestReview { state } ${author}`;
 
 const listQuery = <Field extends string, Item>(field: Field, connection: string) =>
   query<Data<Field, Item>>(`query($owner: String!, $repo: String!, $number: Int!, $before: String) {
@@ -98,7 +99,7 @@ const THREAD_COMMENTS_QUERY = query<{
   }
 }`);
 
-const REVIEW_STATES = new Set(['COMMENTED', 'CHANGES_REQUESTED', 'APPROVED']);
+const REVIEW_STATES = new Set(['COMMENTED', 'CHANGES_REQUESTED']);
 
 const time = (...values: Array<string | null | undefined>) => {
   const value = values.find((candidate) => candidate);
@@ -134,7 +135,7 @@ function build({ node, postedAt, editedAt, resolved }: Parts): ReviewComment | u
     resolved,
     bot: __typename === 'Bot' || login.endsWith('[bot]'),
     authorID: node.author.id,
-    username: login,
+    username: botUsername(login, __typename),
   };
 }
 
@@ -165,12 +166,16 @@ export function toInlineComment(
 ): ReviewComment | undefined {
   if (node.state === 'PENDING') return undefined;
   const postedAt = time(node.publishedAt, node.createdAt);
-  return build({
+  const comment = build({
     node,
     postedAt,
     editedAt: activity(node.lastEditedAt, postedAt),
     resolved,
   });
+  if (!comment) return undefined;
+  return node.pullRequestReview?.state
+    ? { ...comment, reviewState: node.pullRequestReview.state }
+    : comment;
 }
 
 interface Pages<Item> {
@@ -247,13 +252,15 @@ interface DetailNode {
   __typename?: string;
   id?: string;
   url?: string | null;
+  state?: string | null;
   body?: string;
   path?: string | null;
   line?: number | null;
   originalLine?: number | null;
   diffHunk?: string | null;
-  replyTo?: { body: string; author: { login: string } | null } | null;
-  author?: { id?: string; login: string } | null;
+  replyTo?: { body: string; author: { __typename?: string; login: string } | null } | null;
+  pullRequestReview?: { state?: string | null } | null;
+  author?: { __typename?: string; id?: string; login: string } | null;
 }
 
 // `gh` passes only string and number variables, so the IDs are written into
@@ -262,11 +269,12 @@ const detailsQuery = (ids: string[]) =>
   query<{ nodes?: Array<DetailNode | null> | null }>(`query {
   nodes(ids: ${JSON.stringify(ids)}) {
     __typename
-    ... on IssueComment { id url body author { login ... on User { id } ... on Bot { id } } }
-    ... on PullRequestReview { id url body author { login ... on User { id } ... on Bot { id } } }
+    ... on IssueComment { id url body author { __typename login ... on User { id } ... on Bot { id } } }
+    ... on PullRequestReview { id url state body author { __typename login ... on User { id } ... on Bot { id } } }
     ... on PullRequestReviewComment {
-      id url body path line originalLine diffHunk author { login ... on User { id } ... on Bot { id } }
-      replyTo { body author { login } }
+      id url body path line originalLine diffHunk author { __typename login ... on User { id } ... on Bot { id } }
+      pullRequestReview { state }
+      replyTo { body author { __typename login } }
     }
   }
 }`);
@@ -288,6 +296,7 @@ export async function fetchDetails(
     const data = await graphql(host, detailsQuery(valid.slice(start, start + DETAIL_BATCH)), {});
     for (const node of data.nodes ?? []) {
       if (!node?.id || !node.url || !node.author || node.body === undefined) continue;
+      if (node.__typename === 'PullRequestReview' && node.state === 'APPROVED') continue;
       const line = node.line ?? node.originalLine ?? undefined;
       // A diff hunk ends at the commented line, so its last lines are the context.
       const hunk = node.diffHunk
@@ -295,13 +304,27 @@ export async function fetchDetails(
         .slice(-(2 * EXCERPT_RADIUS + 1))
         .join('\n');
       const parent = node.replyTo?.author
-        ? [{ username: node.replyTo.author.login, body: node.replyTo.body }]
+        ? [
+            {
+              username: botUsername(node.replyTo.author.login, node.replyTo.author.__typename),
+              body: node.replyTo.body,
+            },
+          ]
         : [];
+      const isBot = node.author.__typename === 'Bot' || node.author.login.endsWith('[bot]');
+      const reviewState =
+        node.__typename === 'PullRequestReviewComment'
+          ? (node.pullRequestReview?.state ?? undefined)
+          : node.__typename === 'PullRequestReview'
+            ? (node.state ?? undefined)
+            : undefined;
       details.push({
         id: node.id,
         url: node.url,
-        username: node.author.login,
+        username: botUsername(node.author.login, node.author.__typename),
         ...(node.author.id ? { authorID: node.author.id } : {}),
+        ...(isBot ? { bot: true } : {}),
+        ...(reviewState ? { reviewState } : {}),
         body: node.body,
         ...(node.path ? { path: node.path } : {}),
         ...(line !== undefined ? { line } : {}),

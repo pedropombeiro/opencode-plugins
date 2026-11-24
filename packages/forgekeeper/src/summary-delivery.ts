@@ -4,6 +4,7 @@ import type { Exec } from './exec';
 import {
   feedbackLinks,
   feedbackTime,
+  isApproval,
   isLifecycle,
   isReviewRequest,
   type FeedbackItem,
@@ -180,9 +181,16 @@ export function createSummaryDelivery(
     const commentIDs = commentIDsOf(item);
     const event = isLifecycle(item) ? item.kind : undefined;
     const asked = isReviewRequest(item);
+    const approved = isApproval(item);
     const review =
-      mode === 'summary' && !event && !asked && request && details && commentIDs.length;
-    const summary = (mode === 'summary' && (!!event || asked)) || !!review;
+      mode === 'summary' &&
+      !event &&
+      !asked &&
+      !approved &&
+      request &&
+      details &&
+      commentIDs.length;
+    const summary = (mode === 'summary' && (!!event || asked || approved)) || !!review;
     if (requested && !summary)
       throw new Error('This update has no comments that can be summarized');
     const messageID = `${summary ? SUMMARY_PREFIX : MESSAGE_PREFIX}${hash}`;
@@ -196,8 +204,8 @@ export function createSummaryDelivery(
         ? await details(request, replies).catch(() => [])
         : [];
     const findings =
-      summary && event
-        ? lifecycleText({ ...item, kind: event }, feedbackTime(item))
+      summary && (event || approved)
+        ? lifecycleText({ ...item, kind: event ?? 'approval' }, feedbackTime(item))
         : summary && asked
           ? requestText(
               described,
@@ -231,7 +239,7 @@ export function createSummaryDelivery(
       ...(allowed.length
         ? { request: item.url, linked: { links: allowed, calls: 0, notes: [] } }
         : {}),
-      ...(event ? { system: 'lifecycle' as const } : {}),
+      ...(event || approved ? { system: 'lifecycle' as const } : {}),
       ...(asked && summary ? { system: 'review-request' as const } : {}),
     };
     await ctx.storage.set(summaryKey(item.sessionID, messageID), record as never);
@@ -244,20 +252,24 @@ export function createSummaryDelivery(
         item.title,
         feedbackTime(item),
         ...links,
-        ...((event || asked) && item.details?.length ? [item.details.join('\n')] : []),
+        ...((event || asked || approved) && item.details?.length ? [item.details.join('\n')] : []),
         summary
           ? event
             ? 'Forgekeeper summarizes this merge request change without tools.'
-            : asked
-              ? 'Forgekeeper summarizes this review request without tools.'
-              : allowed.length
-                ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
-                : 'Forgekeeper summarizes this review feedback without tools.'
+            : approved
+              ? 'Forgekeeper summarizes this review approval without tools.'
+              : asked
+                ? 'Forgekeeper summarizes this review request without tools.'
+                : allowed.length
+                  ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
+                  : 'Forgekeeper summarizes this review feedback without tools.'
           : event
             ? 'Merge request update only. No action requested.'
-            : asked
-              ? 'Review request only. No action requested.'
-              : 'Review update only. No action requested.',
+            : approved
+              ? 'Review approval only. No action requested.'
+              : asked
+                ? 'Review request only. No action requested.'
+                : 'Review update only. No action requested.',
         messageTag(messageID),
       ].join('\n\n'),
       description: item.title,

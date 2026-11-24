@@ -11,6 +11,7 @@ import {
   type ForgeTraits,
   type GitHubPullRequest,
   type Pipeline,
+  type ReviewerApproval,
   type ReviewRef,
 } from '../../forge';
 import type { RemoteProject, Repository } from '../../git';
@@ -43,6 +44,12 @@ interface Check {
   } | null;
 }
 
+interface ReviewSummaryNode {
+  id?: string | null;
+  state?: string | null;
+  author?: { __typename?: string; id?: string; login?: string } | null;
+}
+
 interface Pull {
   number: number;
   title: string;
@@ -62,9 +69,17 @@ interface Pull {
   reviewRequests: Connection<{
     requestedReviewer?: { __typename?: string; login?: string; name?: string; id?: string } | null;
   }>;
-  latestReviews?: { nodes?: Array<{ author?: { id?: string } | null } | null> | null } | null;
+  latestReviews?: {
+    nodes?: Array<ReviewSummaryNode | null> | null;
+  } | null;
+  latestOpinionatedReviews?: Connection<ReviewSummaryNode | null> | null;
   copilotReviews?: {
-    nodes?: Array<{ id: string; state: string; comments: { totalCount: number } } | null> | null;
+    nodes?: Array<{
+      id: string;
+      state: string;
+      comments: { totalCount: number };
+      author?: { __typename?: string; id?: string; login?: string } | null;
+    } | null> | null;
   } | null;
   commits: {
     nodes: Array<{ commit: { statusCheckRollup?: { contexts: Connection<Check> } | null } }>;
@@ -77,9 +92,10 @@ const fields = `number title url state isDraft mergeable reviewDecision headRefO
   headRepository { nameWithOwner } baseRepository { nameWithOwner } baseRefName updatedAt
   author { ... on User { id } ... on Bot { id } }
   reviewThreads(first:100) { nodes { isResolved } pageInfo { hasNextPage endCursor } }
-  reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { id login } ... on Bot { login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
-  latestReviews(first:100) { nodes { author { ... on User { id } } } }
-  copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } } }
+  reviewRequests(first:100) { nodes { requestedReviewer { __typename ... on User { id login } ... on Bot { id login } ... on Team { name } } } pageInfo { hasNextPage endCursor } }
+  latestReviews(first:100) { nodes { id state author { __typename login ... on User { id } ... on Bot { id } ... on Mannequin { id } } } }
+  latestOpinionatedReviews(first:100) { nodes { id state author { __typename login ... on User { id } ... on Bot { id } ... on Mannequin { id } } } pageInfo { hasNextPage endCursor } }
+  copilotReviews: reviews(last:1, author:"${COPILOT_AUTHOR}", states:[COMMENTED,CHANGES_REQUESTED,APPROVED,DISMISSED]) { nodes { id state comments { totalCount } author { __typename login ... on Bot { id } ... on User { id } } } }
   commits(last:1) { nodes { commit { statusCheckRollup { contexts(first:100) {
     nodes { __typename ... on CheckRun { id name status conclusion detailsUrl startedAt checkSuite { createdAt app { id } workflowRun { workflow { id } } } } ... on StatusContext { id context state targetUrl } }
     pageInfo { hasNextPage endCursor }
@@ -316,9 +332,12 @@ function copilotStatus(review: CopilotReview | undefined): AutomatedReviewStatus
 const isCopilotReviewer = (login: string | undefined) =>
   /^copilot-pull-request-reviewer(\[bot\])?$/i.test(login ?? '');
 
+const isCopilotBot = (reviewer?: { __typename?: string; login?: string } | null) =>
+  reviewer?.__typename === 'Bot' && isCopilotReviewer(reviewer.login);
+
 function copilotReview(node: Pull): CopilotReview | undefined {
   const requested = node.reviewRequests.nodes.some((request) =>
-    isCopilotReviewer(request.requestedReviewer?.login),
+    isCopilotBot(request.requestedReviewer),
   );
   const latest = node.copilotReviews?.nodes?.find((review) => review);
   if (!requested && !latest) return undefined;
@@ -328,6 +347,89 @@ function copilotReview(node: Pull): CopilotReview | undefined {
     comments: latest?.comments.totalCount ?? 0,
     ...(latest?.state === 'DISMISSED' ? { dismissed: true } : {}),
   };
+}
+
+export function botUsername(login: string, typename?: string): string {
+  return typename === 'Bot' && !login.endsWith('[bot]') ? `${login}[bot]` : login;
+}
+
+function normalizeApprovers(
+  node: Pull,
+  reviewers: Pull['reviewRequests'],
+  opinionated: readonly (ReviewSummaryNode | null)[],
+): ReviewerApproval[] {
+  const pendingIDs = new Set<string>();
+  const pendingWithoutID = new Set<string>();
+  const pendingTypedLogins = new Set<string>();
+  const typedLoginKey = (typename: string | undefined, login: string) =>
+    `${typename ?? 'Unknown'}:${botUsername(login, typename).toLowerCase()}`;
+  for (const request of reviewers.nodes) {
+    const reviewer = request.requestedReviewer;
+    if (reviewer?.id) pendingIDs.add(reviewer.id);
+    if (reviewer?.login) {
+      const key = typedLoginKey(reviewer.__typename, reviewer.login);
+      pendingTypedLogins.add(key);
+      if (!reviewer.id) pendingWithoutID.add(key);
+    }
+  }
+  const isPending = (id: string | undefined, typename: string | undefined, login: string) => {
+    const key = typedLoginKey(typename, login);
+    if (id) return pendingIDs.has(id) || pendingWithoutID.has(key);
+    return pendingTypedLogins.has(key);
+  };
+  const found = new Map<string, ReviewerApproval>();
+  const add = (entry: ReviewerApproval) => {
+    const key = `${entry.bot ? 'bot' : 'user'}:${entry.username.toLowerCase()}`;
+    const existing = found.get(key);
+    if (!existing) {
+      found.set(key, entry);
+      return;
+    }
+    found.set(key, {
+      ...existing,
+      ...entry,
+      ...(existing.id || entry.id ? { id: entry.id ?? existing.id } : {}),
+      ...(existing.bot || entry.bot ? { bot: true } : {}),
+      ...(existing.automated || entry.automated ? { automated: true } : {}),
+      ...(existing.reviewID || entry.reviewID
+        ? { reviewID: entry.reviewID ?? existing.reviewID }
+        : {}),
+    });
+  };
+
+  for (const review of opinionated) {
+    if (review?.state !== 'APPROVED' || !review.author?.login) continue;
+    const { id, login, __typename } = review.author;
+    if (isPending(id, __typename, login)) continue;
+    const bot = __typename === 'Bot';
+    const automated = bot && isCopilotReviewer(login);
+    const username = automated ? COPILOT_AUTHOR : botUsername(login, __typename);
+    add({
+      ...(id ? { id } : {}),
+      username,
+      ...(bot ? { bot: true } : {}),
+      ...(automated ? { automated: true } : {}),
+      ...(review.id ? { reviewID: review.id } : {}),
+    });
+  }
+
+  const latestCopilot = node.copilotReviews?.nodes?.find((review) => review);
+  const copilotPending = reviewers.nodes.some((request) => isCopilotBot(request.requestedReviewer));
+  if (
+    latestCopilot?.state === 'APPROVED' &&
+    isCopilotBot(latestCopilot.author) &&
+    !copilotPending
+  ) {
+    add({
+      ...(latestCopilot.author?.id ? { id: latestCopilot.author.id } : {}),
+      username: COPILOT_AUTHOR,
+      bot: true,
+      automated: true,
+      ...(latestCopilot.id ? { reviewID: latestCopilot.id } : {}),
+    });
+  }
+
+  return [...found.values()];
 }
 
 // Reads GitHub pull requests through `gh api graphql`, using gh's login.
@@ -402,6 +504,48 @@ export class GitHubForge implements Forge {
       { owner, repo, number: Number(ref.iid) },
     );
     return data.repository?.pullRequest?.headRefName || undefined;
+  }
+
+  async markReady(
+    ref: ReviewRef,
+    options?: { beforeMutate?: () => Promise<void> | void },
+  ): Promise<void> {
+    const [owner, repo] = ref.project.split('/');
+    const lookup = await this.graphql(
+      ref.host,
+      query<
+        RepositoryData<{
+          pullRequest?: { id?: string | null; isDraft?: boolean; state?: string } | null;
+        }>
+      >(
+        `query($owner:String!,$repo:String!,$number:Int!) {
+      repository(owner:$owner,name:$repo) { pullRequest(number:$number) { id isDraft state } }
+    }`,
+      ),
+      { owner, repo, number: Number(ref.iid) },
+    );
+    const pr = lookup.repository?.pullRequest;
+    if (!pr?.id) throw new ForgeError('request', 'GitHub pull request not found');
+    if (pr.state !== 'OPEN')
+      throw new ForgeError('request', 'The GitHub pull request is no longer open');
+    if (!pr.isDraft) return;
+    await options?.beforeMutate?.();
+    const data = await this.graphql(
+      ref.host,
+      query<{
+        markPullRequestReadyForReview?: {
+          pullRequest?: { id?: string; isDraft?: boolean } | null;
+        } | null;
+      }>(
+        `mutation($id:ID!) {
+      markPullRequestReadyForReview(input:{pullRequestId:$id}) { pullRequest { id isDraft } }
+    }`,
+      ),
+      { id: pr.id },
+    );
+    const updated = data.markPullRequestReadyForReview?.pullRequest;
+    if (!updated || updated.isDraft)
+      throw new ForgeError('request', 'Could not mark the GitHub pull request as ready');
   }
 
   async findByBranch(repository: Repository): Promise<GitHubPullRequest[]> {
@@ -512,7 +656,7 @@ export class GitHubForge implements Forge {
           `query($owner:String!,$repo:String!,$number:Int!,$after:String!) {
             repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
               reviewRequests(first:100,after:$after) {
-                nodes { requestedReviewer { __typename ... on User { id login } ... on Bot { login } ... on Team { name } } }
+                nodes { requestedReviewer { __typename ... on User { id login } ... on Bot { id login } ... on Team { name } } }
                 pageInfo { hasNextPage endCursor }
               }
             } }
@@ -530,9 +674,48 @@ export class GitHubForge implements Forge {
     return { nodes, pageInfo: reviewerPage };
   }
 
+  private async opinionatedReviews(host: string, node: Pull) {
+    if (!node.latestOpinionatedReviews?.pageInfo)
+      return { nodes: [...(node.latestOpinionatedReviews?.nodes ?? [])], complete: false };
+    const nodes = [...node.latestOpinionatedReviews.nodes];
+    let page: { hasNextPage: boolean; endCursor?: string } = node.latestOpinionatedReviews.pageInfo;
+    for (let count = 1; page.hasNextPage && page.endCursor && count < MAX_PAGES; count++) {
+      const [owner, repo] = node.baseRepository.nameWithOwner.split('/');
+      const data = await this.graphql(
+        host,
+        query<
+          RepositoryData<{
+            pullRequest?: {
+              latestOpinionatedReviews?: Connection<ReviewSummaryNode | null> | null;
+            } | null;
+          }>
+        >(
+          `query($owner:String!,$repo:String!,$number:Int!,$after:String!) {
+            repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
+              latestOpinionatedReviews(first:100,after:$after) {
+                nodes { id state author { __typename login ... on User { id } ... on Bot { id } ... on Mannequin { id } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            } }
+          }`,
+        ),
+        { owner, repo, number: node.number, after: page.endCursor },
+      );
+      const next = data.repository?.pullRequest?.latestOpinionatedReviews;
+      if (!next?.pageInfo) return { nodes, complete: false };
+      nodes.push(...next.nodes);
+      page = next.pageInfo;
+    }
+    return { nodes, complete: !page.hasNextPage };
+  }
+
   private async normalize(host: string, node: Pull): Promise<GitHubPullRequest> {
     const reviewers = await this.reviewers(host, node);
-    const [threads, contexts] = [await this.threads(host, node), await this.contexts(host, node)];
+    const [threads, contexts, opinionated] = await Promise.all([
+      this.threads(host, node),
+      this.contexts(host, node),
+      this.opinionatedReviews(host, node),
+    ]);
     return {
       forge: 'github',
       iid: String(node.number),
@@ -550,7 +733,9 @@ export class GitHubForge implements Forge {
         if (reviewer?.__typename === 'Bot') return [];
         return reviewer?.login ? [reviewer.login] : reviewer?.name ? [reviewer.name] : [];
       }),
-      reviewersComplete: !reviewers.pageInfo?.hasNextPage,
+      reviewersComplete: !!reviewers.pageInfo && !reviewers.pageInfo.hasNextPage,
+      approvalsComplete:
+        !!reviewers.pageInfo && !reviewers.pageInfo.hasNextPage && opinionated.complete,
       reviewerIDs: [
         ...new Set([
           ...reviewers.nodes.flatMap((request) =>
@@ -558,9 +743,14 @@ export class GitHubForge implements Forge {
               ? (request.requestedReviewer.id ?? [])
               : [],
           ),
-          ...(node.latestReviews?.nodes ?? []).flatMap((review) => review?.author?.id ?? []),
+          ...[...(node.latestReviews?.nodes ?? []), ...opinionated.nodes].flatMap((review) =>
+            !review?.author?.__typename || review.author.__typename === 'User'
+              ? (review?.author?.id ?? [])
+              : [],
+          ),
         ]),
       ],
+      approvers: normalizeApprovers(node, reviewers, opinionated.nodes),
       targetProject: node.baseRepository.nameWithOwner,
       targetBranch: node.baseRefName,
       ...(node.headRepository ? { sourceProject: node.headRepository.nameWithOwner } : {}),

@@ -14,7 +14,12 @@ export interface FeedbackItem {
   // failed job, or it merged. `review-request`: someone asked for the
   // viewer's review, and `commentIDs` are author replies for context. Absent
   // for review feedback.
-  kind?: 'conflict' | 'merged' | 'ci-failed' | 'review-request';
+  kind?: 'conflict' | 'merged' | 'ci-failed' | 'review-request' | 'approval';
+  reviewers?: string[];
+  approverKind?: 'automated' | 'bot' | 'human';
+  approverID?: string;
+  approvalToken?: string;
+  approvalCycle?: number;
   // The pipeline a `ci-failed` update is about, so it clears once another
   // pipeline replaces it or it no longer fails.
   pipeline?: string;
@@ -30,11 +35,18 @@ export interface FeedbackItem {
   read?: true;
   automation?: AutomationStatus;
   automationAllowed?: boolean;
+  // True when every comment in a review-feedback batch came from a human APPROVED review.
+  humanApprovalOnly?: boolean;
+  // Server-computed eligibility for Act / Retry in clients.
+  canAct?: boolean;
 }
 
 export interface InboxState {
   items: FeedbackItem[];
   paused: boolean;
+  // Durable delivery receipts for approval event IDs, surviving acknowledgment
+  // so a failed watcher write after inbox insertion never replays or duplicates.
+  delivered?: string[];
 }
 
 // An absolute local time with its zone, which stays meaningful in a session's
@@ -55,6 +67,30 @@ export const isLifecycle = (item: Pick<FeedbackItem, 'kind'>) =>
   item.kind === 'conflict' || item.kind === 'merged' || item.kind === 'ci-failed';
 
 export const isReviewRequest = (item: Pick<FeedbackItem, 'kind'>) => item.kind === 'review-request';
+
+export const isApproval = (item: Pick<FeedbackItem, 'kind'>) => item.kind === 'approval';
+
+export function canActOnFeedback(
+  item: Pick<
+    FeedbackItem,
+    'kind' | 'approverKind' | 'automationAllowed' | 'humanApprovalOnly' | 'canAct'
+  >,
+): boolean {
+  if (item.canAct !== undefined) return item.canAct;
+  if (item.humanApprovalOnly) return false;
+  if (isApproval(item)) return item.approverKind !== 'human' && !!item.automationAllowed;
+  if (item.kind && item.kind !== 'ci-failed') return false;
+  return true;
+}
+
+export function listAllowsAct(
+  items: readonly Pick<
+    FeedbackItem,
+    'kind' | 'approverKind' | 'automationAllowed' | 'humanApprovalOnly' | 'canAct'
+  >[],
+): boolean {
+  return items.length > 0 && items.every((item) => canActOnFeedback(item));
+}
 
 // When an update's feedback happened: its newest comment, or for updates
 // without comments, such as Copilot reviews, when Forgekeeper recorded it. A
@@ -199,13 +235,25 @@ export function createFeedbackInbox(options: {
   const record = async (
     item: FeedbackItem,
     supersedes: (entry: FeedbackItem) => boolean = () => false,
+    accept?: () => boolean,
   ) => {
-    let added = item;
-    await change((previous) => {
+    let added: FeedbackItem | undefined;
+    let recorded = false;
+    await run(async () => {
+      const previous = await read();
+      if (previous.paused) throw new Error('Feedback monitoring is paused');
+      if (item.kind === 'approval' && previous.delivered?.includes(item.id)) return;
+      if (accept && !accept()) return;
       const existing = previous.items.find((entry) => entry.id === item.id);
       added = existing ?? item;
-      return {
+      recorded = !existing;
+      const delivered =
+        item.kind === 'approval'
+          ? [...new Set([...(previous.delivered ?? []), item.id])]
+          : previous.delivered;
+      const state: InboxState = {
         ...previous,
+        ...(delivered ? { delivered } : {}),
         items: [
           added,
           ...previous.items.filter(
@@ -213,8 +261,10 @@ export function createFeedbackInbox(options: {
           ),
         ].slice(0, 500),
       };
-    }, true);
-    return { delivery: notify([added]) };
+      await options.write(state);
+      options.changed();
+    });
+    return { recorded, delivery: added ? notify([added]) : Promise.resolve() };
   };
   return {
     list: () => run(read),
@@ -247,5 +297,39 @@ export function createFeedbackInbox(options: {
         return next;
       }),
     pause: (paused: boolean) => change((state) => ({ ...state, paused })),
+    // Releases delivery receipts once the watcher has durably retired their outbox entries.
+    releaseReceipts: (ids: readonly string[]) =>
+      run(async () => {
+        if (!ids.length) return;
+        const state = await read();
+        if (!state.delivered?.length) return;
+        const drop = new Set(ids);
+        const delivered = state.delivered.filter((id) => !drop.has(id));
+        if (delivered.length === state.delivered.length) return;
+        const next: InboxState = {
+          items: state.items,
+          paused: state.paused,
+          ...(delivered.length ? { delivered } : {}),
+        };
+        await options.write(next);
+      }),
+    receipts: () => run(async () => [...((await read()).delivered ?? [])]),
+    // Keeps only receipts that either were recorded after `known` was snapshotted
+    // or whose outbox entries are still pending, reclaiming orphaned receipts
+    // without racing concurrent deliveries.
+    retainReceipts: (known: ReadonlySet<string>, pending: ReadonlySet<string>) =>
+      run(async () => {
+        if (!known.size) return;
+        const state = await read();
+        if (!state.delivered?.length) return;
+        const delivered = state.delivered.filter((id) => !known.has(id) || pending.has(id));
+        if (delivered.length === state.delivered.length) return;
+        const next: InboxState = {
+          items: state.items,
+          paused: state.paused,
+          ...(delivered.length ? { delivered } : {}),
+        };
+        await options.write(next);
+      }),
   };
 }

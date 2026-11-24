@@ -24,7 +24,12 @@ import {
   UNAVAILABLE_TEXT,
   type SummaryRequest,
 } from './review-summary';
-import { PREPARE_PREFIX } from './review-preparation';
+import {
+  APPROVAL_STATUS_TOOL,
+  APPROVAL_TOOLS,
+  MARK_READY_TOOL,
+  PREPARE_PREFIX,
+} from './review-preparation';
 import { storedPreparation } from './review-automation-host';
 import { createReviewClaims } from './review-claim';
 import { linkedOwner, type DirectorySession } from './linked-session';
@@ -219,11 +224,15 @@ export async function setupServer(
       },
       refresh: async ({ key }) =>
         watcher ? { enabled: true, snapshot: json(await watcher.refresh(key)) } : DISABLED,
-      feedback: async () => (watcher ? watcher.inbox.list() : { items: [], paused: false }),
+      feedback: async () => (watcher ? watcher.feedbackState() : { items: [], paused: false }),
       markFeedbackRead: async ({ ids }) =>
-        watcher ? watcher.inbox.markRead(ids) : { items: [], paused: false },
+        watcher
+          ? watcher.decorateInbox(await watcher.inbox.markRead(ids))
+          : { items: [], paused: false },
       acknowledgeFeedback: async ({ id }) =>
-        watcher ? watcher.inbox.acknowledge(id) : { items: [], paused: false },
+        watcher
+          ? watcher.decorateInbox(await watcher.inbox.acknowledge(id))
+          : { items: [], paused: false },
       summarizeFeedback: async ({ id }) => {
         if (!watcher) throw new Error('PR/MR status is disabled');
         return watcher.summarize(id);
@@ -236,8 +245,9 @@ export async function setupServer(
         if (!watcher) return { items: [], paused: false };
         const state = await watcher.inbox.pause(paused);
         watcher.service.pauseFeedback(paused);
+        if (!paused) watcher.retryPending();
         await watcher.discovery.refresh();
-        return state;
+        return watcher.decorateInbox(state);
       },
     }),
   );
@@ -401,6 +411,40 @@ export async function setupServer(
           content: await summaries.fetchLinked(sessionID, (input as { url?: unknown })?.url),
         }),
       });
+      editor.add({
+        name: APPROVAL_STATUS_TOOL,
+        options: { codemode: false },
+        description:
+          'Read live status for the PR/MR bound to the active Forgekeeper review approval follow-up turn. Works only during an authorized approval follow-up.',
+        input: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+        execute: async (_input, context) => ({
+          content: await summaries.approvalStatus(context.sessionID, context.signal),
+        }),
+      });
+      editor.add({
+        name: MARK_READY_TOOL,
+        options: { codemode: false },
+        description:
+          'Mark the verified draft PR/MR for the active Forgekeeper review approval follow-up as ready for review. Re-verifies authorization and approval before mutating. Works only during an authorized approval follow-up.',
+        input: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+        execute: async (_input, context) => ({
+          content: await summaries.markApprovalReady({
+            sessionID: context.sessionID,
+            agent: context.agent,
+            messageID: context.messageID,
+            callID: context.id,
+            signal: context.signal,
+          }),
+        }),
+      });
     }
   });
 
@@ -531,6 +575,7 @@ export async function setupServer(
           'Review preparation is disabled. Enable Forgekeeper status before resuming this task.',
         );
     }
+    let approvalTurnActive = false;
     if (watcher) {
       // A preparation turn that can't be confirmed, such as when the
       // session's context can't be read, still gets a summary's
@@ -544,12 +589,19 @@ export async function setupServer(
       }
       if (!preparing && (await watcher.prepareSummary(event))) return;
       if (failure) throw failure.error;
+      if (preparing) approvalTurnActive = await watcher.approvalTurn(event.sessionID);
     } else if (await orphanedStep(event)) {
       orphaned.add(event.sessionID);
       restrictRequest(event, summarySystem(false), UNAVAILABLE_TEXT);
       return;
     } else orphaned.delete(event.sessionID);
-    if (event.tools) delete event.tools[LINKED_NOTE_TOOL];
+    if (event.tools) {
+      delete event.tools[LINKED_NOTE_TOOL];
+      if (!approvalTurnActive) {
+        for (const name of APPROVAL_TOOLS) delete event.tools[name];
+      }
+    }
+    if (approvalTurnActive) return;
     const session = await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined);
     if (session && session.location.directory !== ctx.location.directory) return;
     if (!session || session.parentID || linkedOwner(session as DirectorySession)) {
@@ -619,12 +671,28 @@ export async function setupServer(
     if (watcher && event.tool === LINKED_NOTE_TOOL) return;
     if (await summarizing(event.sessionID))
       throw new Error('Tools are disabled while Forgekeeper summarizes review feedback.');
+    if (watcher && (await watcher.approvalTurn(event.sessionID))) {
+      if (!APPROVAL_TOOLS.has(event.tool))
+        throw new Error(
+          'Only Forgekeeper approval follow-up tools are allowed during a review approval turn.',
+        );
+    }
   });
   await ctx.permission.hook('evaluate', async (event) => {
     if (await summarizing(event.sessionID)) {
       event.effect = 'deny';
       event.message = 'Forgekeeper review summaries run without tools.';
       return;
+    }
+    if (watcher && (await watcher.approvalTurn(event.sessionID))) {
+      if (event.action === MARK_READY_TOOL) {
+        if (event.effect !== 'ask') return;
+      } else {
+        event.effect = 'deny';
+        event.message =
+          'Forgekeeper review approval follow-ups cannot run general tools or commands.';
+        return;
+      }
     }
     if (event.effect !== 'ask') return;
     const session = await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined);
@@ -664,6 +732,7 @@ export async function setupServer(
       if (type === 'session.renamed' && sessionID)
         void watcher?.titleChanged(sessionID).catch(() => {});
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
+      if (type === 'session.deleted' && sessionID) watcher?.sessionDeleted(sessionID);
       if (
         sessionID &&
         (type === 'session.archived' ||
