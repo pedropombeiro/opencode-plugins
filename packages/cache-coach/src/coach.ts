@@ -425,7 +425,7 @@ export function createCoach(options: CoachOptions) {
           title: turn.text,
           variant: 'info',
           message:
-            'If the agent is still searching, narrow the scope or ask it to batch independent checks into one model round trip.',
+            'Many sequential tool calls in one turn add up. Narrow the scope or ask the agent to batch independent checks.',
         });
     }
     const previous = lastStep(
