@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.1.1...opencode-forgekeeper-5.2.0) (2026-11-25)
+
+
+### Features
+
+* **forgekeeper:** notify on reviewer approvals and support restricted follow-ups ([3b439e6](https://github.com/pedropombeiro/opencode-plugins/commit/3b439e6373df47ed42f08fbcc9f0ff4b5bd9a2b0))
+
+
+### Bug Fixes
+
+* **forgekeeper:** deliver linked-session notices immediately after pre-flight ([6ff9a46](https://github.com/pedropombeiro/opencode-plugins/commit/6ff9a46fd3d28cfaedf90c11efa0dc13a878bd2d))
+
 ## [5.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.1.0...opencode-forgekeeper-5.1.1) (2026-11-23)
 
 
