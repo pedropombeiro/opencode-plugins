@@ -173,8 +173,8 @@ describe('Desktop status pill', () => {
   });
 
   test.each([
-    ['RUNNING', 'running', '… CI'],
-    ['CANCELED', 'canceled', 'CI canceled'],
+    ['RUNNING', 'running', '… CI · needs a reviewer'],
+    ['CANCELED', 'canceled', 'CI canceled · needs a reviewer'],
   ])('preserves CI state for %s', (status, label, expected) => {
     const { actions } = harness();
     expect(

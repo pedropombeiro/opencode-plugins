@@ -38,6 +38,14 @@ interface ApprovedByNode {
   bot?: boolean;
 }
 
+interface ApprovalRuleNode {
+  name: string;
+  type: string;
+  approvalsRequired: number;
+  approved: boolean;
+  eligibleApprovers: Array<{ username: string }>;
+}
+
 interface MergeRequestNode {
   iid: string;
   title: string;
@@ -47,6 +55,11 @@ interface MergeRequestNode {
   conflicts: boolean;
   approved: boolean | null;
   approvedBy: ConnectionPage<ApprovedByNode> | null;
+  approvalsRequired: number | null;
+  approvalsLeft: number | null;
+  autoMergeEnabled: boolean;
+  mergeTrainIndex: number | null;
+  approvalState?: { rules: ApprovalRuleNode[] } | null;
   mergeStatusEnum?: string | null;
   detailedMergeStatus: string | null;
   diffHeadSha: string | null;
@@ -120,6 +133,8 @@ const APPROVED_BY_FIELDS = 'pageInfo { hasNextPage endCursor } nodes { id userna
 
 const mergeRequestFields = (includeApprovedAt: boolean) => `
   iid title webUrl state draft conflicts approved mergeStatusEnum detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
+  approvalsRequired approvalsLeft autoMergeEnabled mergeTrainIndex
+  approvalState { rules { name type approvalsRequired approved eligibleApprovers { username } } }
   approvedBy(first: ${PAGE_SIZE}) { ${APPROVED_BY_FIELDS} }
   sourceProject { fullPath }
   targetProject { fullPath }
@@ -320,6 +335,19 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     const lines = [
       `Human approvals: ${yesNo(request.hasApprovals)} · Approval requirements satisfied: ${requirements}`,
     ];
+    const missing = request.missingRules ?? [];
+    for (const rule of missing.slice(0, 2)) {
+      const who = rule.eligibleReviewers.length
+        ? `, @${rule.eligibleReviewers[0]} can approve`
+        : rule.eligible.length
+          ? `, none of your reviewers can approve. Ask @${rule.eligible.slice(0, 2).join(', @')}${rule.eligible.length > 2 ? ` or ${rule.eligible.length - 2} others` : ''}`
+          : '';
+      lines.push(`Still needed: ${rule.name} (${rule.required}${who})`);
+    }
+    if (missing.length > 2) lines.push(`+${missing.length - 2} more rules`);
+    if (request.autoMergeEnabled) lines.push('Auto-merge: set');
+    if (request.mergeTrainIndex != null)
+      lines.push(`Merge train: position ${request.mergeTrainIndex + 1}`);
     if (request.mergeStatus) lines.push(`Merge status: ${humanize(request.mergeStatus)}`);
     return lines;
   },
@@ -717,6 +745,20 @@ export class GitLabForge implements Forge {
           reviewer.mergeRequestInteraction?.approved !== true,
       )
       .map((reviewer) => reviewer.username!);
+    const missingRules = (node.approvalState?.rules ?? [])
+      .filter((rule) => rule.approvalsRequired > 0 && !rule.approved)
+      .map((rule) => {
+        const eligible = rule.eligibleApprovers.map((approver) => approver.username);
+        return {
+          name: rule.name,
+          required: rule.approvalsRequired,
+          eligibleReviewers:
+            rule.type === 'ANY_APPROVER'
+              ? awaitingReviewers
+              : awaitingReviewers.filter((username) => eligible.includes(username)),
+          eligible: eligible.slice(0, 5),
+        };
+      });
     return {
       forge: 'gitlab',
       iid: node.iid,
@@ -735,6 +777,11 @@ export class GitLabForge implements Forge {
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
+      approvalsRequired: node.approvalsRequired ?? 0,
+      approvalsLeft: node.approvalsLeft ?? 0,
+      missingRules,
+      autoMergeEnabled: node.autoMergeEnabled,
+      mergeTrainIndex: node.mergeTrainIndex,
       awaitingReviewers,
       reviewersComplete: reviewersPage.complete,
       approvalsComplete: reviewersPage.complete && approvedByPage.complete,

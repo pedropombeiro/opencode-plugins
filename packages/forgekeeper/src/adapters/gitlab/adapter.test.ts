@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import type { Exec } from '../../exec';
 import type { Repository } from '../../git';
 import { footerSegments } from '../../format';
-import { ForgeError, pipelineFails } from '../../forge';
+import { ForgeError, pipelineFails, type GitLabMergeRequest } from '../../forge';
 import {
   classifyError,
   DISCUSSIONS_QUERY,
   GitLabForge,
   glabGraphQL,
+  gitlabTraits,
   SOURCE_BRANCH_QUERY,
   type GraphQL,
 } from './adapter';
@@ -36,6 +37,11 @@ const node = (overrides: Record<string, unknown>) => ({
   draft: false,
   conflicts: false,
   approved: false,
+  approvalsRequired: 0,
+  approvalsLeft: 0,
+  autoMergeEnabled: false,
+  mergeTrainIndex: null,
+  approvalState: { rules: [] },
   approvedBy: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
   reviewers: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
   detailedMergeStatus: 'MERGEABLE',
@@ -736,6 +742,69 @@ describe('GitLabForge.findByNumber', () => {
   test('returns undefined when no project has the MR', async () => {
     const graphql: GraphQL = async () => ({ p0: { mergeRequest: null }, p1: null });
     expect(await new GitLabForge(graphql).findByNumber(projects, '42')).toBeUndefined();
+  });
+
+  test('reads approval progress, missing rules, auto-merge, and the merge train', async () => {
+    const reviewer = (username: string) => ({
+      type: 'HUMAN',
+      username,
+      mergeRequestInteraction: { reviewState: null, approved: false },
+    });
+    const graphql: GraphQL = async () => ({
+      p0: {
+        mergeRequest: node({
+          approvalsRequired: 2,
+          approvalsLeft: 2,
+          autoMergeEnabled: true,
+          mergeTrainIndex: 1,
+          reviewers: { nodes: [reviewer('alice')] },
+          approvalState: {
+            rules: [
+              {
+                name: '/docs/ @owners',
+                type: 'CODE_OWNER',
+                approvalsRequired: 1,
+                approved: false,
+                eligibleApprovers: [{ username: 'owner' }],
+              },
+              {
+                name: 'Any',
+                type: 'ANY_APPROVER',
+                approvalsRequired: 1,
+                approved: false,
+                eligibleApprovers: [],
+              },
+              {
+                name: 'Done',
+                type: 'REGULAR',
+                approvalsRequired: 1,
+                approved: true,
+                eligibleApprovers: [],
+              },
+            ],
+          },
+        }),
+      },
+    });
+    const mr = await new GitLabForge(graphql).findByNumber(projects, '1');
+    expect(mr).toMatchObject({
+      approvalsRequired: 2,
+      approvalsLeft: 2,
+      autoMergeEnabled: true,
+      mergeTrainIndex: 1,
+      missingRules: [
+        { name: '/docs/ @owners', required: 1, eligibleReviewers: [], eligible: ['owner'] },
+        { name: 'Any', required: 1, eligibleReviewers: ['alice'], eligible: [] },
+      ],
+    });
+    expect(gitlabTraits.details(mr as GitLabMergeRequest)).toEqual(
+      expect.arrayContaining([
+        'Still needed: /docs/ @owners (1, none of your reviewers can approve. Ask @owner)',
+        'Still needed: Any (1, @alice can approve)',
+        'Auto-merge: set',
+        'Merge train: position 2',
+      ]),
+    );
   });
 });
 

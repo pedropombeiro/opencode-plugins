@@ -86,7 +86,7 @@ describe('forge traits', () => {
       footerSegments({ loading: false, lookup: { kind: 'found', requests: [request] } }).map(
         (segment) => segment.text,
       );
-    expect(text(merge)).toEqual(['!7', 'no pipeline', '🤖 reviewing']);
+    expect(text(merge)).toEqual(['!7', 'no pipeline', '🤖 reviewing', 'needs a reviewer']);
     expect(text(pull)).toEqual(['#7', 'no checks', 'changes requested']);
     const fit = (width: number) =>
       responsiveFooterSegments(
