@@ -1299,10 +1299,7 @@ describe('review automation in a worktree', () => {
     // The owning session isn't waited for; the linked session runs the turn.
     expect(f.waited).toEqual(['linked']);
     expect(f.record()).toMatchObject({ state: 'completed', item: { sessionID: 'one' } });
-    expect(f.notices).toEqual([
-      ['started', 'running'],
-      ['ended', 'completed'],
-    ]);
+    expect(f.notices).toEqual([['ended', 'completed']]);
     expect(f.claim()).toBeUndefined();
   });
 
@@ -1519,10 +1516,7 @@ describe('review automation in a worktree', () => {
     expect(f.record()).toMatchObject({ state: 'failed' });
     expect(f.record().reason).toContain('never got its task');
     expect(f.claim()).toBeUndefined();
-    expect(f.notices).toEqual([
-      ['started', 'running'],
-      ['ended', 'failed'],
-    ]);
+    expect(f.notices).toEqual([['ended', 'failed']]);
   });
 
   test("deleting the owning session doesn't end a turn its linked session still runs", async () => {

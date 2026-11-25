@@ -846,7 +846,6 @@ export function createAutomationHost(
     const ref = parseUrl(record.item.url);
     const label = ref ? traitsOf(ref).reference(ref.iid) : record.item.url;
     const task = job ? 'investigating the failed jobs of' : 'preparing fixes for';
-    const wake = phase === 'ended' && (record.startedAt !== undefined || !!record.manual);
     const lines =
       phase === 'started'
         ? [
@@ -861,7 +860,7 @@ export function createAutomationHost(
       phase === 'started'
         ? `Forgekeeper: ${job ? 'investigating failed jobs for' : 'preparing review fixes for'} ${label}`
         : `Forgekeeper: ${job ? 'failed-job investigation' : 'review preparation'} ${record.state} for ${label}`;
-    await env.relay(record.item.sessionID, description, lines.join('\n\n'), wake);
+    await env.relay(record.item.sessionID, description, lines.join('\n\n'), true);
   }
 
   async function assertPending(item: FeedbackItem) {
@@ -1049,7 +1048,10 @@ export function createAutomationHost(
           await assertSoleOwner(current.item);
           await start.admit();
           const started = startedRecord(current, models);
-          if (await save(started, current)) return started;
+          if (await save(started, current)) {
+            if (started.execution) await notify(started, 'started').catch(() => {});
+            return started;
+          }
         }
       }
       if (isApproval(record.item)) {
@@ -1096,6 +1098,7 @@ export function createAutomationHost(
       const started = startedRecord(record, models);
       if (!(await save(started, record)))
         throw new Error('Review automation changed before the coding turn');
+      if (started.execution) await notify(started, 'started').catch(() => {});
       return started;
     },
 

@@ -1074,9 +1074,17 @@ describe('worktree automation', () => {
       await expect(f.authorizeStart(attempt, 'gitlab/any')).rejects.toThrow(
         'needs one of these models: gitlab/strong',
       );
+      expect(f.synthetic).toEqual([]);
       const started = await f.authorizeStart(attempt, 'gitlab/strong');
       expect(started).toMatchObject({ startedAt: at, models: ['gitlab/strong'] });
       expect(await f.claims.records.read(batch)).toEqual(started);
+      expect(f.synthetic).toHaveLength(1);
+      expect(f.synthetic[0]).toMatchObject({
+        sessionID: 'one',
+        description: 'Forgekeeper: investigating failed jobs for !1',
+        metadata: { forgekeeper: SUMMARY_KIND },
+        resume: true,
+      });
       f.close();
     });
 
@@ -1522,7 +1530,7 @@ describe('worktree automation', () => {
       sessionID: 'one',
       description: 'Forgekeeper: investigating failed jobs for !1',
       metadata: { forgekeeper: SUMMARY_KIND },
-      resume: false,
+      resume: true,
     });
     expect(f.synthetic[1]).toMatchObject({
       sessionID: 'one',
@@ -1549,7 +1557,6 @@ describe('worktree automation', () => {
     expect(completion).toContain('Undercover flagged collect_stats at 0% coverage.');
     expect(completion).toContain('M scripts/perf/gc/collect_gc_stats.rb');
 
-    // An automatic attempt that failed before starting does not wake the owner.
     await f.host.notify!(
       {
         ...linkedAttempt(jobItem),
@@ -1560,7 +1567,7 @@ describe('worktree automation', () => {
     );
     expect(f.synthetic[2]).toMatchObject({
       description: 'Forgekeeper: failed-job investigation failed for !1',
-      resume: false,
+      resume: true,
     });
 
     await f.host.notify!(
@@ -1576,11 +1583,85 @@ describe('worktree automation', () => {
     expect(f.synthetic[3].resume).toBe(true);
     expect(await deliver(3)).toContain('No worktree available.');
 
-    // An archived owning session is not woken or notified.
     f.sessions.one = { id: 'one', time: { archived: 1 }, location: { directory: '/owner' } };
     await f.host.notify!({ ...startedAttempt, state: 'completed' }, 'ended');
     expect(f.synthetic).toHaveLength(4);
     f.close();
+  });
+
+  test('owner summary delivery handles and cleans up a relay notice posted by a worktree instance', async () => {
+    const storage: Record<string, unknown> = {};
+    const removed: string[] = [];
+    const ownerMessages: Message[] = [];
+    const synthetic: Array<Record<string, unknown>> = [];
+    const makeCtx = (directory: string) =>
+      ({
+        location: { directory, project: { id: 'project' } },
+        storage: {
+          get: async (key: string) => storage[key],
+          set: async (key: string, value: unknown) => {
+            storage[key] = value;
+          },
+          remove: async (key: string) => {
+            removed.push(key);
+            delete storage[key];
+          },
+        },
+        session: {
+          context: async () => ownerMessages,
+          synthetic: async (input: Record<string, unknown>) => {
+            synthetic.push(input);
+          },
+        },
+      }) as unknown as Plugin.Context;
+    const summaryHost = {
+      closing: () => false,
+      inbox: async () => ({ items: [], paused: false }),
+      deliverable: async () => true,
+      scan: async () => [],
+      write: (task: () => Promise<void>) => void task(),
+      report: () => {},
+    };
+    const worktreeSummaries = createSummaryDelivery(
+      makeCtx('/worktree'),
+      { exec: async () => ({ code: 0, stdout: '', stderr: '' }) },
+      summaryHost,
+    );
+    const ownerSummaries = createSummaryDelivery(
+      makeCtx('/owner'),
+      { exec: async () => ({ code: 0, stdout: '', stderr: '' }) },
+      summaryHost,
+    );
+    await worktreeSummaries.relay(
+      'one',
+      'Forgekeeper: investigating failed jobs for !1',
+      'Worktree: /worktree',
+      true,
+    );
+    expect(synthetic).toHaveLength(1);
+    const id = String(synthetic[0].id);
+    ownerMessages.push(message('synthetic', id, 10));
+    const relayRequest = {
+      sessionID: 'one',
+      messages: [{ role: 'user', content: [{ type: 'text', text: String(synthetic[0].text) }] }],
+      options: {},
+      system: [],
+      tools: { bash: {} },
+    };
+    expect(await ownerSummaries.prepare(relayRequest)).toBe(true);
+    expect(Object.keys(relayRequest.tools)).toHaveLength(0);
+    expect(JSON.stringify(relayRequest.messages)).toContain('Worktree: /worktree');
+
+    ownerMessages.push(message('user', 'u2', 20));
+    const userRequest = {
+      sessionID: 'one',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Next question' }] }],
+      options: {},
+      system: [],
+      tools: { bash: {} },
+    };
+    expect(await ownerSummaries.prepare(userRequest)).toBe(false);
+    expect(removed).toEqual([`status/summaries/one/${id}`]);
   });
 
   test('appends non-interactive linked-session instructions only for environment executions', () => {

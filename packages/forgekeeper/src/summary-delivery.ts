@@ -365,8 +365,10 @@ export function createSummaryDelivery(
       requesting.delete(event.sessionID);
       const tagged = taggedInput(event.messages);
       let record = await summaryTurn(event.sessionID);
-      if (!record && tagged && !(await userInput(event.sessionID)))
+      if (!record && tagged && !(await userInput(event.sessionID))) {
         record = (await readRecord(event.sessionID, tagged)) ?? 'failed';
+        if (record !== 'failed') track(event.sessionID, record.messageID);
+      }
       if (!record) {
         return false;
       }

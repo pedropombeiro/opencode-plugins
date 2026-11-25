@@ -813,7 +813,6 @@ export function createReviewAutomation(host: AutomationHost) {
     }
     admitting();
     await providerOf(stored).submit(stored as LinkedRecord);
-    await host.notify?.(stored, 'started').catch(() => {});
     return stored;
   }
 
