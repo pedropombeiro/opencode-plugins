@@ -24,6 +24,7 @@ jobs:
       tmux-indicator--release_created: ${{ steps.release.outputs['packages/tmux-indicator--release_created'] }}
       session-finder--release_created: ${{ steps.release.outputs['packages/session-finder--release_created'] }}
       cache-coach--release_created: ${{ steps.release.outputs['packages/cache-coach--release_created'] }}
+      vent--release_created: ${{ steps.release.outputs['packages/vent--release_created'] }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -52,6 +53,8 @@ jobs:
             enabled: ${{ needs.release-please.outputs['session-finder--release_created'] }}
           - package: cache-coach
             enabled: ${{ needs.release-please.outputs['cache-coach--release_created'] }}
+          - package: vent
+            enabled: ${{ needs.release-please.outputs['vent--release_created'] }}
     steps:
       - if: matrix.enabled == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

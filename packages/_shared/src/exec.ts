@@ -4,6 +4,8 @@ export interface ExecOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
   timeout?: number;
+  stdin?: string;
+  signal?: AbortSignal;
 }
 
 export interface ExecResult {
@@ -14,7 +16,7 @@ export interface ExecResult {
 
 export function exec(file: string, args: string[], options: ExecOptions = {}): Promise<ExecResult> {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       file,
       args,
       {
@@ -23,6 +25,7 @@ export function exec(file: string, args: string[], options: ExecOptions = {}): P
         timeout: options.timeout,
         maxBuffer: 16 * 1024 * 1024,
         encoding: 'utf8',
+        signal: options.signal,
       },
       (error, stdout, stderr) => {
         if (!error) {
@@ -33,5 +36,10 @@ export function exec(file: string, args: string[], options: ExecOptions = {}): P
         resolve({ stdout, stderr: stderr || error.message, code });
       },
     );
+
+    if (options.stdin !== undefined && child.stdin) {
+      child.stdin.on('error', () => {});
+      child.stdin.end(options.stdin);
+    }
   });
 }

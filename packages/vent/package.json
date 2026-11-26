@@ -1,0 +1,41 @@
+{
+  "name": "opencode-vent",
+  "version": "0.0.0",
+  "description": "OpenCode plugin that exposes a vent tool to record tooling, documentation, skill, permission, and workflow frictions with automatic deduplication",
+  "author": {
+    "name": "Pedro Pombeiro",
+    "email": "pedropombeiro@users.noreply.github.com"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "default": "./dist/index.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedropombeiro/opencode-plugins.git",
+    "directory": "packages/vent"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "vent",
+    "friction",
+    "issues",
+    "gitlab",
+    "github"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode/plugin": "^2.4.0"
+  }
+}
