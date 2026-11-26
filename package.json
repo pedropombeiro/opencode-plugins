@@ -6,7 +6,7 @@
   ],
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@opencode/plugin": "2.3.2",
+    "@opencode/plugin": "2.4.0",
     "@opentui/core": "0.9.7",
     "@opentui/solid": "0.9.7",
     "@types/node": "26.6.6",
