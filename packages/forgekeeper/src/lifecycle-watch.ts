@@ -1,14 +1,16 @@
 // Lifecycle events for a session's PRs/MRs: one that starts to conflict with
 // its target branch, one whose pipeline gets new failed jobs, even while the
-// pipeline still runs, and one that merges. Each comes from a change
-// between two lookups, never from the state alone, so the first lookup of a
-// PR/MR only records it, and nothing old is announced after a restart.
+// pipeline still runs, one a reviewer requests changes to, and one that
+// merges. Each comes from a change between two lookups, never from the state
+// alone, so the first lookup of a PR/MR only records it, and nothing old is
+// announced after a restart.
 //
 // Events wait in their PR/MR's record until they reach the inbox. The record
 // and its new events are one storage write, so a crash neither loses an
 // event nor repeats it, and a merged PR/MR that nothing polls anymore still
 // gets its event delivered.
 import {
+  changesRequested,
   jobKey,
   pipelineFails,
   pipelineRunning,
@@ -19,7 +21,7 @@ import {
 import type { EventPolicy, FeedbackDelivery } from './options';
 import { createKeyedQueue } from './keyed-queue';
 
-export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed';
+export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed' | 'changes-requested';
 
 // The head pipeline as a lookup last saw it.
 export interface PipelineState {
@@ -76,6 +78,12 @@ export interface LifecycleRecord {
   conflicts?: boolean;
   // How many times the PR/MR started to conflict, for distinct event IDs.
   cycles: number;
+  // Whether a reviewer's request for changes stood at the last lookup. Absent
+  // in records from before Forgekeeper watched it, whose next lookup only
+  // records it.
+  changesRequested?: boolean;
+  // How many times a reviewer requested changes, for distinct event IDs.
+  requestCycles?: number;
   // Absent in records from before Forgekeeper watched pipelines, whose next
   // lookup only records the pipeline.
   ci?: PipelineState;
@@ -150,6 +158,26 @@ function newFailures(previous: PipelineState, current: PipelineState): string[] 
   return failureKeys(current).filter((key) => !known.has(key));
 }
 
+// GitLab statuses that can hide a request for changes while a push is checked.
+const TRANSIENT_MERGE_STATUSES = new Set([
+  'CHECKING',
+  'UNCHECKED',
+  'CI_STILL_RUNNING',
+  'CI_MUST_PASS',
+]);
+
+// Whether changes are requested after a lookup. While GitLab reports a status
+// that can hide the request, the last known state stands, so a push that
+// restarts the pipeline doesn't make the same request a new one.
+function requestedChanges(request: ReviewRequest, previous: boolean | undefined) {
+  const hidden =
+    request.forge === 'gitlab' &&
+    request.state === 'opened' &&
+    !request.awaitingReviewers.length &&
+    TRANSIENT_MERGE_STATUSES.has(request.mergeStatus ?? '');
+  return hidden ? previous : changesRequested(request);
+}
+
 // The session's records after a lookup of its targets. Returns a record for
 // each request. A request without a record gets one without events.
 export function observe(
@@ -177,6 +205,8 @@ export function observe(
         : undefined;
     const parent = found?.url ?? kept;
     let cycles = previous?.cycles ?? 0;
+    let requestCycles = previous?.requestCycles ?? 0;
+    const requested = requestedChanges(request, previous?.changesRequested);
     const pending = [...(previous?.pending ?? [])];
     const add = (kind: LifecycleKind, id: string, extra: Partial<LifecycleEvent> = {}) => {
       if (pending.some((event) => event.id === id)) return;
@@ -216,6 +246,13 @@ export function observe(
         cycles++;
         add('conflict', JSON.stringify([sessionID, request.url, 'conflict', cycles]));
       }
+      if (requested && previous.changesRequested === false) {
+        requestCycles++;
+        add(
+          'changes-requested',
+          JSON.stringify([sessionID, request.url, 'changes-requested', requestCycles]),
+        );
+      }
       if (previous.state === 'opened' && request.state === 'merged')
         add('merged', JSON.stringify([sessionID, request.url, 'merged']));
     }
@@ -226,6 +263,8 @@ export function observe(
       state: request.state,
       ...(conflicts !== undefined ? { conflicts } : {}),
       cycles,
+      ...(requested !== undefined ? { changesRequested: requested } : {}),
+      requestCycles,
       ci,
       targetProject: request.targetProject,
       targetBranch: request.targetBranch,

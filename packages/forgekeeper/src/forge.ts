@@ -133,6 +133,19 @@ export function approversOf(request: ReviewRequest): ReviewerApproval[] {
 export const approvalsComplete = (request: ReviewRequest): boolean =>
   request.approvalsComplete !== false && request.reviewersComplete !== false;
 
+// Whether a reviewer asked for changes that nobody has re-requested review of
+// or approved since. A GitLab Duo re-review in progress supersedes the request,
+// because GitLab keeps reporting the old merge status until it finishes.
+export function changesRequested(request: ReviewRequest): boolean {
+  if (request.state !== 'opened' || request.draft || request.awaitingReviewers.length) return false;
+  if (request.forge === 'github') return request.reviewDecision === 'CHANGES_REQUESTED';
+  return (
+    request.approvalRequirementsSatisfied !== true &&
+    request.mergeStatus === 'REQUESTED_CHANGES' &&
+    request.duoReviewState !== 'REVIEW_STARTED'
+  );
+}
+
 // A PR/MR identified by URL, independent of the checked-out branch.
 export interface ReviewRef {
   forge: ForgeKind;

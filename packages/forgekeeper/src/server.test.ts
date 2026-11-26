@@ -134,6 +134,7 @@ class StatusForge implements Forge {
       state: 'opened',
       conflicts: false,
       conflictsKnown: true,
+      awaitingReviewers: [],
       targetProject: project,
       targetBranch: 'main',
       sourceProject: project,
@@ -2930,6 +2931,26 @@ describe('PR/MR status lifecycle', () => {
     // The inbox mode, the default, posts nothing to the session.
     expect(app.passive).toEqual([]);
     forge.set('group/a', '1', { conflicts: false });
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('announces requested changes once, and clears it once the review is requested again', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const { app } = await watchedTargets([projectA], { status: forge });
+    forge.set('group/a', '1', { mergeStatus: 'REQUESTED_CHANGES' });
+    await app.refresh();
+    await settle();
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toMatchObject([
+      { kind: 'changes-requested', url: projectA, title: '!1: a reviewer requested changes' },
+    ]);
+    expect(app.passive).toEqual([]);
+    forge.set('group/a', '1', { mergeStatus: 'REQUESTED_CHANGES', awaitingReviewers: ['alice'] });
     await app.refresh();
     await settle();
     expect((await app.feedback()).items).toEqual([]);

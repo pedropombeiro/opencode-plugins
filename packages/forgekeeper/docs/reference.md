@@ -62,7 +62,7 @@ Forgekeeper 3 changes where review notifications go, and renames its options:
   that names each one, and uses that option's default instead. For example, a former
   `reviewStatus: false` leaves status on, so rename it to `status: false` before you upgrade.
 - **Monitoring:** Forgekeeper also watches recent sessions with PR/MR targets that no CLI
-  has shown, and announces conflicts, failed jobs, and merges of their targets. See
+  has shown, and announces conflicts, failed jobs, requested changes, and merges of their targets. See
   [Which sessions the server watches](#which-sessions-the-server-watches) and
   [Merge request updates](#merge-request-updates). Set `watch.lifecycle` to `false` to
   stop the merge request updates.
@@ -691,11 +691,13 @@ updates.
 
 ## Merge request updates
 
-Forgekeeper also watches each session's explicit PR/MR targets for three changes:
+Forgekeeper also watches each session's explicit PR/MR targets for four changes:
 
 - **Conflicts:** a target that could merge starts to conflict with its target branch.
 - **Failed jobs:** a job fails in a target's head pipeline, even while the pipeline still
   runs.
+- **Requested changes:** a reviewer requests changes to a target. A target whose review is
+  requested again, or that is approved, is no longer waiting on the author.
 - **Merges:** a target merges.
 
 All come from the forge's own state, compared between two lookups, never from comments
@@ -741,9 +743,10 @@ from when it was detected, so turning on summaries never starts turns for change
 earlier. A summary turn has no tools, and gets only Forgekeeper's facts about the change,
 never comments.
 
-A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
+A conflict update clears once the conflict ends or the PR/MR closes. A requested-changes
+update clears once the request no longer stands. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
-drops clear right away. Setting `watch.lifecycle` to `false` stops all three kinds, and
+drops clear right away. Setting `watch.lifecycle` to `false` stops all four kinds, and
 retarget proposals too, since nothing notices merges then.
 
 ### Stacked PRs/MRs
@@ -1290,7 +1293,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.humanReviews`     | `true`                        | Watch for new review feedback from people.                                                                                                                                                                                                                                                                          |
 | `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                                                                                                                                                                                                   |
 | `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                                                                                                                                                                                            |
-| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                                           |
+| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, get requested changes, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                    |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
 | `inbox`                  | `false`                       | Enable inbox monitoring for checkouts without a saved monitoring preference. Automation rules also enable it.                                                                                                                                                                                                       |
@@ -1436,7 +1439,7 @@ If you set options for `opencode-forgekeeper` 2.x, also see
   `src/adapters/gitlab/review-requests.ts` reads them from GitLab's activity notes.
 - `src/review-monitoring.ts` configures the review watchers, stores their state, and records
   review updates in the inbox.
-- `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and
+- `src/lifecycle-watch.ts` finds conflicts, failed jobs, requested changes, merges, and stack links between lookups, and
   keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` proposes retargets
   of stacked PRs/MRs.
 - `src/lifecycle-notifications.ts` formats lifecycle updates, checks retarget proposals, and

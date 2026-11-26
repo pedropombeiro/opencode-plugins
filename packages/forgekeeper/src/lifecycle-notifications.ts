@@ -103,6 +103,11 @@ export function createLifecycleNotifications(
     if (!targets) return;
     if (event.kind === 'conflict' && (record.state !== 'opened' || record.conflicts === false))
       return;
+    if (
+      event.kind === 'changes-requested' &&
+      (record.state !== 'opened' || record.changesRequested === false)
+    )
+      return;
     const still = new Set(record.ci ? failureKeys(record.ci) : []);
     if (
       event.kind === 'ci-failed' &&
@@ -140,7 +145,9 @@ export function createLifecycleNotifications(
         ? failureTitle(record.reference, ci, failures, forge ? traitsOf(forge).ci : 'pipeline')
         : event.kind === 'conflict'
           ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
-          : `${record.reference} merged into ${record.targetBranch}`;
+          : event.kind === 'changes-requested'
+            ? `${record.reference}: a reviewer requested changes`
+            : `${record.reference} merged into ${record.targetBranch}`;
     const item: FeedbackItem = {
       id: event.id,
       kind: event.kind,
