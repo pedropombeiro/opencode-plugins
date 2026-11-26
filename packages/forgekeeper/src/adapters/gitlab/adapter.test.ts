@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import type { Exec } from '../../exec';
 import type { Repository } from '../../git';
 import { footerSegments } from '../../format';
-import { ForgeError, pipelineFails } from '../../forge';
+import { ForgeError, pipelineFails, type GitLabMergeRequest } from '../../forge';
 import {
   classifyError,
   DISCUSSIONS_QUERY,
   GitLabForge,
   glabGraphQL,
+  gitlabTraits,
+  ISSUE_QUERY,
   SOURCE_BRANCH_QUERY,
   type GraphQL,
 } from './adapter';
@@ -36,6 +38,11 @@ const node = (overrides: Record<string, unknown>) => ({
   draft: false,
   conflicts: false,
   approved: false,
+  approvalsRequired: 0,
+  approvalsLeft: 0,
+  autoMergeEnabled: false,
+  mergeTrainCar: null,
+  approvalState: { rules: [] },
   approvedBy: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
   reviewers: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
   detailedMergeStatus: 'MERGEABLE',
@@ -197,6 +204,61 @@ describe('GitLabForge title lookups', () => {
         project: { mergeRequest: { sourceBranch: '' } },
       })).sourceBranch(ref),
     ).toBeUndefined();
+  });
+});
+
+describe('GitLabForge.issue', () => {
+  const ref = { forge: 'gitlab' as const, host: 'gitlab.com', project: 'g/p', iid: '9' };
+
+  test("reads an issue's status, assignees, labels, and milestone", async () => {
+    let seen: Record<string, string> = {};
+    const graphql: GraphQL = async (_host, query, variables) => {
+      seen = variables;
+      expect(query).toBe(ISSUE_QUERY);
+      return {
+        project: {
+          workItems: {
+            nodes: [
+              {
+                state: 'OPEN',
+                widgets: [
+                  {},
+                  { status: { name: 'In dev' } },
+                  { assignees: { nodes: [{ username: 'alice' }] } },
+                  { labels: { nodes: [{ title: 'group::dh' }, { title: 'bug::ux' }] } },
+                  { milestone: { title: '19.7' } },
+                ],
+              },
+            ],
+          },
+        },
+      };
+    };
+    expect(await new GitLabForge(graphql).issue(ref)).toEqual({
+      open: true,
+      status: 'In dev',
+      assignees: ['alice'],
+      labels: ['group::dh', 'bug::ux'],
+      milestone: '19.7',
+    });
+    expect(seen).toEqual({ project: 'g/p', iid: '9' });
+  });
+
+  test('leaves out what an issue does not have, and reads a closed one', async () => {
+    const closed = async () => ({
+      project: { workItems: { nodes: [{ state: 'CLOSED', widgets: [{ status: null }] }] } },
+    });
+    expect(await new GitLabForge(closed).issue(ref)).toEqual({
+      open: false,
+      assignees: [],
+      labels: [],
+    });
+  });
+
+  test('is undefined for an issue that does not exist', async () => {
+    const none = async () => ({ project: { workItems: { nodes: [] } } });
+    expect(await new GitLabForge(none).issue(ref)).toBeUndefined();
+    expect(await new GitLabForge(async () => ({ project: null })).issue(ref)).toBeUndefined();
   });
 });
 
@@ -736,6 +798,209 @@ describe('GitLabForge.findByNumber', () => {
   test('returns undefined when no project has the MR', async () => {
     const graphql: GraphQL = async () => ({ p0: { mergeRequest: null }, p1: null });
     expect(await new GitLabForge(graphql).findByNumber(projects, '42')).toBeUndefined();
+  });
+
+  test('reads approval progress, missing rules, auto-merge, and the merge train', async () => {
+    const reviewer = (username: string, type = 'HUMAN') => ({
+      type,
+      username,
+      mergeRequestInteraction: { reviewState: null, approved: false },
+    });
+    const graphql: GraphQL = async (_host, query) => {
+      expect(query).toContain('eligibleApprovers { username type bot }');
+      expect(query).toContain('mergeTrainCar { index }');
+      return {
+        p0: {
+          mergeRequest: node({
+            approvalsRequired: 2,
+            approvalsLeft: 2,
+            autoMergeEnabled: true,
+            mergeTrainCar: { index: 1 },
+            reviewers: { nodes: [reviewer('alice'), reviewer('Service', 'SERVICE_USER')] },
+            approvalState: {
+              rules: [
+                {
+                  name: 'Maintainers',
+                  type: 'CODE_OWNER',
+                  approvalsRequired: 1,
+                  approved: false,
+                  eligibleApprovers: [
+                    { username: 'service', type: 'SERVICE_USER', bot: false },
+                    { username: 'robot', type: 'PROJECT_BOT', bot: true },
+                    ...Array.from({ length: 6 }, (_, index) => ({
+                      username: `owner${index}`,
+                      type: 'HUMAN',
+                      bot: false,
+                    })),
+                  ],
+                },
+                {
+                  name: 'Any',
+                  type: 'ANY_APPROVER',
+                  approvalsRequired: 1,
+                  approved: false,
+                  eligibleApprovers: null,
+                },
+                {
+                  name: 'Done',
+                  type: 'REGULAR',
+                  approvalsRequired: 1,
+                  approved: true,
+                  eligibleApprovers: [],
+                },
+              ],
+            },
+          }),
+        },
+      };
+    };
+    const mr = await new GitLabForge(graphql).findByNumber(projects, '1');
+    expect(mr).toMatchObject({
+      approvalsRequired: 2,
+      approvalsLeft: 2,
+      autoMergeEnabled: true,
+      mergeTrainIndex: 1,
+      missingRules: [
+        {
+          name: 'Maintainers',
+          type: 'CODE_OWNER',
+          required: 1,
+          eligibleReviewers: ['Service'],
+          eligible: ['owner0', 'owner1'],
+          eligibleCount: 6,
+        },
+        { name: 'Any', required: 1, eligibleReviewers: [], eligible: [] },
+      ],
+    });
+    expect(gitlabTraits.details(mr as GitLabMergeRequest)).toEqual(
+      expect.arrayContaining([
+        'Still needed: Maintainers (1 required in total, @Service can approve)',
+        'Still needed: Any (1 required in total)',
+        'Auto-merge: set',
+        'Merge train: position 2',
+      ]),
+    );
+    expect(
+      gitlabTraits.details({
+        ...mr!,
+        awaitingReviewers: [],
+        missingRules: mr!.missingRules?.map((rule) => ({ ...rule, eligibleReviewers: [] })),
+      }),
+    ).toContain(
+      'Still needed: Maintainers (1 required in total, ask @owner0, @owner1 or 4 others)',
+    );
+    expect(gitlabTraits.reviewIndicators?.(mr!).map(({ text }) => text)).toContain(
+      'awaiting @alice, @Service',
+    );
+  });
+
+  test.each([{ assigned: ['Service', 'BOB'] }, { assigned: ['BOB', 'Service'] }, { assigned: [] }])(
+    'excludes prior approvers and prefers humans with assigned reviewers %j',
+    async ({ assigned }) => {
+      const user = (username: string, type = 'HUMAN') => ({ username, type, bot: false });
+      const graphql: GraphQL = async () => ({
+        p0: {
+          mergeRequest: node({
+            approvalsLeft: 1,
+            approvedBy: { nodes: [user('ALICE')] },
+            reviewers: { nodes: assigned.map((username) => ({ username })) },
+            approvalState: {
+              rules: [
+                {
+                  name: 'Maintainers',
+                  type: 'REGULAR',
+                  approvalsRequired: 2,
+                  approved: false,
+                  eligibleApprovers: [
+                    user('service', 'SERVICE_USER'),
+                    user('alice'),
+                    user('bob'),
+                    user('carol'),
+                    user('dave'),
+                  ],
+                },
+              ],
+            },
+          }),
+        },
+      });
+      const mr = (await new GitLabForge(graphql).findByNumber(projects, '1'))!;
+      expect(mr.awaitingReviewers).toEqual([...assigned]);
+      expect(mr.missingRules?.[0]).toMatchObject({
+        eligibleReviewers: assigned.length ? ['BOB', 'Service'] : [],
+        eligible: ['bob', 'carol'],
+        eligibleCount: 3,
+      });
+      expect(gitlabTraits.details(mr)).toContain(
+        `Still needed: Maintainers (2 required in total, ${assigned.length ? '@BOB can approve' : 'ask @bob, @carol or 1 other'})`,
+      );
+    },
+  );
+
+  test.each(['approvalsLeft', 'approvedAt'])(
+    'recovers when both optional selections are unsupported, starting with %s',
+    async (firstMissing) => {
+      const queries: string[] = [];
+      const unsupported = [
+        firstMissing,
+        firstMissing === 'approvedAt' ? 'approvalsLeft' : 'approvedAt',
+      ];
+      const graphql: GraphQL = async (_host, query) => {
+        queries.push(query);
+        const field = unsupported.find((name) => query.includes(name));
+        if (field) throw new ForgeError('request', `Field '${field}' doesn't exist on type`);
+        expect(query).toContain('autoMergeEnabled');
+        const mergeable = node({
+          approvalsRequired: undefined,
+          approvalsLeft: undefined,
+          approvalState: undefined,
+          autoMergeEnabled: true,
+          headPipeline: null,
+        });
+        return {
+          p0: {
+            mergeRequest: mergeable,
+            mergeRequests: { nodes: [mergeable] },
+          },
+        };
+      };
+      const approvedAt = new Set<string>();
+      const extended = new Set<string>();
+      const first = await new GitLabForge(graphql, approvedAt, extended).findByNumber(
+        projects,
+        '1',
+      );
+      expect(first?.approvalsLeft).toBeUndefined();
+      expect(
+        footerSegments({ loading: false, lookup: { kind: 'found', requests: [first!] } }).map(
+          ({ text }) => text,
+        ),
+      ).toEqual(['!1', 'no pipeline', 'auto-merge set']);
+      expect(queries).toHaveLength(3);
+      expect(
+        await new GitLabForge(graphql, approvedAt, extended).findByBranch(repository),
+      ).toHaveLength(1);
+      expect(queries).toHaveLength(4);
+      expect(queries[3]).not.toContain('approvalState');
+      expect(queries[3]).not.toContain('approvedAt');
+    },
+  );
+
+  test.each([
+    ['MergeTrainCar', true],
+    ['UnrelatedType', false],
+  ] as const)('only retries a missing index on MergeTrainCar: %s', async (parent, retry) => {
+    let calls = 0;
+    const error = new ForgeError('request', `Field 'index' doesn't exist on type '${parent}'`);
+    const graphql: GraphQL = async (_host, query) => {
+      calls++;
+      if (query.includes('mergeTrainCar')) throw error;
+      return { p0: { mergeRequest: node({}) } };
+    };
+    const lookup = new GitLabForge(graphql).findByNumber(projects, '1');
+    if (retry) expect(await lookup).toMatchObject({ iid: '1' });
+    else await expect(lookup).rejects.toBe(error);
+    expect(calls).toBe(retry ? 2 : 1);
   });
 });
 

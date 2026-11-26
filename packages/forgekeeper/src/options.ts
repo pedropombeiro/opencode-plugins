@@ -30,6 +30,9 @@ export interface Watch {
   lifecycle: boolean;
   // Requests for your review, including repeated ones.
   reviewRequests: boolean;
+  // Issue fields that a PR/MR's progress leaves outdated, on GitLab. Needs
+  // `lifecycle`.
+  issues: boolean;
 }
 
 // What an update does besides entering the inbox. `passive` queues a session
@@ -104,6 +107,7 @@ const DEFAULT_WATCH: Watch = {
   reviewBots: true,
   lifecycle: true,
   reviewRequests: true,
+  issues: true,
 };
 const DEFAULT_DELIVERY: Delivery = { reviews: 'inbox', lifecycle: 'inbox' };
 const NOTIFY: EventPolicy = { mode: 'notify', actions: [] };
@@ -452,6 +456,7 @@ export function statusOptions(options: unknown): StatusOptions {
       reviewBots: watched('reviewBots'),
       lifecycle: watched('lifecycle'),
       reviewRequests: watched('reviewRequests'),
+      issues: watched('issues'),
     },
     reviewBots: read.reviewBots(source.reviewBots),
     delivery: { reviews: delivered('reviews'), lifecycle: delivered('lifecycle') },

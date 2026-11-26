@@ -1,5 +1,12 @@
 import { automatedReview } from './automated-review-watch';
-import { yesNo, type Indicator, type Pipeline, type ReviewRequest, type Tone } from './forge';
+import {
+  awaitingText,
+  yesNo,
+  type Indicator,
+  type Pipeline,
+  type ReviewRequest,
+  type Tone,
+} from './forge';
 import { reference, traitsOf } from './forges';
 import type { Snapshot } from './store';
 
@@ -33,12 +40,6 @@ const COMPACT_CI: Partial<Record<Tone, string>> = {
   error: 'CI ✗',
   warning: 'CI …',
 };
-
-// Names one or two reviewers and counts larger groups to keep the footer short.
-function awaitingText(reviewers: string[]) {
-  if (reviewers.length > 2) return `awaiting ${reviewers.length} reviewers`;
-  return `awaiting ${reviewers.map((username) => `@${username}`).join(', ')}`;
-}
 
 function threadsText(request: ReviewRequest) {
   return `${request.unresolvedThreads}${request.threadsComplete ? '' : '+'} unresolved thread${request.unresolvedThreads === 1 && request.threadsComplete ? '' : 's'}`;
@@ -154,7 +155,9 @@ export function footerSegments(snapshot: Snapshot): Segment[] {
   segments.push(...traitsOf(request).indicators(request));
   if (request.conflicts) segments.push({ text: 'conflicts', tone: 'error', essential: true });
   if (!request.conflictsKnown) segments.push({ text: 'mergeability unknown', tone: 'muted' });
-  if (request.awaitingReviewers.length)
+  const reviewIndicators = traitsOf(request).reviewIndicators;
+  if (reviewIndicators) segments.push(...reviewIndicators(request));
+  else if (request.awaitingReviewers.length)
     segments.push({ text: awaitingText(request.awaitingReviewers), tone: 'muted' });
   else if (request.approved) segments.push({ text: 'approved', tone: 'success' });
   return [...segments, ...stale];
@@ -172,6 +175,9 @@ export function responsiveFooterSegments(snapshot: Snapshot, width: number): Seg
     text: segment.compact ?? segment.text,
   }));
   if (segmentsWidth(compact) <= width) return compact;
+
+  const trimmed = compact.filter((segment) => !segment.optional);
+  if (segmentsWidth(trimmed) <= width) return trimmed;
 
   const minimal = compact.filter((segment) => segment.essential);
   if (segmentsWidth(minimal) <= width) return minimal;

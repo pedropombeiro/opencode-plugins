@@ -45,7 +45,7 @@ function parseTargetUrl(value: string): Reference {
   return { url: url.href, ...parsed };
 }
 
-// Parses a single `target` and its `issue_url`. Undefined means automatic branch mode.
+// Parses a single `target` and its `issue_url`. Undefined means clear all targets.
 export function parseTarget(input: unknown): Target | undefined {
   if (
     !input ||
@@ -53,11 +53,11 @@ export function parseTarget(input: unknown): Target | undefined {
     !('target' in input) ||
     typeof input.target !== 'string'
   ) {
-    throw new Error('Provide a target URL or "branch".');
+    throw new Error('Provide a target URL or "none".');
   }
   const issueUrl = 'issue_url' in input ? input.issue_url : undefined;
-  if (input.target === 'branch') {
-    if (issueUrl !== undefined) throw new Error('Branch mode does not accept issue_url.');
+  if (input.target === 'none') {
+    if (issueUrl !== undefined) throw new Error('Clearing targets does not accept issue_url.');
     return undefined;
   }
   return relate(parseTargetUrl(input.target), issueUrl);
@@ -76,7 +76,7 @@ function relate(target: Reference, issueUrl: unknown): Target {
 }
 
 export type Operation = 'replace' | 'add' | 'remove';
-export type TargetChange = { operation: Operation; targets: Target[] } | { operation: 'branch' };
+export type TargetChange = { operation: Operation; targets: Target[] } | { operation: 'none' };
 
 const OPERATIONS = new Set<unknown>(['replace', 'add', 'remove']);
 
@@ -90,7 +90,7 @@ const dedupe = (targets: Target[]) => [
 // relates every one of them, which must all be PRs/MRs, to the same issue.
 export function parseTargetChange(input: unknown): TargetChange {
   if (!input || typeof input !== 'object')
-    throw new Error('Provide a target URL, "branch", or a list of targets.');
+    throw new Error('Provide a target URL, "none", or a list of targets.');
   const value = input as Record<string, unknown>;
   const operation = (value.operation ?? 'replace') as Operation;
   if (!OPERATIONS.has(operation))
@@ -109,8 +109,7 @@ export function parseTargetChange(input: unknown): TargetChange {
     ) {
       throw new Error('targets must be a non-empty list of full URLs.');
     }
-    if (urls.includes('branch'))
-      throw new Error('Use target: "branch" on its own to return to branch-based naming.');
+    if (urls.includes('none')) throw new Error('Use target: "none" to clear all targets.');
     if (urls.length > MAX_TARGETS)
       throw new Error(`A session can have at most ${MAX_TARGETS} targets.`);
     return {
@@ -119,10 +118,10 @@ export function parseTargetChange(input: unknown): TargetChange {
     };
   }
 
-  if (value.target === 'branch' && operation !== 'replace')
-    throw new Error('"branch" replaces every target, so it takes no operation.');
+  if (value.target === 'none' && operation !== 'replace')
+    throw new Error('"none" clears every target and only supports the default replace operation.');
   const target = parseTarget(value);
-  return target ? { operation, targets: [target] } : { operation: 'branch' };
+  return target ? { operation, targets: [target] } : { operation: 'none' };
 }
 
 // Applies a change to the session's targets. `missing` lists the URLs that a
@@ -131,7 +130,7 @@ export function applyTargetChange(
   current: readonly Target[],
   change: TargetChange,
 ): { targets: Target[]; missing: string[] } {
-  if (change.operation === 'branch') return { targets: [], missing: [] };
+  if (change.operation === 'none') return { targets: [], missing: [] };
   const known = new Map(current.map((target) => [target.url, target]));
 
   if (change.operation === 'remove') {
@@ -195,14 +194,18 @@ function mainReference(target: Target): string {
 }
 
 // A PR/MR's related issue: the explicit `issueUrl`, or else the issue in its
-// source branch name, which is in the PR/MR's own project. `id` tells issues
-// with the same number in different projects apart.
-function relatedIssue(target: Target): { id: string; reference: string } | undefined {
+// source branch name, which is in the PR/MR's own project.
+export function relatedIssueRef(target: Target): ReviewRef | undefined {
   const { ref, issue } = parseTargetUrl(target.url);
-  let related: ReviewRef;
-  if (target.issueUrl) related = parseTargetUrl(target.issueUrl).ref;
-  else if (!issue && target.branchIssue) related = { ...ref, iid: target.branchIssue };
-  else return undefined;
+  if (target.issueUrl) return parseTargetUrl(target.issueUrl).ref;
+  if (!issue && target.branchIssue) return { ...ref, iid: target.branchIssue };
+  return undefined;
+}
+
+// `id` tells issues with the same number in different projects apart.
+function relatedIssue(target: Target): { id: string; reference: string } | undefined {
+  const related = relatedIssueRef(target);
+  if (!related) return undefined;
   return {
     id: `${related.forge} ${related.host} ${related.project.toLowerCase()} ${related.iid}`,
     reference: traits(related.forge).issueReference(related.iid),

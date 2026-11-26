@@ -89,8 +89,7 @@ async function drain(tasks: ReadonlySet<Promise<unknown>>, limit: number) {
 }
 
 export interface StatusHost {
-  // The session's stored targets, and the title prefix this plugin wrote.
-  state: (sessionID: string) => Promise<{ targets: Target[]; prefix?: string }>;
+  state: (sessionID: string) => Promise<{ targets: Target[] }>;
   // The stored targets, without updating what `isTarget` knows, for reads
   // that must not change monitoring, such as diagnostics.
   storedTargets: (sessionID: string) => Promise<Target[]>;
@@ -98,16 +97,6 @@ export interface StatusHost {
   publish: (key: string, snapshot: Snapshot) => void;
   notice: (notice: Notice) => void;
   feedbackChanged?: () => void;
-}
-
-// The title without the prefix this plugin wrote.
-export function userTitle(
-  title: string | undefined,
-  prefix: string | undefined,
-): string | undefined {
-  if (!title || !prefix) return title;
-  if (title === prefix) return '';
-  return title.startsWith(`${prefix} `) ? title.slice(prefix.length + 1) : title;
 }
 
 // Watches the PRs/MRs of the sessions that CLIs show, and tells sessions
@@ -728,7 +717,7 @@ export async function setupStatus(
 
   const service = createStatusService({
     async load(key, previous) {
-      if (key === HOME) return locate(deps.forges, { directory });
+      if (key === HOME) return { kind: 'none', reason: 'No session is open' };
       const session = await ctx.session.get({ sessionID: key });
       if (session.time?.archived !== undefined)
         return { kind: 'none', reason: 'The session is archived' };
@@ -745,7 +734,6 @@ export async function setupStatus(
       return locate(deps.forges, {
         directory,
         targets: classifyTargets(targetOutput(state.targets)),
-        title: userTitle(session.title, state.prefix),
         previous,
         request: (ref, load) => statusCache.get(requestKey(ref), load),
       });
@@ -1125,12 +1113,7 @@ export async function setupStatus(
         ]).catch(() => {}),
       );
     },
-    // A title reference only counts without targets.
-    async titleChanged(sessionID: string) {
-      if (!service.keys().includes(sessionID)) return;
-      if ((await host.state(sessionID)).targets.length === 0) service.invalidate(sessionID);
-    },
-    // A turn may have pushed a branch or opened a PR/MR.
+    // A turn may have changed a targeted PR/MR.
     turnEnded(sessionID: string) {
       statusCache.clear();
       feedbackCache.clear();
@@ -1153,12 +1136,6 @@ export async function setupStatus(
             reportOnce('review-automation', 'Could not coordinate review automation', error),
           ),
       );
-    },
-    // Sessions without targets follow the checked-out branch.
-    async branchChanged() {
-      for (const key of service.keys()) {
-        if (key === HOME || (await host.state(key)).targets.length === 0) service.invalidate(key);
-      }
     },
     // A lookup that started before the move describes the old checkout, so
     // it's discarded. The next lookup finds out which instance owns the

@@ -106,11 +106,6 @@ export default {
         onCleanup(() => client.hide(current));
       });
 
-      // Keeps the checkout's branch watched, so a branch switch reaches the server.
-      createEffect(() => {
-        context.data.location.vcs.sync({ directory: place().directory }).catch(() => {});
-      });
-
       const snapshot = createMemo(() => snapshotOf(place()));
       const fullWidth = createMemo(() =>
         enabledFor(place().directory) ? segmentsWidth(footerSegments(snapshot())) : 0,
@@ -671,7 +666,7 @@ export default {
         requests = requestsFor(place);
       }
       if (requests.length === 0) {
-        context.ui.toast.show({ message: 'No PR/MR for this session or branch', variant: 'info' });
+        context.ui.toast.show({ message: 'No PR/MR for this session', variant: 'info' });
         return;
       }
       if (requests.length === 1) return openUrl(requests[0].url);

@@ -36,8 +36,8 @@ describe('parseTarget', () => {
     expect(targetPrefix(target!)).toBe('[#789, !456]');
   });
 
-  test('supports returning to branch-based naming', () => {
-    expect(parseTarget({ target: 'branch' })).toBeUndefined();
+  test('supports clearing all targets', () => {
+    expect(parseTarget({ target: 'none' })).toBeUndefined();
   });
 
   test.each([
@@ -48,7 +48,8 @@ describe('parseTarget', () => {
     { target: 'https://github.com/owner/repo/pull/456/files' },
     { target: 'https://gitlab.com/group/project/-/pipelines/7' },
     { target: 'https://gitlab.com/group/project/issues/7' },
-    { target: 'branch', issue_url: 'https://gitlab.com/group/project/-/issues/123' },
+    { target: 'branch' },
+    { target: 'none', issue_url: 'https://gitlab.com/group/project/-/issues/123' },
     {
       target: 'https://gitlab.com/group/project/-/issues/123',
       issue_url: 'https://gitlab.com/group/project/-/issues/789',
@@ -156,14 +157,14 @@ const c = 'https://gitlab.com/other/project/-/merge_requests/3';
 const issue = 'https://gitlab.com/group/project/-/issues/9';
 
 describe('parseTargetChange', () => {
-  test('defaults to replacing with a single target or branch mode', () => {
+  test('defaults to replacing with a single target or clearing all targets', () => {
     expect(parseTargetChange({ target: a, issue_url: issue })).toEqual({
       operation: 'replace',
       targets: [{ url: a, issueUrl: issue }],
     });
-    expect(parseTargetChange({ target: 'branch' })).toEqual({ operation: 'branch' });
-    expect(parseTargetChange({ target: 'branch', operation: 'replace' })).toEqual({
-      operation: 'branch',
+    expect(parseTargetChange({ target: 'none' })).toEqual({ operation: 'none' });
+    expect(parseTargetChange({ target: 'none', operation: 'replace' })).toEqual({
+      operation: 'none',
     });
   });
 
@@ -192,7 +193,7 @@ describe('parseTargetChange', () => {
     { targets: [] },
     { targets: 'https://gitlab.com/group/project/-/merge_requests/1' },
     { targets: [a, 7] },
-    { targets: [a, 'branch'] },
+    { targets: [a, 'none'] },
     { targets: [a], target: b },
     { targets: [a, issue], issue_url: issue },
     { targets: [a, 'https://github.com/o/r/pull/2'], issue_url: issue },
@@ -201,7 +202,7 @@ describe('parseTargetChange', () => {
     { targets: Array.from({ length: 51 }, (_, index) => `${a.slice(0, -1)}${index + 1}`) },
     { target: a, operation: 'merge' },
     { target: a, operation: 'remove', issue_url: issue },
-    { target: 'branch', operation: 'add' },
+    { target: 'none', operation: 'add' },
     'nope',
   ])('rejects %j', (input) => {
     expect(() => parseTargetChange(input)).toThrow();
@@ -248,8 +249,8 @@ describe('applyTargetChange', () => {
     });
   });
 
-  test('clears every target in branch mode', () => {
-    expect(applyTargetChange(current, { operation: 'branch' })).toEqual({
+  test('clears every target', () => {
+    expect(applyTargetChange(current, { operation: 'none' })).toEqual({
       targets: [],
       missing: [],
     });

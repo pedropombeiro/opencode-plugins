@@ -1,5 +1,5 @@
 import type { ReviewRef, ReviewRequest } from './forge';
-import { parseUrl, traits, type ForgeCatalog } from './forges';
+import { parseUrl, type ForgeCatalog } from './forges';
 import { CONCURRENCY, mapLimit } from './limit';
 import { TargetLookupError, type Lookup } from './store';
 import { sameRef, type SessionTarget } from './target';
@@ -12,10 +12,6 @@ export interface Hints {
   directory: string;
   // The session's explicit targets, stored by set_session_target.
   targets?: SessionTarget[];
-  // The session title without the prefix this plugin wrote, so only a
-  // reference that the user wrote, such as `[!45]`, counts. A branch prefix
-  // the plugin wrote would otherwise outlive the branch's PR/MR.
-  title?: string;
   // The session's previous lookup, which stands in for a target whose lookup
   // fails, so a passing error doesn't look like a change of review state.
   previous?: Lookup;
@@ -106,41 +102,8 @@ async function locateTargets(
   };
 }
 
-// Picks the session's PRs/MRs: the explicit targets first, then a title
-// reference, and finally the checked-out branch's open PRs/MRs.
 export async function locate(forges: ForgeCatalog, hints: Hints): Promise<Lookup> {
-  const { directory, targets, title } = hints;
-  if (targets?.length)
-    return locateTargets(forges, directory, targets, hints.previous, hints.request);
-
-  // Each forge reads its own references from the title, on the forges the
-  // checkout has remotes for. A reference can also name an issue, so it only
-  // counts once the forge finds a PR/MR with that number.
-  for (const kind of forges.kinds) {
-    const numbers = traits(kind).titleReferences(title);
-    if (numbers.length === 0) continue;
-    const projects = await forges.projects(directory, kind);
-    const forge = projects.length ? forges.forHost(projects[0].host, directory) : undefined;
-    if (!forge) continue;
-    for (const number of numbers) {
-      const request = await forge.findByNumber(projects, number);
-      if (request) {
-        return {
-          kind: 'found',
-          sessionTarget: `${forge.traits.reference(number)} (from the session title)`,
-          requests: [request],
-        };
-      }
-    }
-  }
-
-  const lookup = await forges.repository(directory);
-  if (lookup.kind === 'none') return lookup;
-  const forge = forges.forHost(lookup.repository.source.host, directory);
-  if (!forge) return { kind: 'none', reason: 'Not a supported forge remote' };
-  return {
-    kind: 'found',
-    repository: lookup.repository,
-    requests: await forge.findByBranch(lookup.repository),
-  };
+  const { directory, targets } = hints;
+  if (!targets?.length) return { kind: 'none', reason: 'No session target is set' };
+  return locateTargets(forges, directory, targets, hints.previous, hints.request);
 }

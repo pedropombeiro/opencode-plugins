@@ -98,11 +98,29 @@ interface Common {
   threadsComplete: boolean;
 }
 
+export interface MissingRule {
+  name: string;
+  required: number;
+  type?: string;
+  // Awaited reviewers who can approve this rule.
+  eligibleReviewers: string[];
+  // The first few people who can approve this rule at all.
+  eligible: string[];
+  eligibleCount?: number;
+}
+
 export interface GitLabMergeRequest extends Common {
   forge: 'gitlab';
   // Approvals from people; bot approvals such as Duo's don't count.
   hasApprovals: boolean;
   approvalRequirementsSatisfied: boolean | null;
+  approvalsRequired?: number;
+  approvalsLeft?: number;
+  // Approval rules that need approvals and don't have them yet.
+  missingRules?: MissingRule[];
+  autoMergeEnabled?: boolean;
+  // Zero-based position in the merge train, when the MR is in one.
+  mergeTrainIndex?: number | null;
   mergeStatus?: string;
   duoReviewState?: string;
 }
@@ -147,6 +165,16 @@ export interface ReviewRef {
   iid: string;
 }
 
+// The issue fields that a PR/MR's progress can leave outdated.
+export interface IssueSnapshot {
+  open: boolean;
+  // The work item status, such as "In dev". Undefined without one.
+  status?: string;
+  assignees: string[];
+  labels: string[];
+  milestone?: string;
+}
+
 export type Tone = 'muted' | 'success' | 'warning' | 'error';
 
 // A footer segment. `compact` replaces the text when space runs short, and
@@ -157,6 +185,8 @@ export interface Indicator {
   url?: string;
   compact?: string;
   essential?: boolean;
+  // Dropped before the segments that matter more, when the footer is too narrow.
+  optional?: boolean;
 }
 
 // Everything that differs between forges, apart from API access: identity,
@@ -191,6 +221,7 @@ export interface ForgeTraits<
   titleReferences(title: string | undefined): string[];
   // Footer segments for forge-specific status, such as a requested change.
   indicators(request: Request): Indicator[];
+  reviewIndicators?(request: Request): Indicator[];
   // Status dialog lines for forge-specific fields, such as approval rules.
   details(request: Request): string[];
   // Optional capabilities. Shared code checks for these, never for a forge.
@@ -418,6 +449,11 @@ export function parseWebUrl(
 export const yesNo = (value: boolean) => (value ? 'yes' : 'no');
 export const humanize = (value: string) => value.toLowerCase().replace(/_/g, ' ');
 
+export function awaitingText(reviewers: string[]): string {
+  if (reviewers.length > 2) return `awaiting ${reviewers.length} reviewers`;
+  return `awaiting ${reviewers.map((username) => `@${username}`).join(', ')}`;
+}
+
 export type ErrorKind = 'auth' | 'rate-limit' | 'missing-glab' | 'missing-gh' | 'request';
 
 export class ForgeError extends Error {
@@ -444,6 +480,8 @@ export interface Forge {
   findNumberByBranch(repository: Repository): Promise<string | undefined>;
   // The branch a PR/MR was opened from. Undefined when the PR/MR doesn't exist.
   sourceBranch(ref: ReviewRef): Promise<string | undefined>;
+  // The issue's fields, or undefined when it doesn't exist or can't be seen.
+  issue?(ref: ReviewRef): Promise<IssueSnapshot | undefined>;
   // Marks a draft PR/MR ready for review.
   markReady?(
     ref: ReviewRef,

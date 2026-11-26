@@ -2,6 +2,7 @@ import type { Plugin } from '@opencode/plugin';
 import type { FeedbackItem } from './feedback-inbox';
 import { jobKey, type FailedJob, type ReviewRequest } from './forge';
 import { parseUrl, reference, traitsOf, type ForgeCatalog } from './forges';
+import { createIssueNotifications } from './issue-notifications';
 import { proposeRetargets, stricter } from './lifecycle-execution';
 import {
   createLifecycleWatcher,
@@ -94,6 +95,27 @@ export function createLifecycleNotifications(
     return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
   }
 
+  async function publish(item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) {
+    await host.record(item, supersedes);
+    host.notice({
+      sessionID: item.sessionID,
+      title: item.title,
+      message: 'New merge request update in /forge-feedback.',
+      variant: 'info',
+    });
+  }
+
+  const issues =
+    settings.watch.lifecycle && settings.watch.issues
+      ? createIssueNotifications(
+          ctx,
+          deps.forges,
+          { ...host, record: publish },
+          () => settings.delivery.lifecycle,
+          deps.now ?? Date.now,
+        )
+      : undefined;
+
   async function record(
     record: LifecycleRecord,
     event: LifecycleEvent,
@@ -173,13 +195,7 @@ export function createLifecycleNotifications(
       entry.sessionID === item.sessionID &&
       entry.url === item.url &&
       entry.pipeline === item.pipeline;
-    await host.record(item, samePipeline);
-    host.notice({
-      sessionID: record.sessionID,
-      title,
-      message: 'New merge request update in /forge-feedback.',
-      variant: 'info',
-    });
+    await publish(item, samePipeline);
   }
 
   const watcher = settings.watch.lifecycle
@@ -204,6 +220,13 @@ export function createLifecycleNotifications(
         policy: (kind) =>
           kind === 'merged' ? settings.lifecycleExecution.parentMerged : undefined,
         delivery: () => settings.delivery.lifecycle,
+        ...(issues
+          ? {
+              prepareIssues: issues.prepare,
+              waitingIssues: issues.waiting,
+              retryIssues: issues.retry,
+            }
+          : {}),
         onError: host.error,
         now: deps.now,
       })
@@ -213,6 +236,7 @@ export function createLifecycleNotifications(
     watcher,
     async prune() {
       const at = (deps.now ?? Date.now)();
+      await issues?.prune(at - LIFECYCLE_RETENTION);
       for (const { key, value } of await host.scan(LIFECYCLE_STORE)) {
         const record = value as LifecycleRecord;
         if (record.pending.length || at - record.at < LIFECYCLE_RETENTION) continue;
