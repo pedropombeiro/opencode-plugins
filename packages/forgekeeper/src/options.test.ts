@@ -70,17 +70,27 @@ describe('statusOptions', () => {
       ],
       [
         { ...rule, allowedModels: ['strong'] },
-        'automation.rules[0] allowedModels must be a nonempty list of "provider/model" IDs; using no rule',
+        'automation.rules[0] allowedModels has ["strong"], but entries must be "provider/model" IDs; using no rule',
+      ],
+      [
+        { ...rule, allowedModels: ['gitlab/strong', ''] },
+        'automation.rules[0] allowedModels has [""], but entries must be "provider/model" IDs; using no rule',
       ],
     ] as const) {
       const options = read([invalid]);
       expect(options.automation.rules).toEqual([]);
       expect(options.problems).toEqual([problem]);
     }
-    const broken = read([{ ...rule, allowedModelGroup: 'empty' }], { empty: [] });
+    const broken = read([{ ...rule, allowedModelGroup: 'empty' }], {
+      empty: [],
+      unset: ['gitlab/strong', '', ''],
+      'bad name': ['gitlab/strong'],
+    });
     expect(broken.automation.rules).toEqual([]);
     expect(broken.problems).toEqual([
       'automation.modelGroups.empty must be a nonempty list of "provider/model" IDs; using no group',
+      'automation.modelGroups.unset has ["",""], but entries must be "provider/model" IDs; using no group',
+      'automation.modelGroups has "bad name", which isn\'t a group name; using no group',
       'automation.rules[0] names allowed model group "empty", which automation.modelGroups doesn\'t define; using no rule',
     ]);
   });

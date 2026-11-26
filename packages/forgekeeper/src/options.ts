@@ -163,6 +163,15 @@ const quoted = (values: readonly string[]) => values.map((value) => `"${value}"`
 class Reader {
   readonly problems: string[] = [];
 
+  modelList(value: unknown): string[] | { reason: string } {
+    if (!Array.isArray(value) || value.length === 0)
+      return { reason: 'must be a nonempty list of "provider/model" IDs' };
+    const invalid = value.filter((entry) => typeof entry !== 'string' || !MODEL.test(entry));
+    if (invalid.length)
+      return { reason: `has ${JSON.stringify(invalid)}, but entries must be "provider/model" IDs` };
+    return [...new Set(value as string[])];
+  }
+
   // Named lists of allowed models that rules share. An invalid group is
   // dropped, so the rules that name it are too.
   modelGroups(value: unknown): Map<string, string[]> {
@@ -173,15 +182,20 @@ class Reader {
       return groups;
     }
     for (const [name, models] of Object.entries(value)) {
-      if (!GROUP.test(name) || !exactList(models, MODEL)) {
+      if (!GROUP.test(name)) {
         this.ignore(
-          `automation.modelGroups.${name}`,
-          'must be a nonempty list of "provider/model" IDs',
+          'automation.modelGroups',
+          `has ${JSON.stringify(name)}, which isn't a group name`,
           'no group',
         );
         continue;
       }
-      groups.set(name, [...new Set(models)]);
+      const parsed = this.modelList(models);
+      if (!Array.isArray(parsed)) {
+        this.ignore(`automation.modelGroups.${name}`, parsed.reason, 'no group');
+        continue;
+      }
+      groups.set(name, parsed);
     }
     return groups;
   }
@@ -209,8 +223,9 @@ class Reader {
       return null;
     }
     if (listed === undefined) return undefined;
-    if (exactList(listed, MODEL)) return [...new Set(listed)];
-    this.ignore(path, 'allowedModels must be a nonempty list of "provider/model" IDs', 'no rule');
+    const parsed = this.modelList(listed);
+    if (Array.isArray(parsed)) return parsed;
+    this.ignore(path, `allowedModels ${parsed.reason}`, 'no rule');
     return null;
   }
 
