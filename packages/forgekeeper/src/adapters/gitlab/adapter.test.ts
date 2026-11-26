@@ -8,6 +8,7 @@ import {
   DISCUSSIONS_QUERY,
   GitLabForge,
   glabGraphQL,
+  ISSUE_QUERY,
   SOURCE_BRANCH_QUERY,
   type GraphQL,
 } from './adapter';
@@ -197,6 +198,61 @@ describe('GitLabForge title lookups', () => {
         project: { mergeRequest: { sourceBranch: '' } },
       })).sourceBranch(ref),
     ).toBeUndefined();
+  });
+});
+
+describe('GitLabForge.issue', () => {
+  const ref = { forge: 'gitlab' as const, host: 'gitlab.com', project: 'g/p', iid: '9' };
+
+  test("reads an issue's status, assignees, labels, and milestone", async () => {
+    let seen: Record<string, string> = {};
+    const graphql: GraphQL = async (_host, query, variables) => {
+      seen = variables;
+      expect(query).toBe(ISSUE_QUERY);
+      return {
+        project: {
+          workItems: {
+            nodes: [
+              {
+                state: 'OPEN',
+                widgets: [
+                  {},
+                  { status: { name: 'In dev' } },
+                  { assignees: { nodes: [{ username: 'alice' }] } },
+                  { labels: { nodes: [{ title: 'group::dh' }, { title: 'bug::ux' }] } },
+                  { milestone: { title: '19.7' } },
+                ],
+              },
+            ],
+          },
+        },
+      };
+    };
+    expect(await new GitLabForge(graphql).issue(ref)).toEqual({
+      open: true,
+      status: 'In dev',
+      assignees: ['alice'],
+      labels: ['group::dh', 'bug::ux'],
+      milestone: '19.7',
+    });
+    expect(seen).toEqual({ project: 'g/p', iid: '9' });
+  });
+
+  test('leaves out what an issue does not have, and reads a closed one', async () => {
+    const closed = async () => ({
+      project: { workItems: { nodes: [{ state: 'CLOSED', widgets: [{ status: null }] }] } },
+    });
+    expect(await new GitLabForge(closed).issue(ref)).toEqual({
+      open: false,
+      assignees: [],
+      labels: [],
+    });
+  });
+
+  test('is undefined for an issue that does not exist', async () => {
+    const none = async () => ({ project: { workItems: { nodes: [] } } });
+    expect(await new GitLabForge(none).issue(ref)).toBeUndefined();
+    expect(await new GitLabForge(async () => ({ project: null })).issue(ref)).toBeUndefined();
   });
 });
 

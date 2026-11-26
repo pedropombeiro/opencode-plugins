@@ -8,6 +8,7 @@ import type {
   Forge,
   GitHubPullRequest,
   GitLabMergeRequest,
+  IssueSnapshot,
   LinkedNote,
   ReviewComment,
   ReviewRef,
@@ -164,6 +165,13 @@ class StatusForge implements Forge {
   }
 
   readonly markedReady: ReviewRef[] = [];
+  readonly issues = new Map<string, IssueSnapshot>();
+  readonly issueReads: string[] = [];
+
+  async issue(ref: ReviewRef) {
+    this.issueReads.push(ref.iid);
+    return this.issues.get(`${ref.project}#${ref.iid}`);
+  }
 
   async sourceBranch() {
     return undefined;
@@ -2932,6 +2940,58 @@ describe('PR/MR status lifecycle', () => {
     forge.set('group/a', '1', { conflicts: false });
     await app.refresh();
     await settle();
+    expect((await app.feedback()).items).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('announces what its issue has wrong, once, and again when a new problem appears', async () => {
+    const issueUrl = 'https://gitlab.com/group/a/-/issues/9';
+    const complete = {
+      open: true,
+      status: 'In review',
+      assignees: ['me'],
+      labels: ['group::dh', 'bug::ux'],
+      milestone: '19.7',
+    };
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    forge.issues.set('group/a#9', { ...complete, status: 'In dev', milestone: undefined });
+    const app = await harness({ status: forge });
+    await app.set({ target: projectA, issue_url: issueUrl });
+    await app.watch(['one'], 'one');
+    await settle();
+    const [item] = (await app.feedback()).items;
+    expect(item).toMatchObject({
+      kind: 'issue-outdated',
+      url: projectA,
+      title: 'Issue #9 may be outdated after !1',
+      links: [issueUrl, projectA],
+    });
+    expect(item.details?.join('\n')).toContain('the status is "In dev", expected "In review"');
+    expect(item.details?.join('\n')).toContain('no milestone');
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items).toHaveLength(1);
+    forge.issues.set('group/a#9', { ...complete, status: 'In dev', assignees: [] });
+    forge.set('group/a', '1', { draft: false, title: 'changed' });
+    await app.refresh();
+    await settle();
+    expect((await app.feedback()).items.map((entry) => entry.details?.[0])).toEqual([
+      expect.stringContaining('no assignee'),
+      expect.stringContaining('expected "In review"'),
+    ]);
+    await app.cleanup();
+  });
+
+  test('reads no issue when issue watching is off', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    forge.issues.set('group/a#9', { open: true, assignees: [], labels: [] });
+    const app = await harness({ status: forge, pluginOptions: { watch: { issues: false } } });
+    await app.set({ target: projectA, issue_url: 'https://gitlab.com/group/a/-/issues/9' });
+    await app.watch(['one'], 'one');
+    await settle();
+    expect(forge.issueReads).toEqual([]);
     expect((await app.feedback()).items).toEqual([]);
     await app.cleanup();
   });

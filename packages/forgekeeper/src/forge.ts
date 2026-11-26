@@ -141,6 +141,16 @@ export interface ReviewRef {
   iid: string;
 }
 
+// The issue fields that a PR/MR's progress can leave outdated.
+export interface IssueSnapshot {
+  open: boolean;
+  // The work item status, such as "In dev". Undefined without one.
+  status?: string;
+  assignees: string[];
+  labels: string[];
+  milestone?: string;
+}
+
 export type Tone = 'muted' | 'success' | 'warning' | 'error';
 
 // A footer segment. `compact` replaces the text when space runs short, and
@@ -438,6 +448,8 @@ export interface Forge {
   findNumberByBranch(repository: Repository): Promise<string | undefined>;
   // The branch a PR/MR was opened from. Undefined when the PR/MR doesn't exist.
   sourceBranch(ref: ReviewRef): Promise<string | undefined>;
+  // The issue's fields, or undefined when it doesn't exist or can't be seen.
+  issue?(ref: ReviewRef): Promise<IssueSnapshot | undefined>;
   // Marks a draft PR/MR ready for review.
   markReady?(
     ref: ReviewRef,

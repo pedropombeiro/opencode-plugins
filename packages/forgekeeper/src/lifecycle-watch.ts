@@ -2,7 +2,9 @@
 // its target branch, one whose pipeline gets new failed jobs, even while the
 // pipeline still runs, and one that merges. Each comes from a change
 // between two lookups, never from the state alone, so the first lookup of a
-// PR/MR only records it, and nothing old is announced after a restart.
+// PR/MR only records it, and nothing old is announced after a restart. An
+// outdated issue is the exception: a problem is announced when first seen,
+// once, until it is fixed.
 //
 // Events wait in their PR/MR's record until they reach the inbox. The record
 // and its new events are one storage write, so a crash neither loses an
@@ -16,10 +18,18 @@ import {
   type FailedJob,
   type ReviewRequest,
 } from './forge';
+import type { IssueProblem } from './issue-watch';
 import type { EventPolicy, FeedbackDelivery } from './options';
 import { createKeyedQueue } from './keyed-queue';
 
-export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed';
+export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed' | 'issue-outdated';
+
+// What a lookup of a PR/MR's issue found wrong with it.
+export interface IssueCheck {
+  url: string;
+  reference: string;
+  problems: IssueProblem[];
+}
 
 // The head pipeline as a lookup last saw it.
 export interface PipelineState {
@@ -65,6 +75,9 @@ export interface LifecycleEvent {
   // failed in it, by `jobKey`.
   pipeline?: string;
   jobs?: string[];
+  // The issue an `issue-outdated` event is about, and its newly found problems.
+  issue?: { url: string; reference: string };
+  problems?: IssueProblem[];
 }
 
 export interface LifecycleRecord {
@@ -76,6 +89,12 @@ export interface LifecycleRecord {
   conflicts?: boolean;
   // How many times the PR/MR started to conflict, for distinct event IDs.
   cycles: number;
+  // The issue problems, by id, at the last lookup that read the issue. Absent
+  // in records from before Forgekeeper watched issues, whose next lookup only
+  // records them.
+  issueProblems?: string[];
+  // How many times a problem was announced, for distinct event IDs.
+  issueCycles?: number;
   // Absent in records from before Forgekeeper watched pipelines, whose next
   // lookup only records the pipeline.
   ci?: PipelineState;
@@ -160,6 +179,7 @@ export function observe(
   now: number,
   policy: (kind: LifecycleKind) => EventPolicy | undefined = () => undefined,
   delivery: () => FeedbackDelivery = () => 'inbox',
+  issues: ReadonlyMap<string, IssueCheck> = new Map(),
 ): LifecycleRecord[] {
   return requests.map((request) => {
     const previous = records.get(request.url);
@@ -177,6 +197,7 @@ export function observe(
         : undefined;
     const parent = found?.url ?? kept;
     let cycles = previous?.cycles ?? 0;
+    let issueCycles = previous?.issueCycles ?? 0;
     const pending = [...(previous?.pending ?? [])];
     const add = (kind: LifecycleKind, id: string, extra: Partial<LifecycleEvent> = {}) => {
       if (pending.some((event) => event.id === id)) return;
@@ -219,6 +240,20 @@ export function observe(
       if (previous.state === 'opened' && request.state === 'merged')
         add('merged', JSON.stringify([sessionID, request.url, 'merged']));
     }
+    const check = issues.get(request.url);
+    const announced = previous?.issueProblems;
+    if (check && request.state === 'opened' && (!previous || announced)) {
+      const problems = check.problems.filter((problem) => !announced?.includes(problem.id));
+      if (problems.length) {
+        issueCycles++;
+        add(
+          'issue-outdated',
+          JSON.stringify([sessionID, request.url, 'issue-outdated', issueCycles]),
+          { issue: { url: check.url, reference: check.reference }, problems },
+        );
+      }
+    }
+    const issueProblems = check ? check.problems.map((problem) => problem.id) : announced;
     return {
       sessionID,
       url: request.url,
@@ -226,6 +261,8 @@ export function observe(
       state: request.state,
       ...(conflicts !== undefined ? { conflicts } : {}),
       cycles,
+      ...(issueProblems ? { issueProblems } : {}),
+      ...(issueCycles ? { issueCycles } : {}),
       ci,
       targetProject: request.targetProject,
       targetBranch: request.targetBranch,
@@ -258,6 +295,12 @@ export interface LifecycleWatcherOptions {
   reference: (request: ReviewRequest) => string;
   policy?: (kind: LifecycleKind) => EventPolicy | undefined;
   delivery?: () => FeedbackDelivery;
+  // The problems with the issues the requests work on, by request URL. A
+  // request left out keeps what its record has.
+  issues?: (
+    sessionID: string,
+    requests: readonly ReviewRequest[],
+  ) => Promise<ReadonlyMap<string, IssueCheck>>;
   onError?: (error: unknown) => void;
   now?: () => number;
 }
@@ -297,6 +340,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
         const stored = new Map(
           (await options.records(sessionID)).map((record) => [record.url, record]),
         );
+        const issues = await options.issues?.(sessionID, requests);
         for (const record of observe(
           sessionID,
           requests,
@@ -305,6 +349,7 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
           now(),
           options.policy,
           options.delivery,
+          issues,
         )) {
           if (!unchanged(stored.get(record.url), record)) await options.write(record);
         }

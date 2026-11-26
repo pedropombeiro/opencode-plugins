@@ -691,12 +691,14 @@ updates.
 
 ## Merge request updates
 
-Forgekeeper also watches each session's explicit PR/MR targets for three changes:
+Forgekeeper also watches each session's explicit PR/MR targets for four changes:
 
 - **Conflicts:** a target that could merge starts to conflict with its target branch.
 - **Failed jobs:** a job fails in a target's head pipeline, even while the pipeline still
   runs.
 - **Merges:** a target merges.
+- **Outdated issues:** the issue a target works on has fields its progress makes wrong
+  (see [Outdated issues](#outdated-issues)).
 
 All come from the forge's own state, compared between two lookups, never from comments
 such as GitLab's "can no longer be merged" note. The first lookup of a target only records
@@ -745,6 +747,24 @@ A conflict update clears once the conflict ends or the PR/MR closes. A merge upd
 until you acknowledge it, because the merge is the news. Updates for targets the session
 drops clear right away. Setting `watch.lifecycle` to `false` stops all three kinds, and
 retarget proposals too, since nothing notices merges then.
+
+### Outdated issues
+
+On GitLab, each lookup of a target that has a related issue (its `issue_url`, or the issue
+in its source branch name) also reads the issue, but only when a target of that issue
+changed state or draft status since the last read. An update lists what looks wrong:
+
+- The status lags behind: not "In review" while an MR is ready for review, or not "In dev"
+  or later while all open ones are drafts.
+- All the issue's MRs merged, but the issue is still open.
+- It has no assignee, no `group::` label, no `maintenance::`, `bug::`, or `feature::`
+  label, or no milestone.
+
+Each problem is announced once, when first seen, until the issue is fixed; a problem that
+returns is announced again. A record stored before Forgekeeper watched issues only records
+the problems. The update tells the agent to say what it would change and wait for your
+approval before editing the issue. It follows `delivery.lifecycle` and clears only when
+you acknowledge it. Set `watch.issues` to `false` to stop these updates.
 
 ### Stacked PRs/MRs
 
@@ -1291,6 +1311,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                                                                                                                                                                                                   |
 | `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                                                                                                                                                                                            |
 | `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                                           |
+| `watch.issues`           | `true`                        | Watch for issue fields that a target's progress leaves outdated, on GitLab. Needs `watch.lifecycle`. See [Outdated issues](#outdated-issues).                                                                                                                                                                       |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
 | `inbox`                  | `false`                       | Enable inbox monitoring for checkouts without a saved monitoring preference. Automation rules also enable it.                                                                                                                                                                                                       |

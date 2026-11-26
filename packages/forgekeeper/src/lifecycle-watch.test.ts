@@ -6,6 +6,7 @@ import {
   unchanged,
   MAX_SEEN_FAILURES,
   UNLISTED_FAILURE,
+  type IssueCheck,
   type LifecycleEvent,
   type LifecycleRecord,
 } from './lifecycle-watch';
@@ -315,6 +316,69 @@ describe('observe', () => {
     expect(unchanged(a, b)).toBe(true);
     expect(unchanged(a, { ...b, conflicts: true })).toBe(false);
     expect(unchanged(undefined, b)).toBe(false);
+  });
+});
+
+describe('observe issue problems', () => {
+  const problem = (id: string) => ({ id, text: id });
+  const check = (...ids: string[]): ReadonlyMap<string, IssueCheck> =>
+    new Map([
+      [
+        mr('1').url,
+        {
+          url: 'https://gitlab.com/g/p/-/issues/9',
+          reference: '#9',
+          problems: ids.map(problem),
+        },
+      ],
+    ]);
+  const look = (
+    records: Map<string, LifecycleRecord>,
+    issues: ReadonlyMap<string, IssueCheck>,
+    request = mr('1'),
+  ) => {
+    const next = observe('one', [request], records, reference, 1, undefined, undefined, issues);
+    return new Map([...records, ...next.map((record) => [record.url, record] as const)]);
+  };
+  const problemsOf = (records: Map<string, LifecycleRecord>) =>
+    [...records.values()].flatMap((record) => record.pending.flatMap((e) => e.problems ?? []));
+
+  test('announces the problems of a PR/MR the first time it is seen', () => {
+    const records = look(new Map(), check('unassigned', 'milestone'));
+    expect(problemsOf(records).map((entry) => entry.id)).toEqual(['unassigned', 'milestone']);
+    expect(records.get(mr('1').url)?.pending[0]).toMatchObject({
+      kind: 'issue-outdated',
+      issue: { url: 'https://gitlab.com/g/p/-/issues/9', reference: '#9' },
+    });
+  });
+
+  test('announces a problem once, and again after it was fixed and came back', () => {
+    let records = look(new Map(), check('unassigned'));
+    records = look(records, check('unassigned'));
+    expect(events(records)).toHaveLength(1);
+    records = look(records, check('unassigned', 'milestone'));
+    expect(events(records)).toHaveLength(2);
+    records = look(records, check());
+    records = look(records, check('milestone'));
+    expect(events(records)).toHaveLength(3);
+  });
+
+  test('only records the problems of a record from before issues were watched', () => {
+    const old = run([mr('1')]);
+    const records = look(old, check('unassigned'));
+    expect(events(records)).toEqual([]);
+    expect(records.get(mr('1').url)?.issueProblems).toEqual(['unassigned']);
+    expect(events(look(records, check('unassigned', 'milestone')))).toHaveLength(1);
+  });
+
+  test('keeps what it knows when the lookup did not read the issue', () => {
+    const records = look(look(new Map(), check('unassigned')), new Map());
+    expect(records.get(mr('1').url)?.issueProblems).toEqual(['unassigned']);
+    expect(events(look(records, check('unassigned')))).toHaveLength(1);
+  });
+
+  test('announces nothing for a PR/MR that is not open', () => {
+    expect(events(look(new Map(), check('merged'), mr('1', { state: 'merged' })))).toEqual([]);
   });
 });
 

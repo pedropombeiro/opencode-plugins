@@ -11,6 +11,7 @@ import {
   type Forge,
   type ForgeTraits,
   type GitLabMergeRequest,
+  type IssueSnapshot,
   type ReviewerApproval,
   type ReviewRef,
 } from '../../forge';
@@ -191,6 +192,36 @@ export const SOURCE_BRANCH_QUERY = query<{
   project?: { mergeRequest?: { sourceBranch?: string | null } | null } | null;
 }>(`query($project: ID!, $iid: String!) {
   project(fullPath: $project) { mergeRequest(iid: $iid) { sourceBranch } }
+}`);
+
+export const ISSUE_QUERY = query<{
+  project?: {
+    workItems?: {
+      nodes: Array<{
+        state: string;
+        widgets: Array<{
+          status?: { name: string } | null;
+          assignees?: { nodes: Array<{ username: string }> };
+          labels?: { nodes: Array<{ title: string }> };
+          milestone?: { title: string } | null;
+        }>;
+      }>;
+    } | null;
+  } | null;
+}>(`query($project: ID!, $iid: String!) {
+  project(fullPath: $project) {
+    workItems(iid: $iid, first: 1) {
+      nodes {
+        state
+        widgets {
+          ... on WorkItemWidgetStatus { status { name } }
+          ... on WorkItemWidgetAssignees { assignees { nodes { username } } }
+          ... on WorkItemWidgetLabels { labels { nodes { title } } }
+          ... on WorkItemWidgetMilestone { milestone { title } }
+        }
+      }
+    }
+  }
 }`);
 
 export const DISCUSSIONS_QUERY = query<{
@@ -597,6 +628,25 @@ export class GitLabForge implements Forge {
     });
     const branch = data.project?.mergeRequest?.sourceBranch;
     return typeof branch === 'string' && branch ? branch : undefined;
+  }
+
+  async issue(ref: ReviewRef): Promise<IssueSnapshot | undefined> {
+    const data = await this.graphql(ref.host, ISSUE_QUERY, {
+      project: ref.project,
+      iid: ref.iid,
+    });
+    const node = data.project?.workItems?.nodes[0];
+    if (!node) return undefined;
+    const widgets = node.widgets;
+    const milestone = widgets.find((widget) => widget.milestone)?.milestone?.title;
+    const status = widgets.find((widget) => widget.status)?.status?.name;
+    return {
+      open: node.state === 'OPEN',
+      ...(status ? { status } : {}),
+      assignees: widgets.flatMap((widget) => widget.assignees?.nodes ?? []).map((u) => u.username),
+      labels: widgets.flatMap((widget) => widget.labels?.nodes ?? []).map((l) => l.title),
+      ...(milestone ? { milestone } : {}),
+    };
   }
 
   async markReady(
