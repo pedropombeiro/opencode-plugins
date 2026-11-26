@@ -235,6 +235,7 @@ describe('GitLabForge.issue', () => {
       };
     };
     expect(await new GitLabForge(graphql).issue(ref)).toEqual({
+      forge: 'gitlab',
       open: true,
       status: 'In dev',
       assignees: ['alice'],
@@ -249,6 +250,7 @@ describe('GitLabForge.issue', () => {
       project: { workItems: { nodes: [{ state: 'CLOSED', widgets: [{ status: null }] }] } },
     });
     expect(await new GitLabForge(closed).issue(ref)).toEqual({
+      forge: 'gitlab',
       open: false,
       assignees: [],
       labels: [],

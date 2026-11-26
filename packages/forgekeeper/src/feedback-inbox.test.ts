@@ -175,6 +175,12 @@ describe('feedback inbox', () => {
       { title: 'Issue', description: issue, value: issue },
       { title: 'PR/MR overview', description: url, value: url },
     ]);
+    const pr = 'https://github.com/acme/app/pull/42';
+    const ghIssue = 'https://github.com/acme/platform/issues/9';
+    expect(linkOptions({ url: pr, kind: 'issue-outdated', links: [ghIssue, pr] })).toEqual([
+      { title: 'Issue', description: ghIssue, value: ghIssue },
+      { title: 'PR/MR overview', description: pr, value: pr },
+    ]);
   });
 
   test("labels an update with its newest comment's time, or its detection time without comments", () => {

@@ -7,6 +7,7 @@ import type {
   FeedbackSnapshot,
   Forge,
   GitHubPullRequest,
+  GitLabIssueSnapshot,
   GitLabMergeRequest,
   IssueSnapshot,
   LinkedNote,
@@ -141,15 +142,37 @@ class StatusForge implements Forge {
     } as GitLabMergeRequest);
   }
 
+  setPR(project: string, iid: string, overrides: Partial<GitHubPullRequest> = {}) {
+    this.requests.set(`${project}!${iid}`, {
+      forge: 'github',
+      iid,
+      url: `https://github.com/${project}/pull/${iid}`,
+      state: 'opened',
+      draft: false,
+      conflicts: false,
+      conflictsKnown: true,
+      awaitingReviewers: [],
+      targetProject: project,
+      targetBranch: 'main',
+      sourceProject: project,
+      sourceBranch: `branch-${iid}`,
+      authorID: 'me',
+      ...overrides,
+    } as GitHubPullRequest);
+  }
+
   open() {
     this.gated = false;
     for (const gate of this.gates.splice(0)) gate();
   }
 
+  readonly failingLookups = new Set<string>();
+
   async findByNumber(projects: readonly RemoteProject[], number: string) {
     const key = `${projects[0].path}!${number}`;
     this.lookups.push(key);
     if (this.gated) await new Promise<void>((resolve) => this.gates.push(resolve));
+    if (this.failingLookups.has(key)) throw new Error(`Lookup failed for ${key}`);
     return this.requests.get(key);
   }
 
@@ -164,9 +187,11 @@ class StatusForge implements Forge {
   readonly markedReady: ReviewRef[] = [];
   readonly issues = new Map<string, IssueSnapshot>();
   readonly issueReads: string[] = [];
+  readonly issueReadTargets: string[] = [];
 
   async issue(ref: ReviewRef) {
     this.issueReads.push(ref.iid);
+    this.issueReadTargets.push(`${ref.project}#${ref.iid}`);
     return this.issues.get(`${ref.project}#${ref.iid}`);
   }
 
@@ -3102,7 +3127,8 @@ describe('PR/MR status lifecycle', () => {
 
   test('announces what its issue has wrong, once, and again when a new problem appears', async () => {
     const issueUrl = 'https://gitlab.com/group/a/-/issues/9';
-    const complete = {
+    const complete: GitLabIssueSnapshot = {
+      forge: 'gitlab',
       open: true,
       status: 'In review',
       assignees: ['me'],
@@ -3142,7 +3168,7 @@ describe('PR/MR status lifecycle', () => {
   test('reads no issue when issue watching is off', async () => {
     const forge = new StatusForge();
     forge.set('group/a', '1');
-    forge.issues.set('group/a#9', { open: true, assignees: [], labels: [] });
+    forge.issues.set('group/a#9', { forge: 'gitlab', open: true, assignees: [], labels: [] });
     const app = await harness({ status: forge, pluginOptions: { watch: { issues: false } } });
     await app.set({ target: projectA, issue_url: 'https://gitlab.com/group/a/-/issues/9' });
     await app.watch(['one'], 'one');
@@ -3153,7 +3179,8 @@ describe('PR/MR status lifecycle', () => {
   });
 
   const issueUrl = 'https://gitlab.com/group/a/-/issues/9';
-  const completeIssue: IssueSnapshot = {
+  const completeIssue: GitLabIssueSnapshot = {
+    forge: 'gitlab',
     open: true,
     status: 'In review',
     assignees: ['me'],
@@ -3297,6 +3324,513 @@ describe('PR/MR status lifecycle', () => {
       }
     },
   );
+
+  const ghPr41 = 'https://github.com/acme/app/pull/41';
+  const ghPr42 = 'https://github.com/acme/app/pull/42';
+  const ghPr43 = 'https://github.com/acme/app/pull/43';
+  const ghIssueUrl = 'https://github.com/acme/platform/issues/9';
+  const ghOpenIssue = (url = ghIssueUrl): IssueSnapshot => ({ forge: 'github', open: true, url });
+  const ghClosedIssue = (url = ghIssueUrl): IssueSnapshot => ({
+    forge: 'github',
+    open: false,
+    url,
+  });
+
+  test.each([
+    [ghPr41, ghPr42],
+    [ghPr42, ghPr41],
+  ])(
+    'checks a GitHub issue only on the final tracked PR merge and retains the warning (%s, %s)',
+    async (first, second) => {
+      const forge = new StatusForge('github');
+      forge.setPR('acme/app', '41');
+      forge.setPR('acme/app', '42');
+      forge.issues.set('acme/platform#9', ghOpenIssue());
+      const app = await harness({ status: forge });
+      try {
+        await app.set({ targets: [first, second], issue_url: ghIssueUrl });
+        await app.watch(['one'], 'one');
+        await settle();
+        expect(forge.lookups.length).toBeGreaterThan(0);
+        expect(forge.issueReadTargets).toEqual([]);
+
+        forge.setPR('acme/app', '41', { draft: true, title: 'WIP' });
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual([]);
+
+        forge.setPR('acme/app', '41', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual([]);
+        expect((await app.feedback()).items.map((item) => item.kind)).toEqual(['merged']);
+
+        forge.setPR('acme/app', '42', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual(['acme/platform#9']);
+        const updates = await issueUpdates(app);
+        expect(updates).toHaveLength(1);
+        expect(updates[0]).toMatchObject({
+          kind: 'issue-outdated',
+          url: ghPr42,
+          title: 'Issue acme/platform#9 may be outdated after #42',
+          links: [ghIssueUrl, ghPr42],
+          details: [
+            'All PRs this session tracks for acme/platform#9 have merged, but the issue is still open.',
+            'Tell the user what you would change in the issue, and wait for their approval before editing it.',
+          ],
+        });
+        expect((await app.feedback()).items.filter((item) => item.kind === 'merged')).toHaveLength(
+          2,
+        );
+
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual(['acme/platform#9']);
+        expect((await issueUpdates(app)).map((item) => item.id)).toEqual([updates[0].id]);
+
+        forge.setPR('acme/app', '43');
+        await app.set({ targets: [ghPr43], operation: 'add', issue_url: ghIssueUrl });
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual(['acme/platform#9']);
+        expect((await issueUpdates(app)).map((item) => item.id)).toEqual([updates[0].id]);
+
+        forge.setPR('acme/app', '43', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual(['acme/platform#9', 'acme/platform#9']);
+        const followUp = await issueUpdates(app);
+        expect(followUp).toHaveLength(2);
+        expect(followUp.find((item) => item.id !== updates[0].id)).toMatchObject({
+          kind: 'issue-outdated',
+          url: ghPr43,
+          title: 'Issue acme/platform#9 may be outdated after #43',
+          links: [ghIssueUrl, ghPr43],
+        });
+      } finally {
+        await app.cleanup();
+      }
+    },
+  );
+
+  test('stays silent when a GitHub issue is closed, already merged, or the last open PR is dropped', async () => {
+    const closedForge = new StatusForge('github');
+    closedForge.setPR('acme/app', '41');
+    closedForge.setPR('acme/app', '42');
+    closedForge.issues.set('acme/platform#9', ghClosedIssue());
+    const closedApp = await harness({ status: closedForge });
+    try {
+      await closedApp.set({ targets: [ghPr41, ghPr42], issue_url: ghIssueUrl });
+      await closedApp.watch(['one'], 'one');
+      await settle();
+      closedForge.setPR('acme/app', '41', { state: 'merged' });
+      await closedApp.refresh();
+      await settle();
+      closedForge.setPR('acme/app', '42', { state: 'merged' });
+      await closedApp.refresh();
+      await settle();
+      expect(closedForge.issueReadTargets).toEqual(['acme/platform#9']);
+      expect(await issueUpdates(closedApp)).toEqual([]);
+      expect(
+        (await closedApp.feedback()).items.filter((item) => item.kind === 'merged'),
+      ).toHaveLength(2);
+    } finally {
+      await closedApp.cleanup();
+    }
+
+    const discoveredForge = new StatusForge('github');
+    discoveredForge.setPR('acme/app', '41', { state: 'merged' });
+    discoveredForge.setPR('acme/app', '42', { state: 'merged' });
+    discoveredForge.issues.set('acme/platform#9', ghOpenIssue());
+    const discoveredApp = await harness({ status: discoveredForge });
+    try {
+      await discoveredApp.set({ targets: [ghPr41, ghPr42], issue_url: ghIssueUrl });
+      await discoveredApp.watch(['one'], 'one');
+      await settle();
+      expect(discoveredForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(discoveredApp)).toEqual([]);
+    } finally {
+      await discoveredApp.cleanup();
+    }
+
+    const droppedForge = new StatusForge('github');
+    droppedForge.setPR('acme/app', '41');
+    droppedForge.setPR('acme/app', '42');
+    droppedForge.issues.set('acme/platform#9', ghOpenIssue());
+    const droppedApp = await harness({ status: droppedForge });
+    try {
+      await droppedApp.set({ targets: [ghPr41, ghPr42], issue_url: ghIssueUrl });
+      await droppedApp.watch(['one'], 'one');
+      await settle();
+      droppedForge.setPR('acme/app', '41', { state: 'merged' });
+      await droppedApp.refresh();
+      await settle();
+      await droppedApp.set({ targets: [ghPr42], operation: 'remove' });
+      await droppedApp.refresh();
+      await settle();
+      expect(droppedForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(droppedApp)).toEqual([]);
+    } finally {
+      await droppedApp.cleanup();
+    }
+  });
+
+  test('does not read a GitHub issue when a sibling closed unmerged or had a failed lookup, and handles recovery', async () => {
+    const closedSibling = new StatusForge('github');
+    closedSibling.setPR('acme/app', '41');
+    closedSibling.setPR('acme/app', '42', { state: 'closed' });
+    closedSibling.issues.set('acme/platform#9', ghOpenIssue());
+    const closedApp = await harness({ status: closedSibling });
+    try {
+      await closedApp.set({ targets: [ghPr41, ghPr42], issue_url: ghIssueUrl });
+      await closedApp.watch(['one'], 'one');
+      await settle();
+      closedSibling.setPR('acme/app', '41', { state: 'merged' });
+      await closedApp.refresh();
+      await settle();
+      expect(closedSibling.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(closedApp)).toEqual([]);
+    } finally {
+      await closedApp.cleanup();
+    }
+
+    for (const recoveredState of ['opened', 'merged'] as const) {
+      const forge = new StatusForge('github');
+      forge.setPR('acme/app', '41');
+      forge.setPR('acme/app', '42', { state: 'merged' });
+      forge.issues.set('acme/platform#9', ghOpenIssue());
+      const app = await harness({ status: forge });
+      try {
+        await app.set({ targets: [ghPr41, ghPr42], issue_url: ghIssueUrl });
+        await app.watch(['one'], 'one');
+        await settle();
+        forge.failingLookups.add('acme/app!42');
+        forge.setPR('acme/app', '41', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        expect(forge.issueReadTargets).toEqual([]);
+        expect(await issueUpdates(app)).toEqual([]);
+
+        forge.failingLookups.delete('acme/app!42');
+        forge.setPR('acme/app', '42', { state: recoveredState });
+        await app.refresh();
+        await settle();
+        if (recoveredState === 'opened') {
+          expect(forge.issueReadTargets).toEqual([]);
+          expect(await issueUpdates(app)).toEqual([]);
+
+          await app.set({ targets: [ghPr42], operation: 'remove' });
+          await app.refresh();
+          await settle();
+          expect(forge.issueReadTargets).toEqual([]);
+          expect(await issueUpdates(app)).toEqual([]);
+        } else {
+          expect(forge.issueReadTargets).toEqual(['acme/platform#9']);
+          expect(await issueUpdates(app)).toMatchObject([
+            { url: ghPr41, links: [ghIssueUrl, ghPr41] },
+          ]);
+        }
+      } finally {
+        await app.cleanup();
+      }
+    }
+
+    const partialForge = new StatusForge('github');
+    partialForge.setPR('acme/app', '41');
+    partialForge.setPR('acme/app', '42', { state: 'closed' });
+    partialForge.setPR('acme/app', '43', { state: 'merged' });
+    partialForge.issues.set('acme/platform#9', ghOpenIssue());
+    const partialApp = await harness({ status: partialForge });
+    try {
+      await partialApp.set({ targets: [ghPr41, ghPr42, ghPr43], issue_url: ghIssueUrl });
+      await partialApp.watch(['one'], 'one');
+      await settle();
+      partialForge.failingLookups.add('acme/app!42');
+      partialForge.failingLookups.add('acme/app!43');
+      partialForge.setPR('acme/app', '41', { state: 'merged' });
+      await partialApp.refresh();
+      await settle();
+      expect(partialForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(partialApp)).toEqual([]);
+
+      partialForge.failingLookups.delete('acme/app!42');
+      await partialApp.refresh();
+      await settle();
+      expect(partialForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(partialApp)).toEqual([]);
+
+      await partialApp.set({ targets: [ghPr42, ghPr43], operation: 'remove' });
+      await partialApp.refresh();
+      await settle();
+      expect(partialForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(partialApp)).toEqual([]);
+    } finally {
+      await partialApp.cleanup();
+    }
+
+    const retryPartialForge = new StatusForge('github');
+    retryPartialForge.setPR('acme/app', '41');
+    retryPartialForge.setPR('acme/app', '42', { state: 'closed' });
+    retryPartialForge.setPR('acme/app', '43', { state: 'merged' });
+    retryPartialForge.issues.set('acme/platform#9', ghOpenIssue());
+    const retryPartialStorage = new Map<string, unknown>();
+    const retryPartialFirst = await harness({
+      status: retryPartialForge,
+      storage: retryPartialStorage,
+    });
+    try {
+      await retryPartialFirst.set({ targets: [ghPr41, ghPr42, ghPr43], issue_url: ghIssueUrl });
+      await retryPartialFirst.watch(['one'], 'one');
+      await settle();
+      retryPartialForge.failingLookups.add('acme/app!42');
+      retryPartialForge.failingLookups.add('acme/app!43');
+      retryPartialForge.setPR('acme/app', '41', { state: 'merged' });
+      await retryPartialFirst.refresh();
+      await settle();
+    } finally {
+      await retryPartialFirst.cleanup();
+    }
+    retryPartialForge.failingLookups.delete('acme/app!42');
+    const retryPartialSecond = await harness({
+      status: retryPartialForge,
+      storage: retryPartialStorage,
+    });
+    try {
+      await settle();
+      expect(retryPartialForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(retryPartialSecond)).toEqual([]);
+
+      await retryPartialSecond.set({ targets: [ghPr42, ghPr43], operation: 'remove' });
+      await retryPartialSecond.watch(['one'], 'one');
+      await settle();
+      expect(retryPartialForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(retryPartialSecond)).toEqual([]);
+    } finally {
+      await retryPartialSecond.cleanup();
+    }
+  });
+
+  test('resolves explicit cross-repo GitHub issues over branch inference, handles inferred same-number issues, and skips unassociated PRs', async () => {
+    const forge = new StatusForge('github');
+    forge.setPR('acme/app', '41');
+    forge.issues.set('acme/platform#9', ghOpenIssue());
+    forge.issues.set('acme/app#9', ghOpenIssue('https://github.com/acme/app/issues/9'));
+    const explicitApp = await harness({
+      status: forge,
+      sourceBranches: new Map([['41', '9-branch-issue']]),
+    });
+    try {
+      await explicitApp.set({ target: ghPr41, issue_url: ghIssueUrl });
+      await explicitApp.watch(['one'], 'one');
+      await settle();
+      forge.setPR('acme/app', '41', { state: 'merged' });
+      await explicitApp.refresh();
+      await settle();
+      expect(forge.issueReadTargets).toEqual(['acme/platform#9']);
+      expect(await issueUpdates(explicitApp)).toMatchObject([
+        {
+          title: 'Issue acme/platform#9 may be outdated after #41',
+          links: [ghIssueUrl, ghPr41],
+        },
+      ]);
+    } finally {
+      await explicitApp.cleanup();
+    }
+
+    const inferredForge = new StatusForge('github');
+    const pr9 = 'https://github.com/acme/app/pull/9';
+    const appIssue9 = 'https://github.com/acme/app/issues/9';
+    inferredForge.setPR('acme/app', '9');
+    inferredForge.issues.set('acme/app#9', ghOpenIssue(appIssue9));
+    const inferredApp = await harness({
+      status: inferredForge,
+      sourceBranches: new Map([['9', '9-fix-bug']]),
+    });
+    try {
+      await inferredApp.set({ target: pr9 });
+      await inferredApp.watch(['one'], 'one');
+      await settle();
+      expect(inferredForge.issueReadTargets).toEqual([]);
+      inferredForge.setPR('acme/app', '9', { state: 'merged' });
+      await inferredApp.refresh();
+      await settle();
+      expect(inferredForge.issueReadTargets).toEqual(['acme/app#9']);
+      expect(await issueUpdates(inferredApp)).toMatchObject([
+        {
+          title: 'Issue acme/app#9 may be outdated after #9',
+          links: [appIssue9, pr9],
+        },
+      ]);
+    } finally {
+      await inferredApp.cleanup();
+    }
+
+    const unassociatedForge = new StatusForge('github');
+    unassociatedForge.setPR('acme/app', '41');
+    const unassociatedApp = await harness({ status: unassociatedForge });
+    try {
+      await unassociatedApp.set({ target: ghPr41 });
+      await unassociatedApp.watch(['one'], 'one');
+      await settle();
+      unassociatedForge.setPR('acme/app', '41', { state: 'merged' });
+      await unassociatedApp.refresh();
+      await settle();
+      expect(unassociatedForge.issueReadTargets).toEqual([]);
+      expect(await issueUpdates(unassociatedApp)).toEqual([]);
+    } finally {
+      await unassociatedApp.cleanup();
+    }
+  });
+
+  test('retries a failed GitHub final-merge issue read after reload, and cancels stale retries on removal or reassignment', async () => {
+    const forge = new StatusForge('github');
+    forge.setPR('acme/app', '41');
+    forge.issues.set('acme/platform#9', ghOpenIssue());
+    const storage = new Map<string, unknown>();
+    const issue = forge.issue.bind(forge);
+    const app = await harness({ status: forge, storage });
+    try {
+      await app.set({ target: ghPr41, issue_url: ghIssueUrl });
+      await app.watch(['one'], 'one');
+      await settle();
+      forge.issue = async () => {
+        throw new Error('GitHub issue lookup unavailable');
+      };
+      forge.setPR('acme/app', '41', { state: 'merged' });
+      await app.refresh();
+      await settle();
+      expect((await app.feedback()).items.map((item) => item.kind)).toEqual(['merged']);
+    } finally {
+      await app.cleanup();
+    }
+    forge.issue = issue;
+    const reloaded = await harness({ status: forge, storage });
+    try {
+      await settle();
+      expect(forge.issueReadTargets).toEqual(['acme/platform#9']);
+      expect(await issueUpdates(reloaded)).toMatchObject([
+        {
+          url: ghPr41,
+          title: 'Issue acme/platform#9 may be outdated after #41',
+          links: [ghIssueUrl, ghPr41],
+        },
+      ]);
+      expect(
+        (await reloaded.feedback()).items.filter((item) => item.kind === 'merged'),
+      ).toHaveLength(1);
+    } finally {
+      await reloaded.cleanup();
+    }
+
+    for (const action of ['remove', 'reassign'] as const) {
+      const staleForge = new StatusForge('github');
+      staleForge.setPR('acme/app', '41');
+      staleForge.issues.set('acme/platform#9', ghOpenIssue());
+      const staleStorage = new Map<string, unknown>();
+      const readIssue = staleForge.issue.bind(staleForge);
+      const firstRun = await harness({ status: staleForge, storage: staleStorage });
+      try {
+        await firstRun.set({ target: ghPr41, issue_url: ghIssueUrl });
+        await firstRun.watch(['one'], 'one');
+        await settle();
+        staleForge.issue = async () => {
+          throw new Error('GitHub issue lookup unavailable');
+        };
+        staleForge.setPR('acme/app', '41', { state: 'merged' });
+        await firstRun.refresh();
+        await settle();
+        if (action === 'remove') await firstRun.set({ target: 'none' });
+        else
+          await firstRun.set({
+            target: ghPr41,
+            issue_url: 'https://github.com/acme/platform/issues/10',
+          });
+      } finally {
+        await firstRun.cleanup();
+      }
+      staleForge.issue = readIssue;
+      const retryRun = await harness({ status: staleForge, storage: staleStorage });
+      try {
+        await settle();
+        expect(staleForge.issueReadTargets).toEqual([]);
+        expect(await issueUpdates(retryRun)).toEqual([]);
+      } finally {
+        await retryRun.cleanup();
+      }
+    }
+  });
+
+  test('respects watch.issues, watch.lifecycle, and delivery.lifecycle for GitHub issues', async () => {
+    const noIssuesForge = new StatusForge('github');
+    noIssuesForge.setPR('acme/app', '41');
+    noIssuesForge.issues.set('acme/platform#9', ghOpenIssue());
+    const noIssuesApp = await harness({
+      status: noIssuesForge,
+      pluginOptions: { watch: { issues: false } },
+    });
+    try {
+      await noIssuesApp.set({ target: ghPr41, issue_url: ghIssueUrl });
+      await noIssuesApp.watch(['one'], 'one');
+      await settle();
+      noIssuesForge.setPR('acme/app', '41', { state: 'merged' });
+      await noIssuesApp.refresh();
+      await settle();
+      expect(noIssuesForge.issueReadTargets).toEqual([]);
+      expect((await noIssuesApp.feedback()).items.map((item) => item.kind)).toEqual(['merged']);
+    } finally {
+      await noIssuesApp.cleanup();
+    }
+
+    const noLifecycleForge = new StatusForge('github');
+    noLifecycleForge.setPR('acme/app', '41');
+    noLifecycleForge.issues.set('acme/platform#9', ghOpenIssue());
+    const noLifecycleApp = await harness({
+      status: noLifecycleForge,
+      pluginOptions: { watch: { lifecycle: false } },
+    });
+    try {
+      await noLifecycleApp.set({ target: ghPr41, issue_url: ghIssueUrl });
+      await noLifecycleApp.watch(['one'], 'one');
+      await settle();
+      noLifecycleForge.setPR('acme/app', '41', { state: 'merged' });
+      await noLifecycleApp.refresh();
+      await settle();
+      expect(noLifecycleForge.issueReadTargets).toEqual([]);
+      expect((await noLifecycleApp.feedback()).items).toEqual([]);
+    } finally {
+      await noLifecycleApp.cleanup();
+    }
+
+    const summaryForge = new StatusForge('github');
+    summaryForge.setPR('acme/app', '41');
+    summaryForge.issues.set('acme/platform#9', ghOpenIssue());
+    const summaryApp = await harness({
+      status: summaryForge,
+      pluginOptions: { delivery: { lifecycle: 'summary' } },
+    });
+    try {
+      await summaryApp.set({ target: ghPr41, issue_url: ghIssueUrl });
+      await summaryApp.watch(['one'], 'one');
+      await settle();
+      summaryForge.setPR('acme/app', '41', { state: 'merged' });
+      await summaryApp.refresh();
+      await settle();
+      expect(summaryApp.synthetic).toHaveLength(2);
+      const mergeSummary = await summaryApp.request();
+      expect(mergeSummary.tools).toEqual({});
+      expect(textOf(mergeSummary)).toContain(`<mr-event kind="merged" link="${ghPr41}">`);
+      const issueSummary = await summaryApp.request();
+      expect(issueSummary.tools).toEqual({});
+      expect(textOf(issueSummary)).toContain(`<mr-event kind="issue-outdated" link="${ghPr41}">`);
+      expect(textOf(issueSummary)).toContain(
+        '<mr-detail>All PRs this session tracks for acme/platform#9 have merged, but the issue is still open.</mr-detail>',
+      );
+    } finally {
+      await summaryApp.cleanup();
+    }
+  });
 
   test('announces a failed job before its pipeline finishes, and clears it once a new pipeline runs', async () => {
     const running = (id: string, failed: string[]) => ({

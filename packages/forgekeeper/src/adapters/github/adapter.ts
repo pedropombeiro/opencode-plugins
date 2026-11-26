@@ -9,6 +9,7 @@ import {
   prefixReferences,
   type Forge,
   type ForgeTraits,
+  type GitHubIssueSnapshot,
   type GitHubPullRequest,
   type Pipeline,
   type ReviewerApproval,
@@ -529,6 +530,24 @@ export class GitHubForge implements Forge {
       { owner, repo, number: Number(ref.iid) },
     );
     return data.repository?.pullRequest?.headRefName || undefined;
+  }
+
+  async issue(ref: ReviewRef): Promise<GitHubIssueSnapshot | undefined> {
+    const [owner, repo] = ref.project.split('/');
+    const number = Number(ref.iid);
+    if (!owner || !repo || !Number.isInteger(number) || number < 1) return undefined;
+    const data = await this.graphql(
+      ref.host,
+      query<RepositoryData<{ issue?: { state?: string; url?: string } | null }>>(
+        `query($owner:String!,$repo:String!,$number:Int!) {
+      repository(owner:$owner,name:$repo) { issue(number:$number) { state url } }
+    }`,
+      ),
+      { owner, repo, number },
+    );
+    const node = data.repository?.issue;
+    if (!node || !node.url || (node.state !== 'OPEN' && node.state !== 'CLOSED')) return undefined;
+    return { forge: 'github', open: node.state === 'OPEN', url: node.url };
   }
 
   async markReady(

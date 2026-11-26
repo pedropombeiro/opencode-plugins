@@ -28,7 +28,7 @@ function relatedTargets(targets: readonly Target[]) {
   for (const target of targets) {
     const mr = targetRequest(target);
     const issue = relatedIssueRef(target);
-    if (!mr || issue?.forge !== 'gitlab') continue;
+    if (!mr || !issue) continue;
     const key = identity(issue);
     const group = groups.get(key) ?? { issue, targets: [] };
     if (!group.targets.some((ref) => sameRef(ref, mr))) group.targets.push(mr);
@@ -41,6 +41,18 @@ function belongs(url: string, targets: readonly ReviewRef[]) {
   const ref = parseUrl(url);
   return !!ref && targets.some((target) => sameRef(target, ref));
 }
+
+function sameRequestUrl(a: string, b: string) {
+  if (a === b) return true;
+  const left = parseUrl(a);
+  const right = parseUrl(b);
+  return !!left && !!right && sameRef(left, right);
+}
+
+const issueDisplayRef = (ref: ReviewRef) =>
+  ref.forge === 'github'
+    ? `${ref.project}${traits(ref.forge).issueReference(ref.iid)}`
+    : traits(ref.forge).issueReference(ref.iid);
 
 export function createIssueNotifications(
   ctx: Plugin.Context,
@@ -79,11 +91,16 @@ export function createIssueNotifications(
     ref: ReviewRef,
     requests: readonly ReviewRequest[],
   ) {
+    const finalMergeOnly = ref.forge === 'github';
     const { merge, ...next } = state;
     const allMerged = requests.every((request) => request.state === 'merged');
     const anchor = allMerged
-      ? requests.find((request) => request.url === merge?.url)
-      : requests.find((request) => request.state === 'opened');
+      ? merge
+        ? requests.find((request) => sameRequestUrl(request.url, merge.url))
+        : undefined
+      : finalMergeOnly
+        ? undefined
+        : requests.find((request) => request.state === 'opened');
     if (!anchor) {
       if (merge) await write(key, next);
       return;
@@ -95,13 +112,17 @@ export function createIssueNotifications(
     const forge = forges.forHost(ref.host, directory);
     const issue = await forge?.issue?.(ref);
     if (!issue) return;
-    const problems = issueProblems(issue, requests);
+    const issueRef = issueDisplayRef(ref);
+    const problems = issueProblems(issue, requests, issueRef);
     const fresh = problems.filter((problem) => !state.problems?.includes(problem.id));
     next.seen = seen;
     next.problems = problems.map((problem) => problem.id);
     if (fresh.length) {
-      const issueRef = traits(ref.forge).issueReference(ref.iid);
       const mrRef = traits(anchor.forge).reference(anchor.iid);
+      const issueUrl =
+        issue.forge === 'github'
+          ? issue.url
+          : `https://${ref.host}/${ref.project}/-/issues/${ref.iid}`;
       const mode = allMerged && merge ? merge.delivery : delivery();
       const cycle = (next.cycle ?? 0) + 1;
       next.cycle = cycle;
@@ -111,9 +132,11 @@ export function createIssueNotifications(
         sessionID: state.sessionID,
         url: anchor.url,
         title: `Issue ${issueRef} may be outdated after ${mrRef}`,
-        links: [`https://${ref.host}/${ref.project}/-/issues/${ref.iid}`, anchor.url],
+        links: [issueUrl, anchor.url],
         details: [
-          ...fresh.map(({ text }) => `${issueRef}: ${text}.`),
+          ...fresh.map(({ text }) =>
+            issue.forge === 'github' ? `${text}.` : `${issueRef}: ${text}.`,
+          ),
           'Tell the user what you would change in the issue, and wait for their approval before editing it.',
         ],
         ...(mode !== 'inbox' ? { delivery: mode } : {}),
@@ -139,14 +162,32 @@ export function createIssueNotifications(
         );
         const transition = current.find((request) => request && merged.has(request.url));
         const key = `${prefix(sessionID)}${encodeURIComponent(issue)}`;
+        const finalMergeOnly = group.issue.forge === 'github';
         let state = (await read(key)) ?? { sessionID, issue, at: now() };
-        if (transition && current.every((request) => !request || request.state === 'merged')) {
+        const hasUnmerged = current.some(
+          (request) => request !== undefined && request.state !== 'merged',
+        );
+        if (hasUnmerged) {
+          const { merge, ...rest } = state;
+          const problems = finalMergeOnly
+            ? state.problems?.filter((id) => id !== 'merged')
+            : state.problems;
+          if (merge || problems?.length !== state.problems?.length) {
+            state = { ...rest, ...(problems ? { problems } : {}) };
+            await write(key, state);
+          }
+        } else if (transition) {
           state = { ...state, merge: { url: transition.url, at: now(), delivery: delivery() } };
           await write(key, state);
         }
+        if (finalMergeOnly && !state.merge && !state.pending) continue;
         const snapshot = state;
         if (current.every((request) => request !== undefined)) {
           checks.push(async () => check(key, await flush(key, snapshot), group.issue, current));
+        } else if (snapshot.pending) {
+          checks.push(async () => {
+            await flush(key, snapshot);
+          });
         }
       }
       return async () => {
@@ -179,13 +220,26 @@ export function createIssueNotifications(
             await write(key, rest);
             return;
           }
-          const requests = await Promise.all(
+          const settled = await Promise.allSettled(
             group.targets.map((ref) =>
               forges
                 .forHost(ref.host, directory)
                 ?.findByNumber([{ host: ref.host, path: ref.project }], ref.iid),
             ),
           );
+          const requests = settled.map((result) =>
+            result.status === 'fulfilled' ? result.value : undefined,
+          );
+          if (requests.some((request) => request !== undefined && request.state !== 'merged')) {
+            const problems =
+              group.issue.forge === 'github'
+                ? rest.problems?.filter((id) => id !== 'merged')
+                : rest.problems;
+            await write(key, { ...rest, ...(problems ? { problems } : {}) });
+            return;
+          }
+          const failure = settled.find((result) => result.status === 'rejected');
+          if (failure) throw failure.reason;
           if (requests.every((request) => request !== undefined))
             await check(key, next, group.issue, requests);
         })().catch(host.error);

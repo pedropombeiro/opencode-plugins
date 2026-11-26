@@ -734,24 +734,39 @@ retarget proposals, since Forgekeeper no longer watches for merges.
 
 ### Outdated issues
 
-On GitLab, Forgekeeper checks a target's related issue (its `issue_url`, or the issue
-in its source branch name) on the first successful lookup of the related MRs, and when
-their membership, state, or draft status changes. Changes to the issue alone don't
-trigger a check. An update lists what looks wrong:
+Forgekeeper checks a target's related issue using its explicit `issue_url` or, when no
+`issue_url` is set, the issue number inferred from the PR/MR's source branch name. The
+checks depend on the forge:
 
-- The status lags behind: not "In review" while an MR is ready for review, or not "In dev"
-  or later while all open ones are drafts.
-- A tracked MR merges and all MRs the session tracks for that issue are confirmed merged,
-  but the issue is still open. Forgekeeper retries the check if a lookup fails.
-- It has no assignee, no `group::` label, no `maintenance::`, `bug::`, or `feature::`
-  label, or no milestone.
+- **GitLab:** Forgekeeper reads the related issue on the first successful lookup of the
+  related MRs and whenever their membership, state, or draft status changes. Changes to
+  the issue alone don't trigger a check. An update lists what looks wrong:
+  - The status lags behind: not "In review" while an MR is ready for review, or not
+    "In dev" or later while all open ones are drafts.
+  - A tracked MR merges and all MRs the session tracks for that issue are confirmed
+    merged, but the issue is still open. Forgekeeper retries the check if a lookup fails.
+  - It has no assignee, no `group::` label, no `maintenance::`, `bug::`, or `feature::`
+    label, or no milestone.
+- **GitHub:** Forgekeeper performs only the final-merge check. Ordinary open and draft PR
+  polls make no issue API calls. When a tracked PR transitions from open to merged and all
+  PRs this session tracks for that issue are confirmed merged, Forgekeeper reads the issue
+  and warns if it is still open. It doesn't check GitHub assignees, labels, milestones, or
+  project status.
+
+For example, when a session tracks `acme/app#41` and `acme/app#42` for `acme/platform#9`,
+merging `#41` sends only its ordinary merge notification. When `#42` merges, Forgekeeper
+sends `#42`'s ordinary merge notification independently and checks `acme/platform#9`,
+warning once if the issue is still open and staying silent if GitHub closed it. "All"
+always means all PRs or MRs this session tracks for the issue. If a lookup fails on that
+final merge, Forgekeeper retries the issue check on the lifecycle retry schedule and after
+a reload without holding back the ordinary merge update.
 
 Forgekeeper announces each problem once per issue in the session, including on the first
-successful issue check for an open MR. A later check can announce a recurring problem
-if an intervening check confirmed it was fixed. The update tells the agent to say what
-it would change and wait for your approval before editing the issue. It follows
-`delivery.lifecycle` and stays in the inbox until you acknowledge it, drop the MR it
-references, or that MR closes without merging. Set `watch.issues` to `false` to stop
+successful GitLab issue check for an open MR. A later check can announce a recurring
+problem if an intervening check confirmed it was fixed. The update tells the agent to say
+what it would change and wait for your approval before editing the issue. It follows
+`delivery.lifecycle` and stays in the inbox until you acknowledge it, drop the PR/MR it
+references, or that PR/MR closes without merging. Set `watch.issues` to `false` to stop
 new checks and updates.
 
 ### Stacked PRs/MRs
@@ -1299,7 +1314,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                                                                                                                                                                                                   |
 | `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                                                                                                                                                                                            |
 | `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, get requested changes, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                    |
-| `watch.issues`           | `true`                        | Watch for issue fields that a target's progress leaves outdated, on GitLab. Needs `watch.lifecycle`. See [Outdated issues](#outdated-issues).                                                                                                                                                                       |
+| `watch.issues`           | `true`                        | Watch related issues: outdated GitLab issue fields and open issues after all tracked GitLab MRs or GitHub PRs merge. Needs `watch.lifecycle`. See [Outdated issues](#outdated-issues).                                                                                                                              |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
 | `inbox`                  | `false`                       | Enable inbox monitoring for checkouts without a saved monitoring preference. Automation rules also enable it.                                                                                                                                                                                                       |

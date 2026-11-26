@@ -30,8 +30,8 @@ export interface Watch {
   lifecycle: boolean;
   // Requests for your review, including repeated ones.
   reviewRequests: boolean;
-  // Issue fields that a PR/MR's progress leaves outdated, on GitLab. Needs
-  // `lifecycle`.
+  // Outdated related issues (GitLab issue fields and final-merge open checks;
+  // GitHub final-merge open checks). Needs `lifecycle`.
   issues: boolean;
 }
 

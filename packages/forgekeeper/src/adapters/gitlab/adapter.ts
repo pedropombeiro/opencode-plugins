@@ -10,8 +10,8 @@ import {
   type FailedJob,
   type Forge,
   type ForgeTraits,
+  type GitLabIssueSnapshot,
   type GitLabMergeRequest,
-  type IssueSnapshot,
   type ReviewerApproval,
   type ReviewRef,
 } from '../../forge';
@@ -699,7 +699,7 @@ export class GitLabForge implements Forge {
     return typeof branch === 'string' && branch ? branch : undefined;
   }
 
-  async issue(ref: ReviewRef): Promise<IssueSnapshot | undefined> {
+  async issue(ref: ReviewRef): Promise<GitLabIssueSnapshot | undefined> {
     const data = await this.graphql(ref.host, ISSUE_QUERY, {
       project: ref.project,
       iid: ref.iid,
@@ -710,6 +710,7 @@ export class GitLabForge implements Forge {
     const milestone = widgets.find((widget) => widget.milestone)?.milestone?.title;
     const status = widgets.find((widget) => widget.status)?.status?.name;
     return {
+      forge: 'gitlab',
       open: node.state === 'OPEN',
       ...(status ? { status } : {}),
       assignees: widgets.flatMap((widget) => widget.assignees?.nodes ?? []).map((u) => u.username),

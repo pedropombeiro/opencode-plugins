@@ -20,9 +20,20 @@ export interface IssueProblem {
 export function issueProblems(
   issue: IssueSnapshot,
   requests: readonly ReviewRequest[],
+  issueLabel?: string,
 ): IssueProblem[] {
   if (!issue.open) return [];
   const problems: IssueProblem[] = [];
+
+  if (issue.forge === 'github') {
+    if (requests.length > 0 && requests.every((request) => request.state === 'merged')) {
+      problems.push({
+        id: 'merged',
+        text: `All PRs this session tracks for ${issueLabel ?? 'this issue'} have merged, but the issue is still open`,
+      });
+    }
+    return problems;
+  }
 
   const open = requests.filter((request) => request.state === 'opened');
   if (requests.length > 0 && requests.every((request) => request.state === 'merged')) {

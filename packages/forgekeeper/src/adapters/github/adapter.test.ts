@@ -788,6 +788,61 @@ test("reads a PR's source branch and treats a missing PR as unknown", async () =
   ).toBeUndefined();
 });
 
+test('reads a GitHub issue state and canonical URL, handles missing objects, and propagates errors', async () => {
+  const ref = {
+    forge: 'github' as const,
+    host: 'ghe.example.com',
+    project: 'acme/platform',
+    iid: '9',
+  };
+  let seen: { host: string; query: string; variables: Record<string, string | number> } | undefined;
+  const openForge = new GitHubForge(async (host, query, variables) => {
+    seen = { host, query, variables };
+    return {
+      repository: {
+        issue: { state: 'OPEN', url: 'https://ghe.example.com/acme/platform/issues/9' },
+      },
+    };
+  });
+  expect(await openForge.issue(ref)).toEqual({
+    forge: 'github',
+    open: true,
+    url: 'https://ghe.example.com/acme/platform/issues/9',
+  });
+  expect(seen?.host).toBe('ghe.example.com');
+  expect(seen?.variables).toEqual({ owner: 'acme', repo: 'platform', number: 9 });
+  expect(seen?.query).toContain('issue(number:$number) { state url }');
+  expect(seen?.query).not.toContain('issueOrPullRequest');
+
+  const closedForge = new GitHubForge(async () => ({
+    repository: {
+      issue: { state: 'CLOSED', url: 'https://ghe.example.com/acme/platform/issues/9' },
+    },
+  }));
+  expect(await closedForge.issue(ref)).toEqual({
+    forge: 'github',
+    open: false,
+    url: 'https://ghe.example.com/acme/platform/issues/9',
+  });
+
+  expect(await new GitHubForge(async () => ({ repository: null })).issue(ref)).toBeUndefined();
+  expect(
+    await new GitHubForge(async () => ({ repository: { issue: null } })).issue(ref),
+  ).toBeUndefined();
+  expect(
+    await new GitHubForge(async () => ({
+      repository: {
+        issue: { state: 'UNKNOWN', url: 'https://ghe.example.com/acme/platform/issues/9' },
+      },
+    })).issue(ref),
+  ).toBeUndefined();
+  await expect(
+    new GitHubForge(async () => {
+      throw new Error('rate limit');
+    }).issue(ref),
+  ).rejects.toThrow('rate limit');
+});
+
 test('uses typed integer GraphQL variables and classifies missing gh', async () => {
   const args: string[][] = [];
   const gh = ghGraphQL(async (_file, input) => {

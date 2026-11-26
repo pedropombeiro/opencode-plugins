@@ -165,15 +165,22 @@ export interface ReviewRef {
   iid: string;
 }
 
-// The issue fields that a PR/MR's progress can leave outdated.
-export interface IssueSnapshot {
+export interface GitLabIssueSnapshot {
+  forge: 'gitlab';
   open: boolean;
-  // The work item status, such as "In dev". Undefined without one.
   status?: string;
   assignees: string[];
   labels: string[];
   milestone?: string;
 }
+
+export interface GitHubIssueSnapshot {
+  forge: 'github';
+  open: boolean;
+  url: string;
+}
+
+export type IssueSnapshot = GitLabIssueSnapshot | GitHubIssueSnapshot;
 
 export type Tone = 'muted' | 'success' | 'warning' | 'error';
 
