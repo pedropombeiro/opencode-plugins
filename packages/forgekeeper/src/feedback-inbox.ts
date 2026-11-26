@@ -147,11 +147,14 @@ export function linkOptions(item: Pick<FeedbackItem, 'url' | 'links' | 'kind'>) 
   const jobs = item.kind === 'ci-failed';
   return [
     ...comments.map((url, index) => ({
-      title: `${jobs ? 'Failed job' : 'Comment'} ${comments.length > 1 ? `${index + 1} of ${comments.length} ` : ''}(${
-        jobs
-          ? new URL(url).pathname.split('/').filter(Boolean).slice(-2).join('/')
-          : new URL(url).hash || 'no anchor'
-      })`,
+      title:
+        item.kind === 'issue-outdated'
+          ? 'Issue'
+          : `${jobs ? 'Failed job' : 'Comment'} ${comments.length > 1 ? `${index + 1} of ${comments.length} ` : ''}(${
+              jobs
+                ? new URL(url).pathname.split('/').filter(Boolean).slice(-2).join('/')
+                : new URL(url).hash || 'no anchor'
+            })`,
       description: url,
       value: url,
     })),

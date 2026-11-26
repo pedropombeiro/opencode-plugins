@@ -1,14 +1,13 @@
 import type { Plugin } from '@opencode/plugin';
 import type { FeedbackItem } from './feedback-inbox';
-import { jobKey, type FailedJob, type ReviewRef, type ReviewRequest } from './forge';
-import { parseUrl, reference, traits, traitsOf, type ForgeCatalog } from './forges';
-import { issueProblems } from './issue-watch';
+import { jobKey, type FailedJob, type ReviewRequest } from './forge';
+import { parseUrl, reference, traitsOf, type ForgeCatalog } from './forges';
+import { createIssueNotifications } from './issue-notifications';
 import { proposeRetargets, stricter } from './lifecycle-execution';
 import {
   createLifecycleWatcher,
   failureKeys,
   UNLISTED_FAILURE,
-  type IssueCheck,
   type LifecycleEvent,
   type LifecycleRecord,
   type PipelineState,
@@ -16,7 +15,7 @@ import {
 import type { StatusOptions } from './options';
 import type { Notice } from './rpc';
 import { feedbackTarget } from './summary-delivery';
-import { includesRequest, relatedIssueRef, sameRef, targetRequest, type Target } from './target';
+import { includesRequest, type Target } from './target';
 
 const MAX_LISTED_JOBS = 10;
 const LIFECYCLE_STORE = 'status/lifecycle/';
@@ -96,51 +95,26 @@ export function createLifecycleNotifications(
     return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
   }
 
-  // What each issue was last read for, so an unchanged PR/MR doesn't read it again.
-  const issueReads = new Map<string, string>();
-
-  async function issues(
-    sessionID: string,
-    requests: readonly ReviewRequest[],
-  ): Promise<Map<string, IssueCheck>> {
-    const checks = new Map<string, IssueCheck>();
-    const targets = await host.storedTargets(sessionID).catch(() => undefined);
-    if (!targets) return checks;
-    const groups = new Map<string, { ref: ReviewRef; requests: ReviewRequest[] }>();
-    for (const request of requests) {
-      const ref = parseUrl(request.url);
-      const target = targets.find((entry) => {
-        const named = targetRequest(entry);
-        return ref && named && sameRef(named, ref);
-      });
-      const issue = target && relatedIssueRef(target);
-      if (!issue) continue;
-      const key = [sessionID, issue.host, issue.project.toLowerCase(), issue.iid].join(' ');
-      const group = groups.get(key) ?? { ref: issue, requests: [] };
-      group.requests.push(request);
-      groups.set(key, group);
-    }
-    for (const [key, { ref, requests: group }] of groups) {
-      const forge = deps.forges.forHost(ref.host, directory);
-      if (!forge?.issue) continue;
-      const seen = group.map((request) => [request.url, request.state, request.draft]).join(' ');
-      if (issueReads.get(key) === seen) continue;
-      const issue = await forge.issue(ref).catch((error) => {
-        host.error(error);
-        return undefined;
-      });
-      if (!issue) continue;
-      issueReads.set(key, seen);
-      // shortcut: GitLab's issue URL shape, move it into the forge traits when GitHub gets `issue`.
-      const check = {
-        url: `https://${ref.host}/${ref.project}/-/issues/${ref.iid}`,
-        reference: traits(ref.forge).issueReference(ref.iid),
-        problems: issueProblems(issue, group),
-      };
-      for (const request of group) checks.set(request.url, check);
-    }
-    return checks;
+  async function publish(item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) {
+    await host.record(item, supersedes);
+    host.notice({
+      sessionID: item.sessionID,
+      title: item.title,
+      message: 'New merge request update in /forge-feedback.',
+      variant: 'info',
+    });
   }
+
+  const issues =
+    settings.watch.lifecycle && settings.watch.issues
+      ? createIssueNotifications(
+          ctx,
+          deps.forges,
+          { ...host, record: publish },
+          () => settings.delivery.lifecycle,
+          deps.now ?? Date.now,
+        )
+      : undefined;
 
   async function record(
     record: LifecycleRecord,
@@ -159,9 +133,6 @@ export function createLifecycleNotifications(
         !(event.jobs ?? []).some((key) => still.has(key)))
     )
       return;
-    const stillOutdated = new Set(record.issueProblems ?? []);
-    const problems = (event.problems ?? []).filter((problem) => stillOutdated.has(problem.id));
-    if (event.kind === 'issue-outdated' && (record.state !== 'opened' || !problems.length)) return;
     const children = records.filter(
       (entry) =>
         entry.parent === record.url &&
@@ -184,24 +155,14 @@ export function createLifecycleNotifications(
     }
     const ci = event.kind === 'ci-failed' ? record.ci : undefined;
     const failures = ci && splitFailures(ci, event.jobs ?? []);
-    const details =
-      event.kind === 'issue-outdated' && event.issue
-        ? [
-            ...problems.map((problem) => `${event.issue?.reference}: ${problem.text}.`),
-            'Tell the user what you would change in the issue, and wait for their approval before editing it.',
-          ]
-        : ci && failures
-          ? failureDetails(ci, failures)
-          : proposals;
+    const details = ci && failures ? failureDetails(ci, failures) : proposals;
     const forge = feedbackTarget(record.url);
     const title =
       ci && failures
         ? failureTitle(record.reference, ci, failures, forge ? traitsOf(forge).ci : 'pipeline')
-        : event.kind === 'issue-outdated'
-          ? `Issue ${event.issue?.reference} may be outdated after ${record.reference}`
-          : event.kind === 'conflict'
-            ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
-            : `${record.reference} merged into ${record.targetBranch}`;
+        : event.kind === 'conflict'
+          ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
+          : `${record.reference} merged into ${record.targetBranch}`;
     const item: FeedbackItem = {
       id: event.id,
       kind: event.kind,
@@ -214,7 +175,6 @@ export function createLifecycleNotifications(
               .slice(0, MAX_LISTED_JOBS)
               .flatMap((job) => job.url ?? [])
           : []),
-        ...(event.issue ? [event.issue.url] : []),
         record.url,
       ],
       ...(details.length ? { details } : {}),
@@ -228,13 +188,7 @@ export function createLifecycleNotifications(
       entry.sessionID === item.sessionID &&
       entry.url === item.url &&
       entry.pipeline === item.pipeline;
-    await host.record(item, samePipeline);
-    host.notice({
-      sessionID: record.sessionID,
-      title,
-      message: 'New merge request update in /forge-feedback.',
-      variant: 'info',
-    });
+    await publish(item, samePipeline);
   }
 
   const watcher = settings.watch.lifecycle
@@ -259,7 +213,13 @@ export function createLifecycleNotifications(
         policy: (kind) =>
           kind === 'merged' ? settings.lifecycleExecution.parentMerged : undefined,
         delivery: () => settings.delivery.lifecycle,
-        ...(settings.watch.issues ? { issues } : {}),
+        ...(issues
+          ? {
+              prepareIssues: issues.prepare,
+              waitingIssues: issues.waiting,
+              retryIssues: issues.retry,
+            }
+          : {}),
         onError: host.error,
         now: deps.now,
       })
@@ -269,6 +229,7 @@ export function createLifecycleNotifications(
     watcher,
     async prune() {
       const at = (deps.now ?? Date.now)();
+      await issues?.prune(at - LIFECYCLE_RETENTION);
       for (const { key, value } of await host.scan(LIFECYCLE_STORE)) {
         const record = value as LifecycleRecord;
         if (record.pending.length || at - record.at < LIFECYCLE_RETENTION) continue;

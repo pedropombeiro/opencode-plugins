@@ -21,14 +21,10 @@ export default {
     // waits for the source branch lookup and so also gives up sooner.
     const stopped = new AbortController();
     const statusExec = limitExec(exec, CONCURRENCY, stopped.signal);
-    const cleanup = await setupServer(
-      ctx,
-      createTitleLookups(new Forges(exec, hosts), execWithTimeout(15_000)),
-      {
-        forges: new Forges(statusExec, hosts),
-        exec: statusExec,
-      },
-    );
+    const cleanup = await setupServer(ctx, createTitleLookups(execWithTimeout(15_000)), {
+      forges: new Forges(statusExec, hosts),
+      exec: statusExec,
+    });
     return async () => {
       stopped.abort();
       await cleanup();

@@ -168,6 +168,15 @@ describe('feedback inbox', () => {
     ).toEqual(['Failed job (jobs/9)', 'PR/MR overview']);
   });
 
+  test('offers the issue link before the MR overview', () => {
+    const url = 'https://gitlab.com/g/p/-/merge_requests/1';
+    const issue = 'https://gitlab.com/g/p/-/issues/9';
+    expect(linkOptions({ url, kind: 'issue-outdated', links: [issue, url] })).toEqual([
+      { title: 'Issue', description: issue, value: issue },
+      { title: 'PR/MR overview', description: url, value: url },
+    ]);
+  });
+
   test("labels an update with its newest comment's time, or its detection time without comments", () => {
     const at = Date.UTC(2026, 9, 28, 14, 31);
     const postedAt = Date.UTC(2026, 9, 28, 14, 25);

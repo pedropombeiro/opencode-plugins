@@ -25,10 +25,10 @@ export function issueProblems(
   const problems: IssueProblem[] = [];
 
   const open = requests.filter((request) => request.state === 'opened');
-  if (open.length === 0 && requests.some((request) => request.state === 'merged')) {
+  if (requests.length > 0 && requests.every((request) => request.state === 'merged')) {
     problems.push({
       id: 'merged',
-      text: 'every linked MR is merged but the issue is still open. Close it and set the status to "Complete", or keep it open on purpose',
+      text: 'all MRs this session tracks for the issue have merged, but it is still open. Confirm whether the issue is complete before closing it',
     });
   } else if (open.length > 0) {
     const expected = open.some((request) => !request.draft) ? 'In review' : 'In dev';

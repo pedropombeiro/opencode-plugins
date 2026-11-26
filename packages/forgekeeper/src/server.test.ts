@@ -69,8 +69,6 @@ interface Options {
   viewerID?: (ref: ReviewRef) => Promise<string | undefined>;
   storage?: Map<string, unknown>;
   branch?: { current: string; default: string };
-  // What the checkout's forge reports for the branch.
-  found?: { branch: string; number?: string };
   sourceBranches?: Map<string, string>;
   failingSession?: boolean;
   pluginOptions?: Record<string, unknown>;
@@ -101,8 +99,6 @@ interface Options {
   // The instance's checkout. Defaults to /repo.
   directory?: string;
   activity?: number;
-  // Branch lookups for titles wait for `releaseBranch()`.
-  holdBranch?: boolean;
   permissionDecision?: (input: {
     sessionID: string;
     agent?: string;
@@ -256,17 +252,7 @@ async function harness(options: Options = {}) {
   const sessions = options.sessions ?? defaultSessions();
   const directory = options.directory ?? '/repo';
   const sourceLookups: ReviewRef[] = [];
-  let releaseBranch = () => {};
-  const branchGate = options.holdBranch
-    ? new Promise<void>((resolve) => (releaseBranch = resolve))
-    : undefined;
-  let branchLookups = 0;
   const lookups: TitleLookups = {
-    branch: async () => {
-      branchLookups++;
-      await branchGate;
-      return options.found ? { forge: traits('gitlab'), ...options.found } : undefined;
-    },
     sourceBranch: async (ref) => {
       sourceLookups.push(ref);
       return options.sourceBranches?.get(ref.iid);
@@ -578,8 +564,6 @@ async function harness(options: Options = {}) {
       events.push(event);
       wake();
     },
-    branchLookups: () => branchLookups,
-    releaseBranch: () => releaseBranch(),
     renames: () => renames,
     target: (sessionID = 'one') => handlers.target!({ sessionID }),
     monitoringStatus: (sessionID = 'one') =>
@@ -824,7 +808,7 @@ describe('review preparation integration', () => {
         await until(() => app.prompts.length === 1, 100_000);
         if (action === 'pause') await app.pauseFeedback(true);
         if (action === 'acknowledge') await app.acknowledgeFeedback('cancel');
-        if (action === 'target') await app.set({ target: 'branch' });
+        if (action === 'target') await app.set({ target: 'none' });
         if (action === 'move') app.sessions.get('one')!.location.directory = '/other';
         if (action === 'edit') body = 'An edited finding';
         await expect(app.request()).rejects.toThrow(
@@ -1185,9 +1169,7 @@ describe('session targets', () => {
   test('writes the instruction entry when the first prompt is admitted', async () => {
     const app = await harness();
     await app.admit();
-    expect(app.entries()['forgekeeper-session-target']).toBe(
-      'Current session target: checked-out branch (automatic).',
-    );
+    expect(app.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     expect(app.entryWrites).toEqual(['put forgekeeper-session-target']);
     const first = await app.system();
     expect(first).toContain('call set_session_target');
@@ -1228,7 +1210,7 @@ describe('session targets', () => {
   test('writes a missing entry from the context hook without adding system text', async () => {
     const app = await harness();
     const first = await app.system();
-    expect(app.entries()['forgekeeper-session-target']).toContain('checked-out branch (automatic)');
+    expect(app.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     expect(first).not.toContain('Current session target');
     expect(await app.system()).toBe(first);
     expect(app.entryWrites).toEqual(['put forgekeeper-session-target']);
@@ -1248,13 +1230,13 @@ describe('session targets', () => {
       'put forgekeeper-session-target',
       'put forgekeeper-session-target',
     ]);
-    await app.set({ target: 'branch' });
-    expect(app.entries()['forgekeeper-session-target']).toContain('checked-out branch (automatic)');
+    await app.set({ target: 'none' });
+    expect(app.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     expect(await app.system()).toBe(stable);
     await app.cleanup();
   });
 
-  test('registers guidance and replaces branch references even on main', async () => {
+  test('registers guidance and prefixes the title when a target is set', async () => {
     const app = await harness();
     expect(await app.context()).toContain('call set_session_target');
     await app.set({ target: mr });
@@ -1342,20 +1324,72 @@ describe('session targets', () => {
       await app.cleanup();
     });
 
-    test('leaves sessions that are not forks on the checked-out branch', async () => {
+    test('leaves unrelated sessions without targets', async () => {
       const app = await harness({ sessions: forked() });
       await app.set({ target: mr });
-      expect(await app.context('two')).toContain('checked-out branch (automatic)');
+      expect(await app.context('two')).toContain('Current session target: none.');
       await app.cleanup();
     });
   });
 
-  test('reset removes the prefix on main and restores automatic context', async () => {
+  test('clearing targets removes the prefix and updates the context', async () => {
     const app = await harness();
     await app.set({ target: mr });
-    await app.set({ target: 'branch' });
+    await app.set({ target: 'none' });
     expect(app.sessions.get('one')?.title).toBe('Review changes');
-    expect(await app.context()).toContain('checked-out branch (automatic)');
+    expect(await app.context()).toContain('Current session target: none.');
+    await app.cleanup();
+  });
+
+  test('preserves user-written references when retargeting after detach and reload', async () => {
+    const app = await harness();
+    await app.set({ target: mr });
+    const title = '[#12, !45] General question';
+    app.sessions.get('one')!.title = `[!456] ${title}`;
+    await app.runCommand('forge-detach');
+    expect(app.sessions.get('one')?.title).toBe(title);
+    await app.cleanup();
+
+    const reloaded = await harness({ storage: app.storage, sessions: app.sessions });
+    await reloaded.set({ target: nextMr });
+    expect(reloaded.sessions.get('one')?.title).toBe(`[!789] ${title}`);
+    await reloaded.cleanup();
+  });
+
+  test.each(['session.created', 'session.renamed'])(
+    'preserves references when setting the first target after %s',
+    async (type) => {
+      const app = await harness();
+      const title = '[#12, !45] Review changes';
+      app.sessions.get('one')!.title = title;
+      app.emit({ type, data: { sessionID: 'one' } });
+      await settle();
+      expect(app.sessions.get('one')?.title).toBe(title);
+      expect(await app.target()).toEqual({});
+      await app.cleanup();
+
+      const reloaded = await harness({ storage: app.storage, sessions: app.sessions });
+      await reloaded.set({ target: mr });
+      expect(reloaded.sessions.get('one')?.title).toBe(`[!456] ${title}`);
+      await reloaded.cleanup();
+    },
+  );
+
+  test('replaces a legacy prefix when setting the first target without stored state', async () => {
+    const app = await harness();
+    app.sessions.get('one')!.title = '[#12, !45] Review changes';
+    await app.set({ target: mr });
+    expect(app.sessions.get('one')?.title).toBe('[!456] Review changes');
+    await app.cleanup();
+  });
+
+  test('clearing a target leaves a long manual rename intact', async () => {
+    const app = await harness();
+    await app.set({ target: mr });
+    const title = `General question ${'with more detail '.repeat(8).trimEnd()}`;
+    app.sessions.get('one')!.title = title;
+    await app.set({ target: 'none' });
+    expect(app.sessions.get('one')?.title).toBe(title);
     await app.cleanup();
   });
 
@@ -1427,7 +1461,7 @@ describe('session targets', () => {
       targets: [{ url: mr, issueUrl: issue }],
     });
     expect(await app.target('two')).toEqual({});
-    await app.set({ target: 'branch' });
+    await app.set({ target: 'none' });
     expect(await app.target()).toEqual({});
     expect(app.emitted).toEqual([
       {
@@ -1505,10 +1539,10 @@ describe('session targets', () => {
     expect(app.sourceLookups.map((ref) => ref.iid)).toEqual(['456', '789', '101']);
 
     expect(await app.set({ target: mr, operation: 'remove' })).toEqual({
-      content: 'Session target: checked-out branch.',
+      content: 'Session target: none.',
     });
     expect(app.sessions.get('one')?.title).toBe('Review changes');
-    expect(await app.context()).toContain('checked-out branch (automatic)');
+    expect(await app.context()).toContain('Current session target: none.');
     await app.cleanup();
   });
 
@@ -1622,47 +1656,6 @@ describe('session targets', () => {
   test("never blocks the model request when the session can't be read", async () => {
     const app = await harness({ failingSession: true });
     expect(await app.context()).toBe('');
-    await app.cleanup();
-  });
-});
-
-describe('branch-based naming', () => {
-  const feature = { current: '123-fix-login', default: 'main' };
-
-  test("prefixes the branch's issue and PR/MR", async () => {
-    const app = await harness({
-      branch: feature,
-      found: { branch: '123-fix-login', number: '45' },
-    });
-    await app.set({ target: 'branch' });
-    expect(app.sessions.get('one')?.title).toBe('[#123, !45] Review changes');
-    await app.cleanup();
-  });
-
-  test('shows a placeholder until the PR/MR exists', async () => {
-    const app = await harness({
-      branch: { current: 'tidy-up', default: 'main' },
-      found: { branch: 'tidy-up' },
-    });
-    await app.set({ target: 'branch' });
-    expect(app.sessions.get('one')?.title).toBe('[tidy-up, !N/A] Review changes');
-    await app.cleanup();
-  });
-
-  test('leaves the title alone without a forge remote', async () => {
-    const app = await harness({ branch: feature });
-    await app.set({ target: 'branch' });
-    expect(app.sessions.get('one')?.title).toBe('Review changes');
-    await app.cleanup();
-  });
-
-  test('skips the default branch', async () => {
-    const app = await harness({
-      branch: { current: 'trunk', default: 'trunk' },
-      found: { branch: 'trunk', number: '1' },
-    });
-    await app.set({ target: 'branch' });
-    expect(app.sessions.get('one')?.title).toBe('Review changes');
     await app.cleanup();
   });
 });
@@ -1812,7 +1805,7 @@ describe('PR/MR status', () => {
     await app.cleanup();
   });
 
-  test('follows the branch instead of a branch prefix the plugin wrote', async () => {
+  test('ignores branch and title references and removes only the old managed prefix', async () => {
     const forge = new StatusForge();
     forge.set('group/project', '1', { state: 'closed' });
     forge.branch = [
@@ -1824,17 +1817,50 @@ describe('PR/MR status', () => {
       } as GitLabMergeRequest,
     ];
     const storage = new Map<string, unknown>([['sessions/two', { prefix: '[!1]' }]]);
-    const app = await harness({ status: forge, storage, pluginOptions: quiet });
-    app.sessions.get('two')!.title = '[!1] Other session';
-    await app.watch(['two'], 'two');
-    await settle();
-    expect(app.lastStatus('two')?.snapshot.lookup).toMatchObject({ requests: [{ iid: '2' }] });
-    expect(forge.lookups).toEqual([]);
-    // A reference the user wrote still counts.
-    app.sessions.get('two')!.title = '[!1] [!1] Other session';
-    expect((await app.refresh('two')).snapshot.lookup).toMatchObject({
-      sessionTarget: '!1 (from the session title)',
+    const app = await harness({
+      status: forge,
+      storage,
+      pluginOptions: quiet,
+      branch: { current: '123-feature', default: 'main' },
     });
+    app.sessions.get('two')!.title = '[!1] [#12, !1] Other session';
+    app.sessions.get('one')!.title = '[#12, !1] General question';
+    await app.watch(['two'], 'two');
+    app.emit({ type: 'session.execution.succeeded', data: { sessionID: 'one' } });
+    app.emit({ type: 'session.renamed', data: { sessionID: 'two' } });
+    await settle();
+    expect(app.sessions.get('one')!.title).toBe('[#12, !1] General question');
+    expect(app.sessions.get('two')!.title).toBe('[#12, !1] Other session');
+    expect(await app.target('two')).toEqual({});
+    expect(app.lastStatus('two')?.snapshot.lookup).toEqual({
+      kind: 'none',
+      reason: 'No session target is set',
+    });
+    expect((await app.refresh('')).snapshot.lookup).toEqual({
+      kind: 'none',
+      reason: 'No session is open',
+    });
+    expect(forge.lookups).toEqual([]);
+    await app.cleanup();
+  });
+
+  test('clearing the last target clears status in a visible session', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const app = await harness({ status: forge, pluginOptions: quiet });
+    await app.set({ target: projectA });
+    await app.watch(['one'], 'one');
+    await settle();
+    expect(app.lastStatus()?.snapshot.lookup).toMatchObject({ requests: [{ iid: '1' }] });
+
+    await app.set({ target: projectA, operation: 'remove' });
+    await settle();
+    expect(app.lastStatus()?.snapshot.lookup).toEqual({
+      kind: 'none',
+      reason: 'No session target is set',
+    });
+    expect(await app.target()).toEqual({});
+    expect(forge.lookups).toHaveLength(1);
     await app.cleanup();
   });
 
@@ -2114,7 +2140,7 @@ describe('PR/MR status lifecycle', () => {
     expect(off.entries()['forgekeeper-session-target']).toContain(second);
     expect(off.entries()['forgekeeper-session-target']).not.toContain(first);
     expect(await off.runCommand('forge-detach')).toEqual([]);
-    expect(off.entries()['forgekeeper-session-target']).toContain('checked-out branch');
+    expect(off.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     await off.cleanup();
     const { app } = await watchedFeedback();
     expect(app.commandNames()).toEqual(['forge-detach', 'forge-report', 'forge-inbox']);
@@ -2467,7 +2493,7 @@ describe('PR/MR status lifecycle', () => {
       now: reader.now,
     });
     expect((await reloaded.feedback()).items).toHaveLength(1);
-    await reloaded.set({ target: 'branch' });
+    await reloaded.set({ target: 'none' });
     await settle();
     expect((await reloaded.feedback()).items).toEqual([]);
     await reloaded.cleanup();
@@ -2973,7 +2999,7 @@ describe('PR/MR status lifecycle', () => {
     await settle();
     expect((await app.feedback()).items).toHaveLength(1);
     forge.issues.set('group/a#9', { ...complete, status: 'In dev', assignees: [] });
-    forge.set('group/a', '1', { draft: false, title: 'changed' });
+    forge.set('group/a', '1', { draft: true });
     await app.refresh();
     await settle();
     expect((await app.feedback()).items.map((entry) => entry.details?.[0])).toEqual([
@@ -2995,6 +3021,152 @@ describe('PR/MR status lifecycle', () => {
     expect((await app.feedback()).items).toEqual([]);
     await app.cleanup();
   });
+
+  const issueUrl = 'https://gitlab.com/group/a/-/issues/9';
+  const completeIssue: IssueSnapshot = {
+    open: true,
+    status: 'In review',
+    assignees: ['me'],
+    labels: ['group::dh', 'bug::ux'],
+    milestone: '19.7',
+  };
+  const issueUpdates = async (app: Awaited<ReturnType<typeof harness>>) =>
+    (await app.feedback()).items.filter((item) => item.kind === 'issue-outdated');
+
+  test.each([
+    [projectA, child],
+    [child, projectA],
+  ])(
+    'announces the last tracked merge once and retains the warning after refresh (%s, %s)',
+    async (first, second) => {
+      const forge = new StatusForge();
+      forge.set('group/a', '1');
+      forge.set('group/a', '2');
+      forge.issues.set('group/a#9', { ...completeIssue, milestone: undefined });
+      const app = await harness({ status: forge });
+      try {
+        await app.set({ targets: [first, second], issue_url: issueUrl });
+        await app.watch(['one'], 'one');
+        await settle();
+        const initial = await issueUpdates(app);
+        expect(initial).toHaveLength(1);
+        await app.acknowledgeFeedback(initial[0].id);
+        forge.set('group/a', '1', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        expect(await issueUpdates(app)).toEqual([]);
+        forge.set('group/a', '2', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        const updates = await issueUpdates(app);
+        expect(updates).toHaveLength(1);
+        expect(updates[0]).toMatchObject({ url: child, links: [issueUrl, child] });
+        expect(updates[0].details?.[0]).toContain('all MRs this session tracks');
+        await app.refresh();
+        await settle();
+        expect(await issueUpdates(app)).toEqual(updates);
+      } finally {
+        await app.cleanup();
+      }
+    },
+  );
+
+  test('announces a new issue after a failed first read on an existing MR record', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    const app = await harness({ status: forge });
+    try {
+      await app.set({ target: projectA });
+      await app.watch(['one'], 'one');
+      await settle();
+      await app.set({ target: projectA, issue_url: issueUrl });
+      await app.refresh();
+      await settle();
+      expect(forge.issueReads).toContain('9');
+      expect(await issueUpdates(app)).toEqual([]);
+      const incomplete = { ...completeIssue, milestone: undefined };
+      forge.issues.set('group/a#9', incomplete);
+      await app.refresh();
+      await settle();
+      expect((await issueUpdates(app)).map((item) => item.links[0])).toEqual([issueUrl]);
+
+      const otherUrl = issueUrl.replace('/9', '/10');
+      forge.issues.set('group/a#10', incomplete);
+      await app.set({ target: projectA, issue_url: otherUrl });
+      await app.refresh();
+      await settle();
+      expect((await issueUpdates(app)).map((item) => item.links[0])).toContain(otherUrl);
+
+      forge.issues.set('group/a#10', completeIssue);
+      forge.set('group/a', '1', { draft: true });
+      await app.refresh();
+      await settle();
+      forge.issues.set('group/a#10', incomplete);
+      forge.set('group/a', '1', { draft: false });
+      await app.refresh();
+      await settle();
+      expect((await issueUpdates(app)).filter((item) => item.links[0] === otherUrl)).toHaveLength(
+        2,
+      );
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('retries a failed final-merge issue read after reload without another status refresh', async () => {
+    const forge = new StatusForge();
+    forge.set('group/a', '1');
+    forge.issues.set('group/a#9', completeIssue);
+    const storage = new Map<string, unknown>();
+    const app = await harness({ status: forge, storage });
+    const issue = forge.issue.bind(forge);
+    try {
+      await app.set({ target: projectA, issue_url: issueUrl });
+      await app.watch(['one'], 'one');
+      await settle();
+      forge.issue = async () => {
+        throw new Error('Issue lookup unavailable');
+      };
+      forge.set('group/a', '1', { state: 'merged' });
+      await app.refresh();
+      await settle();
+      expect((await app.feedback()).items.map((item) => item.kind)).toEqual(['merged']);
+    } finally {
+      await app.cleanup();
+    }
+    forge.issue = issue;
+    const reloaded = await harness({ status: forge, storage });
+    try {
+      await settle();
+      expect((await issueUpdates(reloaded))[0]?.details?.[0]).toContain(
+        'all MRs this session tracks',
+      );
+    } finally {
+      await reloaded.cleanup();
+    }
+  });
+
+  test.each(['closed', 'unresolved', 'merged'])(
+    'does not announce an all-merged issue for an unconfirmed group (%s)',
+    async (state) => {
+      const forge = new StatusForge();
+      forge.set('group/a', '1', { state: state === 'merged' ? 'merged' : 'opened' });
+      if (state !== 'unresolved') forge.set('group/a', '2', { state });
+      forge.issues.set('group/a#9', completeIssue);
+      const app = await harness({ status: forge });
+      try {
+        await app.set({ targets: [projectA, child], issue_url: issueUrl });
+        await app.watch(['one'], 'one');
+        await settle();
+        forge.set('group/a', '1', { state: 'merged' });
+        await app.refresh();
+        await settle();
+        expect(await issueUpdates(app)).toEqual([]);
+      } finally {
+        await app.cleanup();
+      }
+    },
+  );
 
   test('announces a failed job before its pipeline finishes, and clears it once a new pipeline runs', async () => {
     const running = (id: string, failed: string[]) => ({
@@ -4132,24 +4304,18 @@ describe('state shared across instances and reloads', () => {
   });
 
   test("never lets an old instance's title update overwrite a target set after a reload", async () => {
-    const storage = new Map<string, unknown>();
+    const storage = new Map<string, unknown>([['sessions/one', { prefix: '[!45]' }]]);
     const sessions = defaultSessions();
-    const branch = { current: '123-fix-login', default: 'main' };
-    const old = await harness({
-      storage,
-      sessions,
-      branch,
-      found: { branch: '123-fix-login', number: '45' },
-      holdBranch: true,
-    });
+    sessions.get('one')!.title = '[!45] Review changes';
+    const old = await harness({ storage, sessions });
+    const release = old.holdNextGet('sessions/one');
     old.emit({ type: 'session.execution.succeeded', data: { sessionID: 'one' } });
     await settle();
-    expect(old.branchLookups()).toBe(1);
     const stopping = old.cleanup();
 
-    const replacement = await harness({ storage, sessions, branch });
+    const replacement = await harness({ storage, sessions });
     await replacement.set({ target: mr });
-    old.releaseBranch();
+    release();
     await stopping;
     await settle();
     expect(storage.get('sessions/one')).toMatchObject({ targets: [{ url: mr }] });
@@ -4560,16 +4726,16 @@ describe('linked sessions', () => {
     const app = await harness({
       storage,
       sessions,
-      branch: { current: '123-feature', default: 'main' },
-      found: { branch: '123-feature', number: '456' },
     });
+    await app.set({ target: mr }, 'two');
+    app.sessions.get('two')!.title = 'Other session';
     app.emit({ type: 'session.execution.succeeded', data: { sessionID: 'linked' } });
     app.emit({ type: 'session.renamed', data: { sessionID: 'linked' } });
     app.emit({ type: 'session.execution.succeeded', data: { sessionID: 'two' } });
     await settle();
     expect(app.sessions.get('linked')!.title).toBe(initialTitle);
-    expect(app.sessions.get('two')!.title).toBe('[#123, !456] Other session');
-    expect(app.renames()).toBe(1);
+    expect(app.sessions.get('two')!.title).toBe('[!456] Other session');
+    expect(app.renames()).toBe(2);
     expect(storage.has('sessions/linked')).toBe(false);
     await app.cleanup();
   });
@@ -6964,7 +7130,7 @@ describe('reviewer approval notifications and automation', () => {
 
       // Remove target while unapproved state is still warm in statusCache.
       clock = 2000;
-      await app.set({ target: 'branch' }, 'one');
+      await app.set({ target: 'none' }, 'one');
       await settle();
 
       // Duo approves while target is unwatched!

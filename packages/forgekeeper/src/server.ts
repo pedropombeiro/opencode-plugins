@@ -47,15 +47,13 @@ import {
   targetsPrefix,
   type Target,
 } from './target';
-import { branchPrefix, extractIssueNumber, reconcileTitle } from './title';
-
-const SKIP_BRANCHES = new Set(['master', 'main', 'HEAD', 'develop']);
+import { extractIssueNumber, reconcileTitle } from './title';
 
 // Stored per session. `prefix` is the title prefix this plugin last wrote, so
 // it can be replaced without touching text the user added. Before sessions
 // could have several targets, the state held a single `target`.
 type StoredState = { targets?: Target[]; prefix?: string };
-type SessionState = { targets: Target[]; prefix?: string };
+type SessionState = { targets: Target[]; prefix?: string | null };
 
 const TARGET_KEY = 'forgekeeper-session-target';
 // How many forks back a session without targets looks for inherited ones.
@@ -69,12 +67,12 @@ const GUIDANCE = [
   'When the user drops some of several targets from the task, call set_session_target with operation "remove" and their URLs.',
   'Background references, comparisons, and dependencies do not change the target. Follow-ups without a new primary target keep the current target.',
   'Include issue_url only when its relationship to the target PRs/MRs is established. Never carry over the checked-out branch’s issue to another target.',
-  'When the user explicitly returns to work on the checked-out branch, call set_session_target with target "branch".',
+  'Do not set targets for general questions or infer them from the checkout. When the user wants to clear all targets, call set_session_target with target "none".',
   `The current session target is in the <context> entry "${TARGET_KEY}". The plugin updates it when it changes, so trust the latest value.`,
 ];
 
 function describeTargets(targets: readonly Target[]): string {
-  if (targets.length === 0) return 'checked-out branch (automatic)';
+  if (targets.length === 0) return 'none';
   if (targets.length === 1) return JSON.stringify(targets[0]);
   return `${targets.length} targets: ${JSON.stringify(targets)}`;
 }
@@ -82,7 +80,7 @@ function describeTargets(targets: readonly Target[]): string {
 function toolResult(targets: readonly Target[], missing: readonly string[]): string {
   const lines =
     targets.length === 0
-      ? ['Session target: checked-out branch.']
+      ? ['Session target: none.']
       : targets.length === 1
         ? [`Session target: ${targets[0].url}`]
         : [`Session targets (${targets.length}):`, ...targets.map((target) => `- ${target.url}`)];
@@ -150,7 +148,7 @@ export async function setupServer(
   // A fork without a record of its own reads the nearest ancestor's record.
   // Its next update saves that state as its own, inside the keyed queue, so
   // nothing here can overwrite a concurrent target change.
-  const storedState = async (sessionID: string): Promise<StoredState> => {
+  const storedState = async (sessionID: string): Promise<StoredState | undefined> => {
     let current = sessionID;
     for (let depth = 0; depth <= MAX_FORK_DEPTH; depth++) {
       const stored = (await ctx.storage.get(`sessions/${current}`)) as StoredState | undefined;
@@ -159,14 +157,14 @@ export async function setupServer(
       if (!source) break;
       current = source;
     }
-    return {};
+    return undefined;
   };
 
-  const readState = async (sessionID: string) => {
+  const readState = async (sessionID: string): Promise<SessionState> => {
     const stored = await storedState(sessionID);
     return {
-      targets: Array.isArray(stored.targets) ? stored.targets : [],
-      ...(stored.prefix ? { prefix: stored.prefix } : {}),
+      targets: Array.isArray(stored?.targets) ? stored.targets : [],
+      prefix: stored ? (stored.prefix ?? null) : undefined,
     };
   };
 
@@ -277,30 +275,24 @@ export async function setupServer(
     });
   }
 
-  async function update(sessionID: string): Promise<void> {
+  async function update(
+    sessionID: string,
+    state?: SessionState,
+    observedTitle = false,
+  ): Promise<void> {
     const session = await ctx.session.get({ sessionID });
     if (session.parentID || !session.title || linkedOwner(session as DirectorySession)) return;
 
     const directory = session.location.directory;
     if (directory !== ctx.location.directory) return;
 
-    const state = await stateFor(sessionID);
-    let prefix = targetsPrefix(state.targets);
-    if (state.targets.length === 0) {
-      const vcs = await ctx.vcs.get({ location: session.location });
-      const info = vcs.data?.branch;
-      const branch = info?.current;
-      if (branch && !SKIP_BRANCHES.has(branch) && branch !== info?.default) {
-        const found = await lookups.branch(directory);
-        if (found) prefix = branchPrefix(found.forge, found.branch, found.number);
-      }
-    }
-
-    // A branch lookup can outlast cleanup. Its result must not reach the
-    // title or storage, which the replacement instance owns by then.
+    state ??= await stateFor(sessionID);
+    const prefix = targetsPrefix(state.targets);
     if (closing) return;
-    const title = reconcileTitle(session.title, prefix, state.prefix);
-    if (title !== session.title) await ctx.session.update({ sessionID, title });
+    if (prefix || state.prefix) {
+      const title = reconcileTitle(session.title, prefix, state.prefix);
+      if (title !== session.title) await ctx.session.update({ sessionID, title });
+    } else if (!session.fork && (!observedTitle || state.prefix === null)) return;
     await save(sessionID, { targets: state.targets, ...(prefix ? { prefix } : {}) });
   }
 
@@ -343,14 +335,12 @@ export async function setupServer(
       const state = await stateFor(sessionID);
       result = applyTargetChange(state.targets, change);
       await inferIssues(result.targets, state.targets);
-      await save(sessionID, {
-        targets: result.targets,
-        ...(state.prefix ? { prefix: state.prefix } : {}),
-      });
+      const next = { ...state, targets: result.targets };
+      await save(sessionID, next);
       watcher?.targetsChanged(sessionID, result.targets);
       await instruct(sessionID).catch(() => {});
       await rpc.events.emit('targetChanged', { sessionID, ...targetOutput(result.targets) });
-      await update(sessionID);
+      await update(sessionID, next);
     });
     return toolResult(result.targets, result.missing);
   }
@@ -360,13 +350,13 @@ export async function setupServer(
       name: 'set_session_target',
       options: { codemode: false },
       description:
-        'Set the issues, PRs, or MRs this session works on, for its title and PR/MR status. Use target for one full URL, or "branch" to return to branch-based naming. Use targets for several full URLs. The default operation, "replace", sets exactly the given targets; "add" keeps the current targets, and "remove" drops the given ones. Call it after creating a PR/MR for the current task. Without issue_url, the related issue is inferred from the PR/MR source branch name. This only changes local session metadata.',
+        'Set the issues, PRs, or MRs this session works on, for its title and PR/MR status. Use target for one full URL, or "none" to clear all targets. Use targets for several full URLs. The default operation, "replace", sets exactly the given targets; "add" keeps the current targets, and "remove" drops the given ones. Call it after creating a PR/MR for the current task. Without issue_url, the related issue is inferred from the PR/MR source branch name. This only changes local session metadata.',
       input: {
         type: 'object',
         properties: {
           target: {
             type: 'string',
-            description: 'Full GitHub/GitLab issue, PR, or MR URL, or "branch".',
+            description: 'Full GitHub/GitLab issue, PR, or MR URL, or "none" to clear all targets.',
           },
           targets: {
             type: 'array',
@@ -488,12 +478,12 @@ export async function setupServer(
   const commands = await ctx.command.transform((editor) => {
     editor.add({
       name: 'forge-detach',
-      description: 'Remove explicit targets by full URL, or omit URLs to return to branch tracking',
+      description: 'Remove session targets by full URL, or omit URLs to clear all targets',
       execute: async ({ sessionID, prompt }) => {
         const urls = (prompt.text ?? '').trim().split(/\s+/).filter(Boolean);
         const message = await changeTargets(
           sessionID,
-          urls.length ? { operation: 'remove', targets: urls } : { target: 'branch' },
+          urls.length ? { operation: 'remove', targets: urls } : { target: 'none' },
         );
         await rpc.events.emit('notice', { sessionID, variant: 'info', message });
       },
@@ -710,6 +700,7 @@ export async function setupServer(
   void (async () => {
     for await (const event of ctx.event.subscribe({
       types: [
+        'session.created',
         'session.renamed',
         'session.moved',
         'session.archived',
@@ -720,17 +711,18 @@ export async function setupServer(
         'session.execution.succeeded',
         'session.execution.failed',
         'session.execution.interrupted',
-        'vcs.branch.updated',
       ],
       signal: controller.signal,
     })) {
       const { type } = event as { type: string };
       const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID;
-      if ((type === 'session.renamed' || type === 'session.execution.succeeded') && sessionID) {
-        void schedule(sessionID).catch(() => {});
+      if (sessionID) {
+        if (type === 'session.created' || type === 'session.renamed') {
+          void schedule(sessionID, () => update(sessionID, undefined, true)).catch(() => {});
+        } else if (type === 'session.execution.succeeded') {
+          void schedule(sessionID).catch(() => {});
+        }
       }
-      if (type === 'session.renamed' && sessionID)
-        void watcher?.titleChanged(sessionID).catch(() => {});
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
       if (type === 'session.deleted' && sessionID) watcher?.sessionDeleted(sessionID);
       if (
@@ -762,15 +754,9 @@ export async function setupServer(
           type === 'session.execution.succeeded' ? 'succeeded' : 'failed',
           (event as { created?: number }).created ?? Date.now(),
         );
-      if (type === 'vcs.branch.updated') {
-        const location = (event as { location?: { directory?: string } }).location;
-        if (!location?.directory || location.directory === ctx.location.directory)
-          void watcher?.branchChanged().catch(() => {});
-      }
     }
   })().catch((error) => {
-    // Without events, titles and statuses stop following renames, turns, and
-    // branch switches until the plugin reloads.
+    // Without events, titles and statuses stop following renames and turns until reload.
     if (controller.signal.aborted) return;
     const reason = error instanceof Error ? error.message : String(error);
     void rpc.events

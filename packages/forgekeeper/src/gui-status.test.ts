@@ -50,6 +50,20 @@ function harness() {
 }
 
 describe('Desktop status pill', () => {
+  test('shows approval progress without raising the pill tone', () => {
+    const { actions } = harness();
+    const pill = statusPill(
+      snapshot([
+        mr({ approvalsLeft: 1, unresolvedThreads: 0, approvers: [{ username: 'alice' }] }),
+      ]),
+      undefined,
+      actions,
+    );
+    expect(pill?.label).toBe('!4281 · ✓ CI · 1 ✓ +1 · ◷ @david');
+    expect(pill?.tone).toBe('success');
+    expect(pill?.rows?.map((row) => row.label)).toContain('1 approval · 1 more needed');
+  });
+
   test('keeps unknown mergeability after pending reviewers', () => {
     const { actions } = harness();
     const pill = statusPill(snapshot([mr({ conflictsKnown: false })]), undefined, actions);

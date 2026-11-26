@@ -46,7 +46,7 @@ toasts.
 - For self-managed GitLab hosts not named `gitlab.*`, and for GitHub Enterprise, the
   `hosts` and `githubHosts` [options](#options).
 
-Without a forge CLI, titles still follow targets and branches, and `/forge-status` reports
+Without a forge CLI, titles still follow explicit targets, and `/forge-status` reports
 what's missing, such as `glab is not installed`.
 
 ## Upgrade from forgekeeper 2.x
@@ -93,11 +93,11 @@ the prefix becomes `[!456]`. Without `issue_url`, the server reads the PR/MR's s
 and takes the issue number from its name, so reviewing an MR from `321-fix-timeout` produces
 `[#321, !456]`.
 
-Targets persist per session across plugin reloads. A forked session starts with the targets of
+New sessions have no targets by default. Targets persist per session across plugin reloads. A forked session starts with the targets of
 the session it was forked from, as they are when Forgekeeper first updates the fork, and keeps
-them from then on. Calling `set_session_target` with
-`target: "branch"` returns to branch-based naming. Child sessions and untitled sessions are
-skipped.
+them from then on. To clear all targets, call `set_session_target` with `target: "none"`
+or run `/forge-detach` without arguments. The former `target: "branch"` value is no longer
+accepted. Child sessions and untitled sessions are skipped for title updates.
 
 ### Several targets
 
@@ -105,11 +105,11 @@ A session can work on up to 50 issues and PRs/MRs at once, such as a set of rela
 under review. Pass their full URLs in `targets` instead of `target`, and choose how they
 change the current targets with `operation`:
 
-| `operation`         | Effect                                                                         |
-| ------------------- | ------------------------------------------------------------------------------ |
-| `replace` (default) | Sets exactly the given targets.                                                |
-| `add`               | Appends the given targets and keeps the current ones.                          |
-| `remove`            | Drops the given targets. Removing the last one returns to branch-based naming. |
+| `operation`         | Effect                                                                        |
+| ------------------- | ----------------------------------------------------------------------------- |
+| `replace` (default) | Sets exactly the given targets.                                               |
+| `add`               | Appends the given targets and keeps the current ones.                         |
+| `remove`            | Drops the given targets. Removing the last one leaves the session untargeted. |
 
 ```json
 {
@@ -141,27 +141,16 @@ Target URLs can name a GitLab MR, issue, or work item on any host, or a GitHub P
 GitHub URLs are accepted on any host that isn't recognizably GitLab, so GitHub Enterprise
 targets work.
 
-## Branch-based naming
+## Title prefixes
 
-Without an explicit target, the title follows the checked-out branch:
+Forgekeeper reconciles the title after target changes, title changes, and successful agent
+runs. When no targets remain, Forgekeeper removes the prefix it previously recorded. It
+preserves text you added, including your own bracketed prefixes.
 
-1. The prefix starts with the issue number from the branch name, or the branch name
-   without one.
-2. It adds the newest open PR/MR from the branch, or `!N/A` (GitLab) or `#N/A` (GitHub)
-   until one exists.
-
-The title is reconciled after target changes, title changes, and successful agent runs.
-Text you add to the title, including your own bracketed prefixes, is kept.
-
-Branch names longer than 40 characters are shortened with an ellipsis in the prefix. Titles
-stay within 100 characters by shortening the text after the prefix, never the prefix
+Forgekeeper keeps prefixed titles within 100 characters by shortening the text after the prefix, never the prefix
 itself, so the plugin can still find and replace its prefix later.
 
-The default branch and branches named `main`, `master`, `develop`, or `HEAD` get no prefix.
-
-The branch's remote, pushed branch name, and forge come from the same repository discovery
-as the status footer. That discovery uses the branch's push or upstream remote, recognizes
-forks, and classifies hosts with the `hosts` and `githubHosts` options.
+Forgekeeper uses these patterns to infer a related issue from a targeted PR/MR's source branch:
 
 | Pattern                           | Example branch          | Issue |
 | --------------------------------- | ----------------------- | ----- |
@@ -174,18 +163,9 @@ forks, and classifies hosts with the `hosts` and `githubHosts` options.
 
 ## Status footer
 
-The server picks each session's PRs/MRs in this order:
-
-1. The explicit targets.
-1. A PR/MR number in a title prefix that you wrote, such as `!456` in `[!456] Review`.
-1. The checked-out branch's open PRs/MRs.
-
-A prefix that the plugin wrote from the branch doesn't count as a title reference, so the
-footer follows the branch when its PR/MR closes and another opens. The title prefix itself
-reuses a branch's PR/MR number for up to 10 minutes.
-
-Explicit targets that aren't PRs/MRs, such as issues, show no status. Unresolved explicit
-PRs/MRs never fall back to the branch.
+The server looks up only the session's explicit PR/MR targets. It ignores references in
+the title and the checked-out branch. Issue-only sessions and the home screen show no
+PR/MR status.
 
 Without a PR/MR to show, the footer stays empty, even when a lookup fails, such as in a new
 session before the server answers. It shows `PR/MR status unavailable` only when none of
@@ -337,7 +317,7 @@ PRs/MRs that are still targets. A target removed in the meantime isn't mentioned
 
 When the server plugin stops, such as on a reload, no new lookup, fetch, notification,
 title update, or target change starts, and queued `glab` and `gh` commands don't run. A
-title update that is still looking up its branch doesn't rename the session or store
+title update that is still reading its state doesn't rename the session or store
 anything, because the replacement instance owns the session's state by then. Notifications
 that were already being sent can finish and store their outcome, so the replacement instance
 doesn't send them again. Cleanup waits up to 5 seconds for them. One that takes longer may be
@@ -507,8 +487,6 @@ update by itself.
 The inbox retains the newest 500 updates per checkout across plugin reloads. It stores
 session IDs, target URLs, notification titles, comment URLs, and timestamps, not comment
 bodies or credentials. A pause persists across reloads and leaves status display available.
-
-PRs/MRs from the title or the branch don't get review notifications.
 
 Before it sends a notification, the server checks that the PR/MR is still one of the
 session's targets. A lookup that started before the targets changed is discarded, so a
@@ -700,9 +678,10 @@ Forgekeeper also watches each session's explicit PR/MR targets for four changes:
 - **Outdated issues:** the issue a target works on has fields its progress makes wrong
   (see [Outdated issues](#outdated-issues)).
 
-All come from the forge's own state, compared between two lookups, never from comments
-such as GitLab's "can no longer be merged" note. The first lookup of a target only records
-it, so nothing that happened before Forgekeeper first saw the target is announced. Records
+Conflicts, failed jobs, and merges come from changes in the forge's state, never from
+comments such as GitLab's "can no longer be merged" note. The first lookup only records
+these states. [Outdated issue](#outdated-issues) checks can announce problems on their first
+successful read. Records
 persist across restarts, so a change that happened while OpenCode wasn't running is
 announced at the next lookup. A
 mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
@@ -745,26 +724,30 @@ never comments.
 
 A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
-drops clear right away. Setting `watch.lifecycle` to `false` stops all three kinds, and
+drops clear right away. Setting `watch.lifecycle` to `false` stops all four kinds, and
 retarget proposals too, since nothing notices merges then.
 
 ### Outdated issues
 
-On GitLab, each lookup of a target that has a related issue (its `issue_url`, or the issue
-in its source branch name) also reads the issue, but only when a target of that issue
-changed state or draft status since the last read. An update lists what looks wrong:
+On GitLab, Forgekeeper checks a target's related issue (its `issue_url`, or the issue
+in its source branch name) on the first successful lookup of the related MRs, and when
+their membership, state, or draft status changes. Changes to the issue alone don't
+trigger a check. An update lists what looks wrong:
 
 - The status lags behind: not "In review" while an MR is ready for review, or not "In dev"
   or later while all open ones are drafts.
-- All the issue's MRs merged, but the issue is still open.
+- A tracked MR merges and all MRs the session tracks for that issue are confirmed merged,
+  but the issue is still open. Forgekeeper retries the check if a lookup fails.
 - It has no assignee, no `group::` label, no `maintenance::`, `bug::`, or `feature::`
   label, or no milestone.
 
-Each problem is announced once, when first seen, until the issue is fixed; a problem that
-returns is announced again. A record stored before Forgekeeper watched issues only records
-the problems. The update tells the agent to say what it would change and wait for your
-approval before editing the issue. It follows `delivery.lifecycle` and clears only when
-you acknowledge it. Set `watch.issues` to `false` to stop these updates.
+Forgekeeper announces each problem once per issue in the session, including on the first
+successful issue check for an open MR. A later check can announce a recurring problem
+if an intervening check confirmed it was fixed. The update tells the agent to say what
+it would change and wait for your approval before editing the issue. It follows
+`delivery.lifecycle` and stays in the inbox until you acknowledge it, drop the MR it
+references, or that MR closes without merging. Set `watch.issues` to `false` to stop
+new checks and updates.
 
 ### Stacked PRs/MRs
 
@@ -843,7 +826,7 @@ The corresponding review source must still be enabled under `watch`.
 For each new settled batch on a project with a matching rule, Forgekeeper counts all
 non-archived root sessions explicitly targeting the PR/MR across worktrees. Inactive sessions
 and sessions without an open tab count, including sessions whose checkout has automation
-disabled. Subagents and branch or title matches do not count. Exactly one session must own the
+disabled. Subagents do not count. Exactly one session must own the
 target. Forgekeeper records a batch with multiple associated sessions as skipped before reading
 its findings, so it stays skipped even if the other associations are removed later. While
 sessions can't be read, Forgekeeper leaves the batch undecided and retries it.
@@ -1360,7 +1343,7 @@ The server registers an [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) wit
 `target` and listen for `targetChanged`:
 
 - `target({ sessionID })` returns `{ url, issueUrl?, targets }` for explicit targets, and
-  `{}` in branch mode. `targets` lists every target as `{ url, issueUrl? }`. `url` and
+  `{}` when no targets are set. `targets` lists every target as `{ url, issueUrl? }`. `url` and
   `issueUrl` describe the first target, for callers that expect a single target.
 - `watch({ clientID, keys, visible? })` renews the caller's leases on `keys` and returns
   `{ enabled, statuses }`. A key is a session ID, or `""` for the checkout outside a
@@ -1374,8 +1357,8 @@ The server registers an [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) wit
   session is monitored, and each target's fetch health and subscription state.
 - `pauseFeedback({ paused })` persists the checkout's review-monitoring pause state.
 - `feedbackChanged` fires with `{ directory }` when the inbox or pause state changes.
-- `targetChanged` fires after `set_session_target` runs, with the same fields as `target`
-  and the `sessionID`. It has only the `sessionID` in branch mode.
+- `targetChanged` fires after targets change, with the same fields as `target`
+  and the `sessionID`. It has only the `sessionID` when no targets are set.
 - `status` fires with `{ directory, key, snapshot }` when a key's status changes.
 - `notice` fires with `{ sessionID?, title?, message, variant }` for the CLIs to show as a
   toast.
@@ -1397,17 +1380,16 @@ from `opencode-forgekeeper` 1.x works the same way, because 1.x used the same ID
 OpenCode scopes plugin storage by plugin ID, so nothing stored under the former ID,
 `opencode-forge-session-title`, carries over:
 
-- Sessions start in branch-based naming. Ask the agent to set their targets again.
+- Sessions start without targets. Ask the agent to set their targets again.
 - A title that kept a single-reference prefix from before, such as `[!456] Review`, now looks
-  like a reference that you wrote. Until you set a target, the status follows that PR/MR, labeled
-  "from the session title". Setting a target adds a second prefix, such as
+  like a reference that you wrote and does not affect status. Setting a target adds a second prefix, such as
   `[#12, !45] [!456] Review`. Remove the older prefix by hand. Older prefixes with two
   references, such as `[#12, !45]`, are replaced automatically.
 - The first look at each PR/MR records a new review baseline, so comments posted before then
   aren't announced.
 - Callers of the RPC need the new ID, `opencode-forgekeeper`.
 
-With default options, a new checkout shows the footer. Enable the inbox to collect updates,
+With default options, the footer shows status once a session has a PR/MR target. Enable the inbox to collect updates,
 then set `delivery.reviews` to `summary` if you want automatic summaries. Set `status` to
 `false` to keep only titles.
 
@@ -1428,8 +1410,7 @@ If you set options for `opencode-forgekeeper` 2.x, also see
 - `src/limit.ts` bounds how many forge requests run at once.
 - `src/title.ts` extracts branch issue numbers and reconciles title prefixes.
 - `src/options.ts` reads the plugin's status options.
-- `src/lookups.ts` answers the title's forge questions: the branch's newest PR/MR number
-  and a PR/MR's source branch.
+- `src/lookups.ts` reads a targeted PR/MR's source branch to infer its related issue.
 - `src/status-client.ts` holds the CLI's leases, snapshots, and per-directory settings.
   `src/client-core.ts` connects it to the RPC for both clients. `src/tui.tsx` renders the
   terminal footer, dialog, commands, and notices; `src/gui.tsx` renders the desktop pill,

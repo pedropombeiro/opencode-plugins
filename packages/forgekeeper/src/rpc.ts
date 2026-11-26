@@ -108,7 +108,7 @@ export const ForgeSessionRpc = {
       },
       output: inboxState,
     },
-    // The session's explicit targets, or `{}` in automatic branch mode.
+    // The session's explicit targets, or `{}` when none are set.
     target: {
       input: {
         type: 'object',
@@ -172,7 +172,7 @@ export const ForgeSessionRpc = {
         additionalProperties: false,
       },
     },
-    // Fires after set_session_target runs. Has only `sessionID` in branch mode.
+    // Fires after targets change. Has only `sessionID` when none are set.
     targetChanged: {
       schema: {
         type: 'object',
