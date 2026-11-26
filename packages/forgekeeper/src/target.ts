@@ -194,14 +194,18 @@ function mainReference(target: Target): string {
 }
 
 // A PR/MR's related issue: the explicit `issueUrl`, or else the issue in its
-// source branch name, which is in the PR/MR's own project. `id` tells issues
-// with the same number in different projects apart.
-function relatedIssue(target: Target): { id: string; reference: string } | undefined {
+// source branch name, which is in the PR/MR's own project.
+export function relatedIssueRef(target: Target): ReviewRef | undefined {
   const { ref, issue } = parseTargetUrl(target.url);
-  let related: ReviewRef;
-  if (target.issueUrl) related = parseTargetUrl(target.issueUrl).ref;
-  else if (!issue && target.branchIssue) related = { ...ref, iid: target.branchIssue };
-  else return undefined;
+  if (target.issueUrl) return parseTargetUrl(target.issueUrl).ref;
+  if (!issue && target.branchIssue) return { ...ref, iid: target.branchIssue };
+  return undefined;
+}
+
+// `id` tells issues with the same number in different projects apart.
+function relatedIssue(target: Target): { id: string; reference: string } | undefined {
+  const related = relatedIssueRef(target);
+  if (!related) return undefined;
   return {
     id: `${related.forge} ${related.host} ${related.project.toLowerCase()} ${related.iid}`,
     reference: traits(related.forge).issueReference(related.iid),

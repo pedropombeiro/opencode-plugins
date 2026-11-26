@@ -669,16 +669,19 @@ updates.
 
 ## Merge request updates
 
-Forgekeeper also watches each session's explicit PR/MR targets for three changes:
+Forgekeeper also watches each session's explicit PR/MR targets for four changes:
 
 - **Conflicts:** a target that could merge starts to conflict with its target branch.
 - **Failed jobs:** a job fails in a target's head pipeline, even while the pipeline still
   runs.
 - **Merges:** a target merges.
+- **Outdated issues:** the issue a target works on has fields its progress makes wrong
+  (see [Outdated issues](#outdated-issues)).
 
-All come from the forge's own state, compared between two lookups, never from comments
-such as GitLab's "can no longer be merged" note. The first lookup of a target only records
-it, so nothing that happened before Forgekeeper first saw the target is announced. Records
+Conflicts, failed jobs, and merges come from changes in the forge's state, never from
+comments such as GitLab's "can no longer be merged" note. The first lookup only records
+these states. [Outdated issue](#outdated-issues) checks can announce problems on their first
+successful read. Records
 persist across restarts, so a change that happened while OpenCode wasn't running is
 announced at the next lookup. A
 mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
@@ -721,8 +724,30 @@ never comments.
 
 A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
-drops clear right away. Setting `watch.lifecycle` to `false` stops all three kinds, and
+drops clear right away. Setting `watch.lifecycle` to `false` stops all four kinds, and
 retarget proposals too, since nothing notices merges then.
+
+### Outdated issues
+
+On GitLab, Forgekeeper checks a target's related issue (its `issue_url`, or the issue
+in its source branch name) on the first successful lookup of the related MRs, and when
+their membership, state, or draft status changes. Changes to the issue alone don't
+trigger a check. An update lists what looks wrong:
+
+- The status lags behind: not "In review" while an MR is ready for review, or not "In dev"
+  or later while all open ones are drafts.
+- A tracked MR merges and all MRs the session tracks for that issue are confirmed merged,
+  but the issue is still open. Forgekeeper retries the check if a lookup fails.
+- It has no assignee, no `group::` label, no `maintenance::`, `bug::`, or `feature::`
+  label, or no milestone.
+
+Forgekeeper announces each problem once per issue in the session, including on the first
+successful issue check for an open MR. A later check can announce a recurring problem
+if an intervening check confirmed it was fixed. The update tells the agent to say what
+it would change and wait for your approval before editing the issue. It follows
+`delivery.lifecycle` and stays in the inbox until you acknowledge it, drop the MR it
+references, or that MR closes without merging. Set `watch.issues` to `false` to stop
+new checks and updates.
 
 ### Stacked PRs/MRs
 
@@ -1269,6 +1294,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                                                                                                                                                                                                   |
 | `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                                                                                                                                                                                            |
 | `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                                           |
+| `watch.issues`           | `true`                        | Watch for issue fields that a target's progress leaves outdated, on GitLab. Needs `watch.lifecycle`. See [Outdated issues](#outdated-issues).                                                                                                                                                                       |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
 | `inbox`                  | `false`                       | Enable inbox monitoring for checkouts without a saved monitoring preference. Automation rules also enable it.                                                                                                                                                                                                       |

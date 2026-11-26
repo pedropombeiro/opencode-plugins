@@ -47,5 +47,15 @@ export function closedFeedback(lookup: Lookup) {
           .map((request) => request.url)
       : [],
   );
-  return (item: FeedbackItem) => item.kind !== 'merged' && closed.has(item.url);
+  const merged = new Set(
+    lookup.kind === 'found'
+      ? lookup.requests
+          .filter((request) => request.state === 'merged')
+          .map((request) => request.url)
+      : [],
+  );
+  return (item: FeedbackItem) =>
+    item.kind !== 'merged' &&
+    closed.has(item.url) &&
+    !(item.kind === 'issue-outdated' && merged.has(item.url));
 }

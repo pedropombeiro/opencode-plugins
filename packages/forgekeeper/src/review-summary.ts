@@ -121,9 +121,10 @@ export const LIFECYCLE_SYSTEM = [
   'link: for a conflict, that the merge request cannot merge until its conflicts with its',
   'target branch are resolved; for a failed job, which jobs failed in its pipeline, and',
   'whether the pipeline is still running; for a merge, that it merged; for an approval, who',
-  'approved it. Then list each <mr-detail> line, keeping what it says Forgekeeper did or',
-  'proposes. Do not claim anything the request does not state, do not guess why a job failed,',
-  'do not propose code changes, and do not say that you will take any action.',
+  'approved it; for an outdated issue, which of its fields look wrong. Then list each',
+  '<mr-detail> line, keeping what it says Forgekeeper did or proposes. Do not claim anything',
+  'the request does not state, do not guess why a job failed, do not propose code changes,',
+  'and do not say that you will take any action.',
 ].join('\n');
 
 // For command answers, such as /forge-status, which Forgekeeper writes from

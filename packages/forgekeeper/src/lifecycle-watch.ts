@@ -258,6 +258,13 @@ export interface LifecycleWatcherOptions {
   reference: (request: ReviewRequest) => string;
   policy?: (kind: LifecycleKind) => EventPolicy | undefined;
   delivery?: () => FeedbackDelivery;
+  prepareIssues?: (
+    sessionID: string,
+    requests: readonly ReviewRequest[],
+    merged: ReadonlySet<string>,
+  ) => Promise<() => Promise<void>>;
+  waitingIssues?: () => Promise<string[]>;
+  retryIssues?: (sessionID: string) => Promise<void>;
   onError?: (error: unknown) => void;
   now?: () => number;
 }
@@ -291,12 +298,29 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
 
   return {
     // Records a lookup of the session's targets, then delivers what it found.
-    observe: (sessionID: string, requests: readonly ReviewRequest[]) =>
+    observe: (
+      sessionID: string,
+      requests: readonly ReviewRequest[],
+      failed?: ReadonlySet<string>,
+    ) =>
       queue.run(sessionID, async () => {
         if (requests.length === 0) return;
         const stored = new Map(
           (await options.records(sessionID)).map((record) => [record.url, record]),
         );
+        let checkIssues: (() => Promise<void>) | undefined;
+        if (options.prepareIssues) {
+          const fresh = failed ? requests.filter((request) => !failed.has(request.url)) : requests;
+          const merged = new Set(
+            fresh
+              .filter(
+                (request) =>
+                  request.state === 'merged' && stored.get(request.url)?.state === 'opened',
+              )
+              .map((request) => request.url),
+          );
+          checkIssues = await options.prepareIssues(sessionID, fresh, merged);
+        }
         for (const record of observe(
           sessionID,
           requests,
@@ -308,7 +332,11 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
         )) {
           if (!unchanged(stored.get(record.url), record)) await options.write(record);
         }
-        await flush(sessionID);
+        try {
+          await flush(sessionID);
+        } finally {
+          await checkIssues?.();
+        }
       }),
     // Retries every waiting event, such as after a reload or a failure.
     retry: async () => {
@@ -316,6 +344,11 @@ export function createLifecycleWatcher(options: LifecycleWatcherOptions) {
       for (const sessionID of sessions)
         await queue
           .run(sessionID, () => flush(sessionID))
+          .catch((error) => options.onError?.(error));
+      const issues = await options.waitingIssues?.().catch((error) => options.onError?.(error));
+      for (const sessionID of issues ?? [])
+        await queue
+          .run(sessionID, () => options.retryIssues?.(sessionID) ?? Promise.resolve())
           .catch((error) => options.onError?.(error));
     },
   };

@@ -34,7 +34,13 @@ export interface StatusServiceOptions {
   };
   feedbackTargets?: (sessionID: string, requests: ReviewRequest[]) => void;
   // Receives each lookup's targets, in every state, for lifecycle events.
-  lifecycle?: { observe: (sessionID: string, requests: ReviewRequest[]) => Promise<unknown> };
+  lifecycle?: {
+    observe: (
+      sessionID: string,
+      requests: ReviewRequest[],
+      failed?: ReadonlySet<string>,
+    ) => Promise<unknown>;
+  };
   approvals?: { observe: (sessionID: string, requests: ReviewRequest[]) => Promise<unknown> };
   onWatchError?: (error: unknown) => void;
   interval?: number;
@@ -171,8 +177,6 @@ export function createStatusService(options: StatusServiceOptions) {
       );
     }
     const current = targets(key, next);
-    if (!feedbackPaused && options.lifecycle && current.length)
-      track(options.lifecycle.observe(key, current).catch(report));
     const failed = next.kind === 'found' ? (next.failed ?? []) : [];
     const failedRefs = failed
       .map((entry) => parseUrl(entry.url))
@@ -186,6 +190,12 @@ export function createStatusService(options: StatusServiceOptions) {
     const freshApprovals = failed.length
       ? current.filter((request) => !isFailed(request.url))
       : current;
+    if (!feedbackPaused && options.lifecycle && current.length) {
+      const unavailable = new Set(
+        current.filter((request) => isFailed(request.url)).map((request) => request.url),
+      );
+      track(options.lifecycle.observe(key, current, unavailable).catch(report));
+    }
     if (!feedbackPaused && options.approvals && freshApprovals.length)
       track(options.approvals.observe(key, freshApprovals).catch(report));
     for (const request of feedbackPaused ? [] : watchedForFeedback(key, next)) {
