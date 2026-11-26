@@ -1,6 +1,6 @@
 {
   "name": "opencode-vent",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "OpenCode plugin that exposes a vent tool to record tooling, documentation, skill, permission, and workflow frictions with automatic deduplication",
   "author": {
     "name": "Pedro Pombeiro",
