@@ -353,11 +353,7 @@ export function botUsername(login: string, typename?: string): string {
   return typename === 'Bot' && !login.endsWith('[bot]') ? `${login}[bot]` : login;
 }
 
-function normalizeApprovers(
-  node: Pull,
-  reviewers: Pull['reviewRequests'],
-  opinionated: readonly (ReviewSummaryNode | null)[],
-): ReviewerApproval[] {
+function pendingReviewer(reviewers: Pull['reviewRequests']) {
   const pendingIDs = new Set<string>();
   const pendingWithoutID = new Set<string>();
   const pendingTypedLogins = new Set<string>();
@@ -372,11 +368,19 @@ function normalizeApprovers(
       if (!reviewer.id) pendingWithoutID.add(key);
     }
   }
-  const isPending = (id: string | undefined, typename: string | undefined, login: string) => {
+  return (id: string | undefined, typename: string | undefined, login: string) => {
     const key = typedLoginKey(typename, login);
     if (id) return pendingIDs.has(id) || pendingWithoutID.has(key);
     return pendingTypedLogins.has(key);
   };
+}
+
+function normalizeApprovers(
+  node: Pull,
+  reviewers: Pull['reviewRequests'],
+  opinionated: readonly (ReviewSummaryNode | null)[],
+): ReviewerApproval[] {
+  const isPending = pendingReviewer(reviewers);
   const found = new Map<string, ReviewerApproval>();
   const add = (entry: ReviewerApproval) => {
     const key = `${entry.bot ? 'bot' : 'user'}:${entry.username.toLowerCase()}`;
@@ -430,6 +434,27 @@ function normalizeApprovers(
   }
 
   return [...found.values()];
+}
+
+function changeRequests(
+  reviewers: Pull['reviewRequests'],
+  opinionated: { nodes: (ReviewSummaryNode | null)[]; complete: boolean },
+): Pick<GitHubPullRequest, 'changesRequested' | 'changeReviewIDs'> {
+  if (!reviewers.pageInfo || reviewers.pageInfo.hasNextPage) return {};
+  const pending = pendingReviewer(reviewers);
+  const ids: string[] = [];
+  let complete = opinionated.complete;
+  for (const review of opinionated.nodes) {
+    if (review?.state !== 'CHANGES_REQUESTED') continue;
+    const author = review.author;
+    if (!author?.login || !review.id) {
+      complete = false;
+      continue;
+    }
+    if (!pending(author.id, author.__typename, author.login)) ids.push(review.id);
+  }
+  if (ids.length) return { changesRequested: true, changeReviewIDs: ids };
+  return complete ? { changesRequested: false } : {};
 }
 
 // Reads GitHub pull requests through `gh api graphql`, using gh's login.
@@ -727,6 +752,7 @@ export class GitHubForge implements Forge {
       conflictsKnown: node.mergeable !== 'UNKNOWN',
       approved: node.reviewDecision === 'APPROVED',
       reviewDecision: node.reviewDecision ?? undefined,
+      ...changeRequests(reviewers, opinionated),
       copilotReview: copilotReview({ ...node, reviewRequests: reviewers }),
       awaitingReviewers: reviewers.nodes.flatMap((request) => {
         const reviewer = request.requestedReviewer;

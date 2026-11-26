@@ -316,10 +316,9 @@ export async function setupStatus(
     return task;
   };
 
-  // Whether the session's latest lookup says a conflict or a failed pipeline
-  // announced for the PR/MR is over: it no longer conflicts, its pipeline no
-  // longer fails or another one replaced it, or it merged or closed. Without
-  // a lookup of it, the update counts as current, and merges always do.
+  // Whether the session's latest lookup says a conflict, failed pipeline,
+  // request for changes, or approval no longer stands. Without a lookup of
+  // the PR/MR, the update counts as current, and merge updates always do.
   function settled(
     item: Pick<
       FeedbackItem,
@@ -393,9 +392,8 @@ export async function setupStatus(
   }
 
   // Clears a session's updates for PRs/MRs that merged or closed, or that it no
-  // longer targets, and conflicts and failed pipelines that are over. A merge
-  // event stays until it's
-  // acknowledged, since the merge is its news. Only a finished lookup in this
+  // longer targets, and updates that no longer stand. A merge event stays
+  // until it's acknowledged, since the merge is its news. Only a finished lookup in this
   // instance says so: before one, such as right after a reload, the targets
   // aren't known yet.
   function clearStale(sessionID: string, snapshot: Snapshot) {

@@ -11,10 +11,18 @@ export interface FeedbackItem {
   // When the newest of those comments was last written, in milliseconds.
   postedAt?: number;
   // Lifecycle events: the PR/MR started to conflict, its pipeline got a
-  // failed job, it merged, or its issue is outdated. `review-request`: someone asked for the
+  // failed job, a reviewer requested changes, it merged, or its issue is
+  // outdated. `review-request`: someone asked for the
   // viewer's review, and `commentIDs` are author replies for context. Absent
   // for review feedback.
-  kind?: 'conflict' | 'merged' | 'ci-failed' | 'issue-outdated' | 'review-request' | 'approval';
+  kind?:
+    | 'conflict'
+    | 'merged'
+    | 'ci-failed'
+    | 'changes-requested'
+    | 'issue-outdated'
+    | 'review-request'
+    | 'approval';
   reviewers?: string[];
   approverKind?: 'automated' | 'bot' | 'human';
   approverID?: string;
@@ -67,6 +75,7 @@ export const isLifecycle = (item: Pick<FeedbackItem, 'kind'>) =>
   item.kind === 'conflict' ||
   item.kind === 'merged' ||
   item.kind === 'ci-failed' ||
+  item.kind === 'changes-requested' ||
   item.kind === 'issue-outdated';
 
 export const isReviewRequest = (item: Pick<FeedbackItem, 'kind'>) => item.kind === 'review-request';

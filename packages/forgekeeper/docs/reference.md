@@ -62,7 +62,7 @@ Forgekeeper 3 changes where review notifications go, and renames its options:
   that names each one, and uses that option's default instead. For example, a former
   `reviewStatus: false` leaves status on, so rename it to `status: false` before you upgrade.
 - **Monitoring:** Forgekeeper also watches recent sessions with PR/MR targets that no CLI
-  has shown, and announces conflicts, failed jobs, and merges of their targets. See
+  has shown, and announces conflicts, failed jobs, requested changes, and merges of their targets. See
   [Which sessions the server watches](#which-sessions-the-server-watches) and
   [Merge request updates](#merge-request-updates). Set `watch.lifecycle` to `false` to
   stop the merge request updates.
@@ -669,20 +669,23 @@ updates.
 
 ## Merge request updates
 
-Forgekeeper also watches each session's explicit PR/MR targets for four changes:
+Forgekeeper also watches each session's explicit PR/MR targets for these updates:
 
 - **Conflicts:** a target that could merge starts to conflict with its target branch.
 - **Failed jobs:** a job fails in a target's head pipeline, even while the pipeline still
   runs.
+- **Requested changes:** a reviewer requests changes when no other request for changes is
+  outstanding. Pending reviews from other reviewers, CI checks, and merge blockers do not
+  clear the update.
 - **Merges:** a target merges.
 - **Outdated issues:** the issue a target works on has fields its progress makes wrong
   (see [Outdated issues](#outdated-issues)).
 
-Conflicts, failed jobs, and merges come from changes in the forge's state, never from
-comments such as GitLab's "can no longer be merged" note. The first lookup only records
-these states. [Outdated issue](#outdated-issues) checks can announce problems on their first
-successful read. Records
-persist across restarts, so a change that happened while OpenCode wasn't running is
+Conflicts, failed jobs, requested changes, and merges come from changes in the forge's
+state, never from comments such as GitLab's "can no longer be merged" note. The first
+lookup only records these states. [Outdated issue](#outdated-issues) checks can announce
+problems on their first successful read. Records persist across restarts, so a change
+that happened while OpenCode wasn't running is
 announced at the next lookup. A
 mergeability the forge hasn't settled yet, such as while GitLab rechecks an MR after a
 push to it or to its target branch, keeps the last known state. A conflict that ends and
@@ -722,10 +725,12 @@ from when it was detected, so turning on summaries never starts turns for change
 earlier. A summary turn has no tools, and gets only Forgekeeper's facts about the change,
 never comments.
 
-A conflict update clears once the conflict ends or the PR/MR closes. A merge update stays
+A conflict update clears once the conflict ends or the PR/MR closes. A requested-changes
+update clears when the last outstanding request no longer stands, for example when that
+reviewer is asked to review again or approves. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
-drops clear right away. Setting `watch.lifecycle` to `false` stops all four kinds, and
-retarget proposals too, since nothing notices merges then.
+drops clear right away. Setting `watch.lifecycle` to `false` stops these updates and
+retarget proposals, since Forgekeeper no longer watches for merges.
 
 ### Outdated issues
 
@@ -1293,7 +1298,7 @@ Set options with the object form of the `plugins` entry in `opencode.json`:
 | `watch.humanReviews`     | `true`                        | Watch for new review feedback from people.                                                                                                                                                                                                                                                                          |
 | `watch.automatedReviews` | `true`                        | Watch for automated reviews that finish with feedback, such as GitLab Duo's and GitHub Copilot's.                                                                                                                                                                                                                   |
 | `watch.reviewBots`       | `true`                        | Watch for comments from the accounts `reviewBots` lists.                                                                                                                                                                                                                                                            |
-| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                                           |
+| `watch.lifecycle`        | `true`                        | Watch for targets that start to conflict, get failed jobs, get requested changes, or merge. See [Merge request updates](#merge-request-updates).                                                                                                                                                                    |
 | `watch.issues`           | `true`                        | Watch for issue fields that a target's progress leaves outdated, on GitLab. Needs `watch.lifecycle`. See [Outdated issues](#outdated-issues).                                                                                                                                                                       |
 | `watch.reviewRequests`   | `true`                        | Watch for requests for your review, including repeated ones. See [Review requests](#review-requests).                                                                                                                                                                                                               |
 | `reviewBots`             | GitLab.com security reviewers | Bot accounts whose comments count as review feedback, by host, with exact usernames. See [Review bots](#review-notifications).                                                                                                                                                                                      |
@@ -1438,7 +1443,7 @@ If you set options for `opencode-forgekeeper` 2.x, also see
   `src/adapters/gitlab/review-requests.ts` reads them from GitLab's activity notes.
 - `src/review-monitoring.ts` configures the review watchers, stores their state, and records
   review updates in the inbox.
-- `src/lifecycle-watch.ts` finds conflicts, failed jobs, merges, and stack links between lookups, and
+- `src/lifecycle-watch.ts` finds conflicts, failed jobs, requested changes, merges, and stack links between lookups, and
   keeps each event until it reaches the inbox. `src/lifecycle-execution.ts` proposes retargets
   of stacked PRs/MRs.
 - `src/lifecycle-notifications.ts` formats lifecycle updates, checks retarget proposals, and

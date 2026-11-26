@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { settledFeedback } from './feedback-cleanup';
 import type { GitLabMergeRequest, ReviewRequest } from './forge';
 import {
   createLifecycleWatcher,
@@ -9,6 +10,7 @@ import {
   type LifecycleEvent,
   type LifecycleRecord,
 } from './lifecycle-watch';
+import type { Lookup } from './store';
 
 const mr = (iid: string, overrides: Partial<GitLabMergeRequest> = {}): ReviewRequest =>
   ({
@@ -18,6 +20,7 @@ const mr = (iid: string, overrides: Partial<GitLabMergeRequest> = {}): ReviewReq
     state: 'opened',
     conflicts: false,
     conflictsKnown: true,
+    awaitingReviewers: [],
     targetProject: 'g/p',
     targetBranch: 'main',
     sourceProject: 'g/p',
@@ -101,6 +104,60 @@ describe('observe', () => {
       [mr('1', { state: 'merged', conflicts: true }), mr('2', { state: 'closed' })],
     );
     expect(events(records)).toEqual([JSON.stringify(['one', mr('1').url, 'merged'])]);
+  });
+
+  describe('requested changes', () => {
+    const requested = { changesRequested: true };
+    const quiet = { changesRequested: false };
+    const changes = (n: number) => JSON.stringify(['one', mr('1').url, 'changes-requested', n]);
+
+    test('announces a request for changes, once per request', () => {
+      const records = run(
+        [mr('1', quiet)],
+        [mr('1', requested)],
+        [mr('1', requested)],
+        [mr('1', quiet)],
+        [mr('1', requested)],
+      );
+      expect(events(records)).toEqual([changes(1), changes(2)]);
+    });
+
+    test('records the first lookup without an event, even when changes are requested', () => {
+      const records = run([mr('1', requested)]);
+      expect(events(records)).toEqual([]);
+      expect(records.get(mr('1').url)).toMatchObject({ changesRequested: true });
+      expect(events(run([mr('1', requested)], [mr('1', requested)]))).toEqual([]);
+    });
+
+    test('does not announce a draft or a PR/MR that is not open', () => {
+      for (const next of [
+        { ...requested, draft: true },
+        { ...requested, state: 'merged' },
+      ])
+        expect(
+          events(run([mr('1', quiet)], [mr('1', next)])).filter((id) => id.includes('changes')),
+        ).toEqual([]);
+    });
+
+    test('keeps the last known state across an unknown lookup', () => {
+      const unknown = mr('1');
+      expect(run([mr('1', requested)], [unknown]).get(unknown.url)?.changesRequested).toBe(true);
+      expect(events(run([mr('1', requested)], [unknown], [mr('1', requested)]))).toEqual([]);
+      expect(events(run([mr('1', quiet)], [unknown], [mr('1', requested)]))).toEqual([changes(1)]);
+      expect(events(run([unknown], [mr('1', requested)]))).toEqual([]);
+    });
+
+    test('clears once the request no longer stands', () => {
+      const item = { url: mr('1').url, kind: 'changes-requested' as const };
+      const found = (overrides: Partial<GitLabMergeRequest>): Lookup => ({
+        kind: 'found',
+        requests: [mr('1', overrides)],
+      });
+      expect(settledFeedback(item, found(requested))).toBe(false);
+      expect(settledFeedback(item, found({}))).toBe(false);
+      expect(settledFeedback(item, found(quiet))).toBe(true);
+      expect(settledFeedback(item, found({ ...requested, state: 'closed' }))).toBe(true);
+    });
   });
 
   // A pipeline with these failed jobs, each `name` or `name#attempt`, still

@@ -75,6 +75,7 @@ interface Common {
   awaitingReviewers: string[];
   // False when more reviewers exist than the adapter fetches.
   reviewersComplete: boolean;
+  changesRequested?: boolean;
   // False when approval sources are truncated or could not be paginated completely.
   approvalsComplete?: boolean;
   // The account IDs of the PR/MR's reviewers, requested or done, in the form
@@ -128,6 +129,7 @@ export interface GitHubPullRequest extends Common {
   forge: 'github';
   // GitHub's review decision. It doesn't cover every branch protection rule.
   reviewDecision?: string;
+  changeReviewIDs?: string[];
   copilotReview?: CopilotReview;
 }
 
@@ -150,6 +152,10 @@ export function approversOf(request: ReviewRequest): ReviewerApproval[] {
 
 export const approvalsComplete = (request: ReviewRequest): boolean =>
   request.approvalsComplete !== false && request.reviewersComplete !== false;
+
+export function changesRequestedState(request: ReviewRequest): boolean | undefined {
+  return request.state === 'opened' && !request.draft ? request.changesRequested : false;
+}
 
 // A PR/MR identified by URL, independent of the checked-out branch.
 export interface ReviewRef {

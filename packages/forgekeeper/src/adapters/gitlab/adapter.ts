@@ -894,6 +894,14 @@ export class GitLabForge implements Forge {
       mergeTrainIndex: node.mergeTrainCar?.index,
       awaitingReviewers,
       reviewersComplete: reviewersPage.complete,
+      changesRequested: reviewersPage.nodes.some(
+        (reviewer) => reviewer.mergeRequestInteraction?.reviewState === 'REQUESTED_CHANGES',
+      )
+        ? true
+        : reviewersPage.complete &&
+            reviewersPage.nodes.every((reviewer) => reviewer.mergeRequestInteraction?.reviewState)
+          ? false
+          : undefined,
       approvalsComplete: reviewersPage.complete && approvedByPage.complete,
       reviewerIDs: reviewersPage.nodes.flatMap((reviewer) => reviewer.id ?? []),
       approvers,

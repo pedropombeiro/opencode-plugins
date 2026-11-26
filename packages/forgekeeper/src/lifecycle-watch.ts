@@ -1,14 +1,16 @@
 // Lifecycle events for a session's PRs/MRs: one that starts to conflict with
 // its target branch, one whose pipeline gets new failed jobs, even while the
-// pipeline still runs, and one that merges. Each comes from a change
-// between two lookups, never from the state alone, so the first lookup of a
-// PR/MR only records it, and nothing old is announced after a restart.
+// pipeline still runs, one a reviewer requests changes to, and one that
+// merges. Each comes from a change between two lookups, never from the state
+// alone, so the first lookup of a PR/MR only records it, and nothing old is
+// announced after a restart.
 //
 // Events wait in their PR/MR's record until they reach the inbox. The record
 // and its new events are one storage write, so a crash neither loses an
 // event nor repeats it, and a merged PR/MR that nothing polls anymore still
 // gets its event delivered.
 import {
+  changesRequestedState,
   jobKey,
   pipelineFails,
   pipelineRunning,
@@ -19,7 +21,7 @@ import {
 import type { EventPolicy, FeedbackDelivery } from './options';
 import { createKeyedQueue } from './keyed-queue';
 
-export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed';
+export type LifecycleKind = 'conflict' | 'merged' | 'ci-failed' | 'changes-requested';
 
 // The head pipeline as a lookup last saw it.
 export interface PipelineState {
@@ -76,6 +78,13 @@ export interface LifecycleRecord {
   conflicts?: boolean;
   // How many times the PR/MR started to conflict, for distinct event IDs.
   cycles: number;
+  // Whether a reviewer's request for changes stood at the last lookup. Absent
+  // in records from before Forgekeeper watched it, whose next lookup only
+  // records it.
+  changesRequested?: boolean;
+  // How many times a reviewer requested changes, for distinct event IDs.
+  requestCycles?: number;
+  seenChangeReviewIDs?: string[];
   // Absent in records from before Forgekeeper watched pipelines, whose next
   // lookup only records the pipeline.
   ci?: PipelineState;
@@ -177,6 +186,16 @@ export function observe(
         : undefined;
     const parent = found?.url ?? kept;
     let cycles = previous?.cycles ?? 0;
+    let requestCycles = previous?.requestCycles ?? 0;
+    const observedRequest = changesRequestedState(request);
+    const reviewIDs =
+      request.forge === 'github' && observedRequest ? request.changeReviewIDs : undefined;
+    const seen = new Set(previous?.seenChangeReviewIDs);
+    const requested =
+      observedRequest === true && previous?.changesRequested === false && reviewIDs?.length
+        ? reviewIDs.some((id) => !seen.has(id))
+        : (observedRequest ?? previous?.changesRequested);
+    for (const id of reviewIDs ?? []) seen.add(id);
     const pending = [...(previous?.pending ?? [])];
     const add = (kind: LifecycleKind, id: string, extra: Partial<LifecycleEvent> = {}) => {
       if (pending.some((event) => event.id === id)) return;
@@ -216,6 +235,13 @@ export function observe(
         cycles++;
         add('conflict', JSON.stringify([sessionID, request.url, 'conflict', cycles]));
       }
+      if (requested && previous.changesRequested === false) {
+        requestCycles++;
+        add(
+          'changes-requested',
+          JSON.stringify([sessionID, request.url, 'changes-requested', requestCycles]),
+        );
+      }
       if (previous.state === 'opened' && request.state === 'merged')
         add('merged', JSON.stringify([sessionID, request.url, 'merged']));
     }
@@ -226,6 +252,9 @@ export function observe(
       state: request.state,
       ...(conflicts !== undefined ? { conflicts } : {}),
       cycles,
+      ...(requested !== undefined ? { changesRequested: requested } : {}),
+      requestCycles,
+      ...(seen.size ? { seenChangeReviewIDs: [...seen] } : {}),
       ci,
       targetProject: request.targetProject,
       targetBranch: request.targetBranch,
