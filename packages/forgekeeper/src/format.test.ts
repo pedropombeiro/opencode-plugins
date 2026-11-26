@@ -1,12 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  approvalCount,
-  detailsMessage,
-  footerSegments,
-  responsiveFooterSegments,
-  segmentsWidth,
-  waitingOn,
-} from './format';
+import { detailsMessage, footerSegments, responsiveFooterSegments, segmentsWidth } from './format';
+import { approvalCount, waitingOn } from './adapters/gitlab/approval-status';
 import type { Repository } from './git';
 import type { GitLabMergeRequest } from './forge';
 import type { Snapshot } from './store';
@@ -57,7 +51,7 @@ const text = (value: Snapshot) =>
 describe('footerSegments', () => {
   test('shows an active Duo review', () => {
     expect(text(snapshot([mr({ duoReviewState: 'REVIEW_STARTED' })]))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · 🤖 reviewing · needs a reviewer',
+      '!4281 · CI failed · 2 unresolved threads · 🤖 reviewing',
     );
   });
 
@@ -74,9 +68,7 @@ describe('footerSegments', () => {
     );
   });
   test('shows the MR, pipeline, and threads', () => {
-    expect(text(snapshot([mr()]))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · needs a reviewer',
-    );
+    expect(text(snapshot([mr()]))).toBe('!4281 · CI failed · 2 unresolved threads');
   });
 
   test('adds conflicts and approval, and omits resolved threads', () => {
@@ -100,6 +92,20 @@ describe('footerSegments', () => {
     expect(text(snapshot([mr({ ...base, awaitingReviewers: [] })]))).toBe(
       '!4281 · no pipeline · approved',
     );
+  });
+
+  test('omits a stale approval count when GitLab says the requirements are satisfied', () => {
+    const value = snapshot([
+      mr({
+        approved: true,
+        approvalRequirementsSatisfied: true,
+        approvalsLeft: 1,
+        approvers: [{ username: 'alice' }],
+        unresolvedThreads: 0,
+        pipeline: undefined,
+      }),
+    ]);
+    expect(text(value)).toBe('!4281 · no pipeline · approved');
   });
 
   test('marks incomplete thread counts', () => {
@@ -132,7 +138,7 @@ describe('footerSegments', () => {
       'PR/MR status unavailable',
     );
     expect(text(snapshot([mr()], { error }))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · needs a reviewer · stale',
+      '!4281 · CI failed · 2 unresolved threads · stale',
     );
   });
 
@@ -200,7 +206,7 @@ describe('footerSegments', () => {
     );
     // One remaining target shows its full status, and still reports the others.
     expect(text(targets([mr()], failed))).toBe(
-      '!4281 · CI failed · 2 unresolved threads · needs a reviewer · 1 unavailable',
+      '!4281 · CI failed · 2 unresolved threads · 1 unavailable',
     );
   });
 
@@ -289,9 +295,7 @@ describe('responsiveFooterSegments', () => {
       .join(' · ');
 
   test('selects full, compact, and minimal formats', () => {
-    expect(responsiveText(100)).toBe(
-      '!259389 · CI passed · 2 unresolved threads · 🤖 reviewing · needs a reviewer',
-    );
+    expect(responsiveText(100)).toBe('!259389 · CI passed · 2 unresolved threads · 🤖 reviewing');
     expect(responsiveText(35)).toBe('!259389 · CI ✓ · 2 threads · 🤖');
     expect(responsiveText(20)).toBe('!259389 · 🤖');
     expect(responsiveText(7)).toBe('!259389');
@@ -352,7 +356,7 @@ describe('approvalCount', () => {
   const approver = (username: string) => ({ username });
 
   test('counts what is missing', () => {
-    expect(approvalCount(mr({ approvalsLeft: 2 }))?.text).toBe('2 more needed');
+    expect(approvalCount(mr({ approvalsLeft: 2 }))?.text).toBe('2 approvals needed');
     expect(approvalCount(mr({ approvalsLeft: 1, approvers: [approver('a')] }))?.text).toBe(
       '1 approval · 1 more needed',
     );
@@ -363,43 +367,62 @@ describe('approvalCount', () => {
 
   test('ignores bot approvals and says nothing when nothing is missing', () => {
     const bot = { username: 'GitLabDuo', bot: true };
-    expect(approvalCount(mr({ approvalsLeft: 1, approvers: [bot] }))?.text).toBe('1 more needed');
+    expect(approvalCount(mr({ approvalsLeft: 1, approvers: [bot] }))?.text).toBe(
+      '1 approval needed',
+    );
     expect(approvalCount(mr({ approvalsLeft: 0, approvers: [approver('a')] }))).toBeUndefined();
     expect(approvalCount(mr())).toBeUndefined();
   });
 });
 
 describe('waitingOn', () => {
-  const rule = (name: string, eligibleReviewers: string[] = []) => ({
-    name,
+  const rule = (type: string) => ({
+    name: 'Maintainers',
+    type,
     required: 1,
-    eligibleReviewers,
+    eligibleReviewers: [],
     eligible: ['owner'],
   });
-  const ready = { approved: true, pipeline: { status: 'SUCCESS', label: 'passed' } };
+  const ready = {
+    approved: true,
+    approvalRequirementsSatisfied: true,
+    pipeline: { status: 'SUCCESS', label: 'passed' },
+  };
+  const noRequiredApprovals = { ...ready, approved: false, approvalsRequired: 0, approvalsLeft: 0 };
 
   test.each([
-    ['needs a reviewer', {}],
+    ['needs a reviewer', { approvalsLeft: 1 }],
+    ['needs a reviewer', { mergeStatus: 'NOT_APPROVED' }],
     ['awaiting @alice', { awaitingReviewers: ['alice'] }],
-    ['needs a code owner', { missingRules: [rule('/docs/ @owners')] }],
-    ['needs an approver', { missingRules: [rule('Security')] }],
+    ['needs a code owner', { missingRules: [rule('CODE_OWNER')] }],
+    ['needs an approver', { missingRules: [rule('REGULAR')] }],
+    ['needs a reviewer', { missingRules: [rule('ANY_APPROVER')] }],
+    ['awaiting @alice', { awaitingReviewers: ['alice'], missingRules: [rule('CODE_OWNER')] }],
+    ['merge train #1', { ...noRequiredApprovals, mergeTrainIndex: 0 }],
+    ['auto-merge set', { ...noRequiredApprovals, autoMergeEnabled: true }],
     [
-      'awaiting @alice',
-      { awaitingReviewers: ['alice'], missingRules: [rule('Security', ['alice'])] },
-    ],
-    ['merge train #3', { ...ready, mergeTrainIndex: 2 }],
-    ['auto-merge set', { ...ready, autoMergeEnabled: true }],
-    [
-      'auto-merge set, CI running',
+      'auto-merge set',
       { ...ready, autoMergeEnabled: true, pipeline: { status: 'RUNNING', label: 'running' } },
     ],
-    ['waiting on CI', { ...ready, pipeline: { status: 'RUNNING', label: 'running' } }],
+    [
+      'auto-merge set',
+      {
+        ...ready,
+        autoMergeEnabled: true,
+        pipeline: { status: 'SUCCESS', label: 'passed with warnings' },
+      },
+    ],
   ] as Array<[string, Partial<GitLabMergeRequest>]>)('says %s', (expected, overrides) => {
     expect(waitingOn(mr(overrides))?.text).toBe(expected);
   });
 
   test.each([
     ['approved with nothing pending', ready],
+    ['approval requirements already met', noRequiredApprovals],
+    ['approval requirements unknown', { approvalRequirementsSatisfied: null }],
+    ['no evidence of a required approval', { approvalRequirementsSatisfied: false }],
+    ['a partial reviewer list', { reviewersComplete: false, approvalsLeft: 1 }],
+    ['approved with CI running', { ...ready, pipeline: { status: 'RUNNING', label: 'running' } }],
     ['a draft nobody is awaited on', { draft: true }],
     ['approved but failing', { ...ready, pipeline: { status: 'FAILED', label: 'failed' } }],
     ['approved but conflicting', { ...ready, conflicts: true }],
@@ -417,7 +440,7 @@ describe('waitingOn', () => {
       '!4281',
       'CI passed',
       '2 unresolved threads',
-      '1 more needed',
+      '1 approval needed',
       'needs a reviewer',
     ]);
     expect(fit(35)).toEqual(['!4281', 'CI ✓', '2 threads']);

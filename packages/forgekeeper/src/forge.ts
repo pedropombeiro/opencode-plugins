@@ -100,10 +100,12 @@ interface Common {
 export interface MissingRule {
   name: string;
   required: number;
+  type?: string;
   // Awaited reviewers who can approve this rule.
   eligibleReviewers: string[];
   // The first few people who can approve this rule at all.
   eligible: string[];
+  eligibleCount?: number;
 }
 
 export interface GitLabMergeRequest extends Common {
@@ -203,6 +205,7 @@ export interface ForgeTraits<
   titleReferences(title: string | undefined): string[];
   // Footer segments for forge-specific status, such as a requested change.
   indicators(request: Request): Indicator[];
+  reviewIndicators?(request: Request): Indicator[];
   // Status dialog lines for forge-specific fields, such as approval rules.
   details(request: Request): string[];
   // Optional capabilities. Shared code checks for these, never for a forge.
@@ -429,6 +432,11 @@ export function parseWebUrl(
 
 export const yesNo = (value: boolean) => (value ? 'yes' : 'no');
 export const humanize = (value: string) => value.toLowerCase().replace(/_/g, ' ');
+
+export function awaitingText(reviewers: string[]): string {
+  if (reviewers.length > 2) return `awaiting ${reviewers.length} reviewers`;
+  return `awaiting ${reviewers.map((username) => `@${username}`).join(', ')}`;
+}
 
 export type ErrorKind = 'auth' | 'rate-limit' | 'missing-glab' | 'missing-gh' | 'request';
 

@@ -1,8 +1,7 @@
 import { automatedReview } from './automated-review-watch';
 import {
-  approversOf,
+  awaitingText,
   yesNo,
-  type GitLabMergeRequest,
   type Indicator,
   type Pipeline,
   type ReviewRequest,
@@ -41,60 +40,6 @@ const COMPACT_CI: Partial<Record<Tone, string>> = {
   error: 'CI ✗',
   warning: 'CI …',
 };
-
-// Names one or two reviewers and counts larger groups to keep the footer short.
-function awaitingText(reviewers: string[]) {
-  if (reviewers.length > 2) return `awaiting ${reviewers.length} reviewers`;
-  return `awaiting ${reviewers.map((username) => `@${username}`).join(', ')}`;
-}
-
-// "2 approvals · 1 more needed" or "1 more needed". Undefined when no approval is missing.
-export function approvalCount(request: GitLabMergeRequest): Segment | undefined {
-  const given = approversOf(request).filter((approver) => !approver.bot).length;
-  const left = request.approvalsLeft ?? 0;
-  if (left === 0) return undefined;
-  if (given === 0)
-    return { text: `${left} more needed`, compact: `+${left}`, tone: 'warning', optional: true };
-  return {
-    text: `${plural(given, 'approval')} · ${left} more needed`,
-    compact: `${given} ✓ +${left}`,
-    tone: 'warning',
-    optional: true,
-  };
-}
-
-// What blocks this MR from merging, as the most actionable label. CI failures
-// and conflicts have their own segments.
-export function waitingOn(request: GitLabMergeRequest): Segment | undefined {
-  const ciTone = pipelineTone(request.pipeline);
-  const awaiting: Segment | undefined = request.awaitingReviewers.length
-    ? { text: awaitingText(request.awaitingReviewers), tone: 'muted' }
-    : undefined;
-  if (request.draft) return awaiting;
-
-  if (!request.approved || awaiting) {
-    const unqualified = (request.missingRules ?? []).find(
-      (rule) => rule.eligibleReviewers.length === 0,
-    );
-    if (unqualified && !request.approved) {
-      const text = unqualified.name.startsWith('/') ? 'needs a code owner' : 'needs an approver';
-      return { text, tone: 'warning', optional: true };
-    }
-    return awaiting ?? { text: 'needs a reviewer', tone: 'muted', optional: true };
-  }
-
-  if (request.conflicts || ciTone === 'error') return undefined;
-  if (request.mergeTrainIndex != null)
-    return { text: `merge train #${request.mergeTrainIndex + 1}`, tone: 'muted', optional: true };
-  if (request.autoMergeEnabled)
-    return {
-      text: ciTone === 'warning' ? 'auto-merge set, CI running' : 'auto-merge set',
-      tone: 'success',
-      optional: true,
-    };
-  if (ciTone === 'warning') return { text: 'waiting on CI', tone: 'muted', optional: true };
-  return undefined;
-}
 
 function threadsText(request: ReviewRequest) {
   return `${request.unresolvedThreads}${request.threadsComplete ? '' : '+'} unresolved thread${request.unresolvedThreads === 1 && request.threadsComplete ? '' : 's'}`;
@@ -210,14 +155,9 @@ export function footerSegments(snapshot: Snapshot): Segment[] {
   segments.push(...traitsOf(request).indicators(request));
   if (request.conflicts) segments.push({ text: 'conflicts', tone: 'error', essential: true });
   if (!request.conflictsKnown) segments.push({ text: 'mergeability unknown', tone: 'muted' });
-  if (request.forge === 'gitlab') {
-    const count = approvalCount(request);
-    if (count) segments.push(count);
-    if (request.approved && !request.awaitingReviewers.length)
-      segments.push({ text: 'approved', tone: 'success' });
-    const next = waitingOn(request);
-    if (next) segments.push(next);
-  } else if (request.awaitingReviewers.length)
+  const reviewIndicators = traitsOf(request).reviewIndicators;
+  if (reviewIndicators) segments.push(...reviewIndicators(request));
+  else if (request.awaitingReviewers.length)
     segments.push({ text: awaitingText(request.awaitingReviewers), tone: 'muted' });
   else if (request.approved) segments.push({ text: 'approved', tone: 'success' });
   return [...segments, ...stale];

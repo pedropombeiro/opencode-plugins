@@ -21,6 +21,7 @@ import { fetchLinkedNote, linkedNotes } from './linked-notes';
 import { duoFindings, duoReady } from './review-feedback';
 import { subscribeToNotes } from './subscription';
 import { query, typed, type Query, type Transport, type Typed } from '../../graphql';
+import { reviewIndicators } from './approval-status';
 
 interface DiscussionPage {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
@@ -39,11 +40,11 @@ interface ApprovedByNode {
 }
 
 interface ApprovalRuleNode {
-  name: string;
-  type: string;
-  approvalsRequired: number;
-  approved: boolean;
-  eligibleApprovers: Array<{ username: string }>;
+  name: string | null;
+  type: string | null;
+  approvalsRequired: number | null;
+  approved: boolean | null;
+  eligibleApprovers: Array<{ username: string; type: string; bot: boolean }> | null;
 }
 
 interface MergeRequestNode {
@@ -55,11 +56,11 @@ interface MergeRequestNode {
   conflicts: boolean;
   approved: boolean | null;
   approvedBy: ConnectionPage<ApprovedByNode> | null;
-  approvalsRequired: number | null;
-  approvalsLeft: number | null;
+  approvalsRequired?: number | null;
+  approvalsLeft?: number | null;
   autoMergeEnabled: boolean;
-  mergeTrainIndex: number | null;
-  approvalState?: { rules: ApprovalRuleNode[] } | null;
+  mergeTrainCar?: { index: number | null } | null;
+  approvalState?: { rules: ApprovalRuleNode[] | null } | null;
   mergeStatusEnum?: string | null;
   detailedMergeStatus: string | null;
   diffHeadSha: string | null;
@@ -131,10 +132,17 @@ const REVIEWER_FIELDS = (includeApprovedAt: boolean) =>
   `pageInfo { hasNextPage endCursor } nodes { id type username bot mergeRequestInteraction { reviewState approved${includeApprovedAt ? ' approvedAt' : ''} } }`;
 const APPROVED_BY_FIELDS = 'pageInfo { hasNextPage endCursor } nodes { id username bot }';
 
-const mergeRequestFields = (includeApprovedAt: boolean) => `
+const mergeRequestFields = (includeApprovedAt: boolean, includeExtendedStatus: boolean) => `
   iid title webUrl state draft conflicts approved mergeStatusEnum detailedMergeStatus diffHeadSha updatedAt targetBranch sourceBranch
-  approvalsRequired approvalsLeft autoMergeEnabled mergeTrainIndex
-  approvalState { rules { name type approvalsRequired approved eligibleApprovers { username } } }
+  autoMergeEnabled
+  ${
+    includeExtendedStatus
+      ? `
+    approvalsRequired approvalsLeft mergeTrainCar { index }
+    approvalState { rules { name type approvalsRequired approved eligibleApprovers { username type bot } } }
+  `
+      : ''
+  }
   approvedBy(first: ${PAGE_SIZE}) { ${APPROVED_BY_FIELDS} }
   sourceProject { fullPath }
   targetProject { fullPath }
@@ -154,8 +162,9 @@ type Projects<T> = { [alias: `p${number}`]: T | null | undefined };
 export function mergeRequestsQuery(
   projectCount: number,
   includeApprovedAt = true,
+  includeExtendedStatus = true,
 ): Query<Projects<{ mergeRequests?: { nodes: MergeRequestNode[] } | null }>> {
-  const fields = mergeRequestFields(includeApprovedAt);
+  const fields = mergeRequestFields(includeApprovedAt, includeExtendedStatus);
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
@@ -172,8 +181,9 @@ export function mergeRequestsQuery(
 export function mergeRequestQuery(
   projectCount: number,
   includeApprovedAt = true,
+  includeExtendedStatus = true,
 ): Query<Projects<{ mergeRequest?: MergeRequestNode | null }>> {
-  const fields = mergeRequestFields(includeApprovedAt);
+  const fields = mergeRequestFields(includeApprovedAt, includeExtendedStatus);
   const variables = Array.from({ length: projectCount }, (_, index) => `$p${index}: ID!`).join(
     ', ',
   );
@@ -248,6 +258,12 @@ const MARK_READY_MUTATION = query<{
 }`);
 
 const unsupportedApprovedAtHosts = new Set<string>();
+const unsupportedExtendedStatusHosts = new Set<string>();
+
+const isMissingExtendedStatus = (error: unknown) =>
+  /(?:approvalsRequired|approvalsLeft|mergeTrainCar|approvalState).*?(?:doesn't exist|not defined|unknown)|(?:undefinedField|unknown field).*?(?:approvalsRequired|approvalsLeft|mergeTrainCar|approvalState)|Field ['"]index['"] doesn't exist on type ['"]MergeTrainCar['"]/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
 
 const isMissingApprovedAt = (error: unknown) =>
   /approvedAt.*(?:doesn't exist|not defined|unknown)|(?:undefinedField|unknown field).*approvedAt/i.test(
@@ -317,7 +333,11 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
   // Self-managed instances are usually named gitlab.<domain>.
   recognizes: (host) => /(^|\.)gitlab\./.test(host),
   open: (run, directory) =>
-    new GitLabForge(glabGraphQL(run, directory), unsupportedApprovedAtHosts),
+    new GitLabForge(
+      glabGraphQL(run, directory),
+      unsupportedApprovedAtHosts,
+      unsupportedExtendedStatusHosts,
+    ),
   owns: ownedBy('gitlab'),
   parseUrl: (url) => parseWebUrl('gitlab', url, /^\/(.+)\/-\/merge_requests\/([1-9]\d*)\/?$/),
   // Issues can also be opened as work items.
@@ -327,6 +347,7 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
   issueReference: (iid) => `#${iid}`,
   titleReferences: (title) => prefixReferences(title, '!'),
   indicators: () => [],
+  reviewIndicators,
   details(request) {
     const requirements =
       request.approvalRequirementsSatisfied === null
@@ -335,14 +356,16 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
     const lines = [
       `Human approvals: ${yesNo(request.hasApprovals)} · Approval requirements satisfied: ${requirements}`,
     ];
-    const missing = request.missingRules ?? [];
+    const missing =
+      request.approvalRequirementsSatisfied === true ? [] : (request.missingRules ?? []);
     for (const rule of missing.slice(0, 2)) {
+      const others = (rule.eligibleCount ?? rule.eligible.length) - rule.eligible.length;
       const who = rule.eligibleReviewers.length
         ? `, @${rule.eligibleReviewers[0]} can approve`
         : rule.eligible.length
-          ? `, none of your reviewers can approve. Ask @${rule.eligible.slice(0, 2).join(', @')}${rule.eligible.length > 2 ? ` or ${rule.eligible.length - 2} others` : ''}`
+          ? `, ${request.awaitingReviewers.length ? 'ask an eligible approver: ' : 'ask '}@${rule.eligible.join(', @')}${others > 0 ? ` or ${others} ${others === 1 ? 'other' : 'others'}` : ''}`
           : '';
-      lines.push(`Still needed: ${rule.name} (${rule.required}${who})`);
+      lines.push(`Still needed: ${rule.name} (${rule.required} required in total${who})`);
     }
     if (missing.length > 2) lines.push(`+${missing.length - 2} more rules`);
     if (request.autoMergeEnabled) lines.push('Auto-merge: set');
@@ -549,6 +572,7 @@ export class GitLabForge implements Forge {
   constructor(
     graphql: GraphQL,
     private readonly unsupportedApprovedAt: Set<string> = new Set(),
+    private readonly unsupportedExtendedStatus: Set<string> = new Set(),
   ) {
     this.graphql = typed(graphql);
   }
@@ -570,13 +594,30 @@ export class GitLabForge implements Forge {
     }
   }
 
+  private async queryStatus<T>(
+    host: string,
+    build: (includeApprovedAt: boolean, includeExtendedStatus: boolean) => Query<T>,
+    variables: Variables,
+  ): Promise<T> {
+    const run = (extended: boolean) =>
+      this.queryWithApprovedAt(host, (approvedAt) => build(approvedAt, extended), variables);
+    if (this.unsupportedExtendedStatus.has(host)) return run(false);
+    try {
+      return await run(true);
+    } catch (error) {
+      if (!isMissingExtendedStatus(error)) throw error;
+      this.unsupportedExtendedStatus.add(host);
+      return run(false);
+    }
+  }
+
   async findByBranch(repository: Repository): Promise<GitLabMergeRequest[]> {
     const { source, targets, sourceBranch } = repository;
     const variables: Record<string, string> = { branch: sourceBranch };
     targets.forEach((target, index) => (variables[`p${index}`] = target.path));
-    const data = await this.queryWithApprovedAt(
+    const data = await this.queryStatus(
       source.host,
-      (includeApprovedAt) => mergeRequestsQuery(targets.length, includeApprovedAt),
+      (approvedAt, extended) => mergeRequestsQuery(targets.length, approvedAt, extended),
       variables,
     );
 
@@ -650,9 +691,9 @@ export class GitLabForge implements Forge {
     const host = projects[0].host;
     const variables: Record<string, string> = { iid };
     projects.forEach((project, index) => (variables[`p${index}`] = project.path));
-    const data = await this.queryWithApprovedAt(
+    const data = await this.queryStatus(
       host,
-      (includeApprovedAt) => mergeRequestQuery(projects.length, includeApprovedAt),
+      (approvedAt, extended) => mergeRequestQuery(projects.length, approvedAt, extended),
       variables,
     );
     for (let index = 0; index < projects.length; index++) {
@@ -745,20 +786,39 @@ export class GitLabForge implements Forge {
           reviewer.mergeRequestInteraction?.approved !== true,
       )
       .map((reviewer) => reviewer.username!);
-    const missingRules = (node.approvalState?.rules ?? [])
-      .filter((rule) => rule.approvalsRequired > 0 && !rule.approved)
-      .map((rule) => {
-        const eligible = rule.eligibleApprovers.map((approver) => approver.username);
-        return {
-          name: rule.name,
+    const approvers = normalizeApprovers(reviewersPage.nodes, approvedByPage.nodes);
+    const approvedNames = new Set(
+      [...approvedByPage.nodes, ...approvers].flatMap(({ username }) =>
+        username ? [username.toLowerCase()] : [],
+      ),
+    );
+    const missingRules = (node.approvalState?.rules ?? []).flatMap((rule) => {
+      if (rule.approvalsRequired == null || rule.approvalsRequired <= 0 || rule.approved !== false)
+        return [];
+      const eligible = (rule.eligibleApprovers ?? []).filter(
+        ({ username, bot }) => !bot && !approvedNames.has(username.toLowerCase()),
+      );
+      const eligibleNames = new Set(eligible.map(({ username }) => username.toLowerCase()));
+      const humans = eligible.filter(({ type }) => type === 'HUMAN');
+      const humanNames = new Set(humans.map(({ username }) => username.toLowerCase()));
+      const eligibleReviewers = awaitingReviewers
+        .filter((username) => eligibleNames.has(username.toLowerCase()))
+        .sort(
+          (a, b) =>
+            Number(humanNames.has(b.toLowerCase())) - Number(humanNames.has(a.toLowerCase())),
+        );
+      const candidates = humans.length ? humans : eligible;
+      return [
+        {
+          name: rule.name ?? 'Unnamed approval rule',
+          type: rule.type ?? undefined,
           required: rule.approvalsRequired,
-          eligibleReviewers:
-            rule.type === 'ANY_APPROVER'
-              ? awaitingReviewers
-              : awaitingReviewers.filter((username) => eligible.includes(username)),
-          eligible: eligible.slice(0, 5),
-        };
-      });
+          eligibleReviewers,
+          eligible: candidates.slice(0, 2).map(({ username }) => username),
+          eligibleCount: candidates.length,
+        },
+      ];
+    });
     return {
       forge: 'gitlab',
       iid: node.iid,
@@ -777,16 +837,16 @@ export class GitLabForge implements Forge {
       approved: node.approved === true && hasApprovals && awaitingReviewers.length === 0,
       hasApprovals,
       approvalRequirementsSatisfied: node.approved,
-      approvalsRequired: node.approvalsRequired ?? 0,
-      approvalsLeft: node.approvalsLeft ?? 0,
+      approvalsRequired: node.approvalsRequired ?? undefined,
+      approvalsLeft: node.approvalsLeft ?? undefined,
       missingRules,
       autoMergeEnabled: node.autoMergeEnabled,
-      mergeTrainIndex: node.mergeTrainIndex,
+      mergeTrainIndex: node.mergeTrainCar?.index,
       awaitingReviewers,
       reviewersComplete: reviewersPage.complete,
       approvalsComplete: reviewersPage.complete && approvedByPage.complete,
       reviewerIDs: reviewersPage.nodes.flatMap((reviewer) => reviewer.id ?? []),
-      approvers: normalizeApprovers(reviewersPage.nodes, approvedByPage.nodes),
+      approvers,
       mergeStatus: node.detailedMergeStatus ?? undefined,
       targetProject: node.targetProject.fullPath,
       targetBranch: node.targetBranch,
