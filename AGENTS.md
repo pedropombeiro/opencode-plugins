@@ -12,7 +12,7 @@ All tasks are run via mise:
 - `mise run lint` — lint with ESLint
 - `mise run lint:fix` — lint and auto-fix
 - `mise run format` — format with Prettier
-- `mise run install-local <package>` — build a plugin into `~/.config/opencode/plugins/<package>/`
+- `mise run install-local [--local-plugins] <package>` — build a plugin into `~/.config/opencode/plugins/<package>/`, or into `~/.config/opencode/local-plugins/<package>/` when `opencode.json(c)` configures it with `options` (or `--local-plugins` is passed) so auto-discovery doesn't shadow its options
 
 There are no npm scripts. Do not add a `"scripts"` key to any `package.json`.
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Build a plugin into the local OpenCode plugins directory"
+#USAGE flag "--local-plugins" help="Install into local-plugins/ (outside auto-discovery) so opencode.json options apply"
 #USAGE arg "<package>" help="Package to install (e.g. terminal-progress)"
 #USAGE complete "package" run="find packages -mindepth 2 -maxdepth 2 -name package.json | sed 's|/package.json$||; s|^packages/||'"
 set -euo pipefail
@@ -9,6 +10,62 @@ if [ ! -d "$pkg" ]; then
   echo "Package not found: $pkg" >&2
   exit 1
 fi
-destination="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/${usage_package}"
-mkdir -p "$destination"
-bun .mise/bundle.ts "$pkg" "$destination"
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+use_local_plugins="${usage_local_plugins:-false}"
+
+if [ "$use_local_plugins" != "true" ]; then
+  if bun -e '
+    const [pkgJsonPath, configDir, dirName] = process.argv.slice(1);
+    const pkgName = JSON.parse(await Bun.file(pkgJsonPath).text()).name;
+    for (const file of ["opencode.json", "opencode.jsonc"]) {
+      const target = Bun.file(configDir + "/" + file);
+      if (!(await target.exists())) continue;
+      let parsed;
+      try {
+        parsed = Bun.JSONC.parse(await target.text());
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(parsed?.plugins)) continue;
+      const localPath = "./local-plugins/" + dirName;
+      for (const entry of parsed.plugins) {
+        const spec =
+          typeof entry === "string"
+            ? entry
+            : typeof entry?.package === "string"
+              ? entry.package
+              : "";
+        if (spec === localPath || spec === localPath + "/") {
+          process.exit(0);
+        }
+        if (
+          entry &&
+          typeof entry === "object" &&
+          entry.options !== undefined &&
+          (spec === pkgName || spec.startsWith(pkgName + "@"))
+        ) {
+          process.exit(0);
+        }
+      }
+    }
+    process.exit(1);
+  ' "$pkg/package.json" "$config_dir" "${usage_package}"; then
+    use_local_plugins="true"
+  fi
+fi
+
+if [ "$use_local_plugins" = "true" ]; then
+  destination="${config_dir}/local-plugins/${usage_package}"
+  mkdir -p "$destination"
+  bun .mise/bundle.ts "$pkg" "$destination"
+  echo "Installed to ${destination}"
+  echo "Point your opencode.json plugin entry to \"./local-plugins/${usage_package}\" while testing."
+  if [ -e "${config_dir}/plugins/${usage_package}" ]; then
+    echo "Warning: ${config_dir}/plugins/${usage_package} still exists and will shadow opencode.json with empty options. Remove it first." >&2
+  fi
+else
+  destination="${config_dir}/plugins/${usage_package}"
+  mkdir -p "$destination"
+  bun .mise/bundle.ts "$pkg" "$destination"
+fi
