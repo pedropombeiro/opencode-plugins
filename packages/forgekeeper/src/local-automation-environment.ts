@@ -36,6 +36,14 @@ const LINKED_REPORT_TRUNCATED = '\n[truncated — inspect the linked session for
 
 type TranscriptMessage = Awaited<ReturnType<Plugin.Context['session']['context']>>[number];
 
+export function formatUncommittedChanges(status: string | undefined): string {
+  const trimmed = status?.trim();
+  if (!trimmed) return 'Uncommitted changes: None';
+  return trimmed.includes('\n')
+    ? `Uncommitted changes:\n${trimmed}`
+    : `Uncommitted changes: ${trimmed}`;
+}
+
 export function extractTurnReport(
   messages: readonly TranscriptMessage[],
   record: Pick<AutomationRecord, 'messageID' | 'startedAt' | 'ended'>,
@@ -409,7 +417,9 @@ export function createLocalEnvironment(input: {
           : []),
         ...(phase === 'ended'
           ? [
-              `Uncommitted changes:\n${(await shortStatus(deps.exec, execution.directory).catch(() => undefined)) || 'None'}`,
+              formatUncommittedChanges(
+                await shortStatus(deps.exec, execution.directory).catch(() => undefined),
+              ),
             ]
           : []),
       ];

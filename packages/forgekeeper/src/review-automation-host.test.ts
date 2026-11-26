@@ -9,7 +9,7 @@ import {
   storedPreparation,
   type AutomationDependencies,
 } from './review-automation-host';
-import { extractTurnReport } from './local-automation-environment';
+import { extractTurnReport, formatUncommittedChanges } from './local-automation-environment';
 import { createSummaryDelivery } from './summary-delivery';
 import { SUMMARY_KIND } from './review-summary';
 import type { AutomationRule } from './options';
@@ -1497,6 +1497,18 @@ describe('worktree automation', () => {
     expect(clipped).toContain('truncated');
   });
 
+  test('formats uncommitted changes on one line unless multiple files changed', () => {
+    expect(formatUncommittedChanges(undefined)).toBe('Uncommitted changes: None');
+    expect(formatUncommittedChanges('')).toBe('Uncommitted changes: None');
+    expect(formatUncommittedChanges('   \n')).toBe('Uncommitted changes: None');
+    expect(formatUncommittedChanges(' M scripts/perf/gc/collect_gc_stats.rb')).toBe(
+      'Uncommitted changes: M scripts/perf/gc/collect_gc_stats.rb',
+    );
+    expect(formatUncommittedChanges(' M a.rb\n?? b.rb\n')).toBe(
+      'Uncommitted changes:\nM a.rb\n?? b.rb',
+    );
+  });
+
   test('surfaces linked-session reports and clear descriptions to the owning session', async () => {
     const jobItem = { ...review, id: 'f1', kind: 'ci-failed' as const, pipeline: 'p1' };
     const ownerMessages: Message[] = [];
@@ -1555,7 +1567,7 @@ describe('worktree automation', () => {
     expect(await deliver(0)).not.toContain('Undercover flagged');
     const completion = await deliver(1);
     expect(completion).toContain('Undercover flagged collect_stats at 0% coverage.');
-    expect(completion).toContain('M scripts/perf/gc/collect_gc_stats.rb');
+    expect(completion).toContain('Uncommitted changes: M scripts/perf/gc/collect_gc_stats.rb');
 
     await f.host.notify!(
       {
