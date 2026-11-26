@@ -74,7 +74,7 @@ interface Options {
   failingSession?: boolean;
   pluginOptions?: Record<string, unknown>;
   // Turns PR/MR status on, with this forge for its lookups.
-  status?: StatusForge;
+  status?: Forge;
   failingInbox?: number;
   // Reads review comments for human feedback, instead of the forge.
   feedback?: (request: ReviewRequest) => Promise<FeedbackSnapshot | undefined>;
@@ -179,7 +179,7 @@ class StatusForge implements Forge {
   }
 }
 
-const catalogFor = (forge: StatusForge): ForgeCatalog => ({
+const catalogFor = (forge: Forge): ForgeCatalog => ({
   kinds,
   kind: (host) => (host === `${forge.traits.kind}.com` ? forge.traits.kind : undefined),
   forHost: (host) => (host === `${forge.traits.kind}.com` ? forge : undefined),
@@ -2937,23 +2937,132 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
-  test('announces requested changes once, and clears it once the review is requested again', async () => {
-    const forge = new StatusForge();
-    forge.set('group/a', '1');
+  test('keeps GitLab changes requested independently of merge blockers and approval rules', async () => {
+    const { GitLabForge } = await import('./adapters/gitlab/adapter');
+    let mergeStatus = 'MERGEABLE';
+    let incomplete = false;
+    const reviewers = new Map([['alice', 'UNREVIEWED']]);
+    const pageInfo = { hasNextPage: false, endCursor: null };
+    const forge = new GitLabForge(async () => ({
+      p0: {
+        mergeRequest: {
+          iid: '1',
+          title: 'An MR',
+          webUrl: projectA,
+          state: 'opened',
+          draft: false,
+          conflicts: false,
+          approved: true,
+          approvalsRequired: 0,
+          detailedMergeStatus: mergeStatus,
+          targetProject: { fullPath: 'group/a' },
+          targetBranch: 'main',
+          reviewers: {
+            nodes: [...reviewers].map(([username, reviewState]) => ({
+              id: username,
+              username,
+              type: 'HUMAN',
+              bot: false,
+              mergeRequestInteraction: { reviewState, approved: reviewState === 'APPROVED' },
+            })),
+            pageInfo: { ...pageInfo, hasNextPage: incomplete },
+          },
+          approvedBy: { nodes: [], pageInfo },
+          discussions: { nodes: [], pageInfo },
+        },
+      },
+    }));
     const { app } = await watchedTargets([projectA], { status: forge });
-    forge.set('group/a', '1', { mergeStatus: 'REQUESTED_CHANGES' });
-    await app.refresh();
-    await settle();
-    await app.refresh();
-    await settle();
-    expect((await app.feedback()).items).toMatchObject([
+    const refresh = async () => {
+      await app.refresh();
+      await settle();
+      return (await app.feedback()).items.filter((item) => item.kind === 'changes-requested');
+    };
+    reviewers.set('alice', 'REQUESTED_CHANGES');
+    mergeStatus = 'REQUESTED_CHANGES';
+    const original = await refresh();
+    expect(original).toMatchObject([
       { kind: 'changes-requested', url: projectA, title: '!1: a reviewer requested changes' },
     ]);
+    for (mergeStatus of ['MERGE_REQUEST_BLOCKED', 'CI_STILL_RUNNING', 'REQUESTED_CHANGES']) {
+      expect(await refresh()).toEqual(original);
+    }
+    incomplete = true;
+    reviewers.set('bob', 'REQUESTED_CHANGES');
+    expect(await refresh()).toEqual(original);
+    incomplete = false;
+    reviewers.set('alice', 'UNREVIEWED');
+    expect(await refresh()).toEqual(original);
     expect(app.passive).toEqual([]);
-    forge.set('group/a', '1', { mergeStatus: 'REQUESTED_CHANGES', awaitingReviewers: ['alice'] });
-    await app.refresh();
-    await settle();
-    expect((await app.feedback()).items).toEqual([]);
+    reviewers.set('bob', 'APPROVED');
+    mergeStatus = 'MERGEABLE';
+    incomplete = true;
+    expect(await refresh()).toEqual(original);
+    incomplete = false;
+    expect(await refresh()).toEqual([]);
+    reviewers.set('alice', 'REQUESTED_CHANGES');
+    const next = await refresh();
+    expect(next).toHaveLength(1);
+    expect(next[0].id).not.toBe(original[0].id);
+    await app.cleanup();
+  });
+
+  test('matches GitHub re-review requests to the requester without reannouncing an old review', async () => {
+    const { GitHubForge } = await import('./adapters/github/adapter');
+    const url = 'https://github.com/group/a/pull/1';
+    const account = (login: string) => ({ __typename: 'User', id: `user:${login}`, login });
+    const team = { requestedReviewer: { __typename: 'Team', name: 'alice' } };
+    let pending = [{ requestedReviewer: account('bob') }, team];
+    let reviewID: string | undefined;
+    let incomplete = false;
+    const pageInfo = { hasNextPage: false, endCursor: null };
+    const forge = new GitHubForge(async () => ({
+      repository: {
+        pullRequest: {
+          number: 1,
+          title: 'A PR',
+          url,
+          state: 'OPEN',
+          isDraft: false,
+          mergeable: 'MERGEABLE',
+          reviewDecision: reviewID ? 'CHANGES_REQUESTED' : 'REVIEW_REQUIRED',
+          baseRepository: { nameWithOwner: 'group/a' },
+          baseRefName: 'main',
+          reviewRequests: { nodes: pending, pageInfo },
+          latestOpinionatedReviews: {
+            nodes: reviewID
+              ? [{ id: reviewID, state: 'CHANGES_REQUESTED', author: account('alice') }]
+              : [],
+            pageInfo: { ...pageInfo, hasNextPage: incomplete },
+          },
+          reviewThreads: { nodes: [], pageInfo },
+          commits: { nodes: [] },
+        },
+      },
+    }));
+    const { app } = await watchedTargets([url], { status: forge });
+    const refresh = async () => {
+      await app.refresh();
+      await settle();
+      return (await app.feedback()).items;
+    };
+    reviewID = 'first';
+    const original = await refresh();
+    expect(original).toMatchObject([{ kind: 'changes-requested', url }]);
+    pending = [team];
+    expect(await refresh()).toEqual(original);
+    incomplete = true;
+    pending = [{ requestedReviewer: account('alice') }, team];
+    expect(await refresh()).toEqual(original);
+    incomplete = false;
+    pending = [{ requestedReviewer: account('alice') }];
+    expect(await refresh()).toEqual([]);
+    pending = [];
+    expect(await refresh()).toEqual([]);
+    reviewID = 'second';
+    const next = await refresh();
+    expect(next).toMatchObject([{ kind: 'changes-requested', url }]);
+    expect(next[0].id).not.toBe(original[0].id);
     await app.cleanup();
   });
 

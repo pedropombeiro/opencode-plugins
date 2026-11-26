@@ -737,6 +737,14 @@ export class GitLabForge implements Forge {
       approvalRequirementsSatisfied: node.approved,
       awaitingReviewers,
       reviewersComplete: reviewersPage.complete,
+      changesRequested: reviewersPage.nodes.some(
+        (reviewer) => reviewer.mergeRequestInteraction?.reviewState === 'REQUESTED_CHANGES',
+      )
+        ? true
+        : reviewersPage.complete &&
+            reviewersPage.nodes.every((reviewer) => reviewer.mergeRequestInteraction?.reviewState)
+          ? false
+          : undefined,
       approvalsComplete: reviewersPage.complete && approvedByPage.complete,
       reviewerIDs: reviewersPage.nodes.flatMap((reviewer) => reviewer.id ?? []),
       approvers: normalizeApprovers(reviewersPage.nodes, approvedByPage.nodes),

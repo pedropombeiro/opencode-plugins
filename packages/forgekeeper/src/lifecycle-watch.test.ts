@@ -107,8 +107,8 @@ describe('observe', () => {
   });
 
   describe('requested changes', () => {
-    const requested = { awaitingReviewers: [], mergeStatus: 'REQUESTED_CHANGES' };
-    const quiet = { awaitingReviewers: [], mergeStatus: 'MERGEABLE' };
+    const requested = { changesRequested: true };
+    const quiet = { changesRequested: false };
     const changes = (n: number) => JSON.stringify(['one', mr('1').url, 'changes-requested', n]);
 
     test('announces a request for changes, once per request', () => {
@@ -116,7 +116,7 @@ describe('observe', () => {
         [mr('1', quiet)],
         [mr('1', requested)],
         [mr('1', requested)],
-        [mr('1', { ...quiet, awaitingReviewers: ['alice'] })],
+        [mr('1', quiet)],
         [mr('1', requested)],
       );
       expect(events(records)).toEqual([changes(1), changes(2)]);
@@ -129,11 +129,8 @@ describe('observe', () => {
       expect(events(run([mr('1', requested)], [mr('1', requested)]))).toEqual([]);
     });
 
-    test('does not announce a re-review, an approval, a draft, or a PR/MR that is not open', () => {
+    test('does not announce a draft or a PR/MR that is not open', () => {
       for (const next of [
-        { ...requested, awaitingReviewers: ['alice'] },
-        { ...requested, approvalRequirementsSatisfied: true },
-        { ...requested, duoReviewState: 'REVIEW_STARTED' },
         { ...requested, draft: true },
         { ...requested, state: 'merged' },
       ])
@@ -142,28 +139,12 @@ describe('observe', () => {
         ).toEqual([]);
     });
 
-    test('keeps the last known state while GitLab hides it behind a check', () => {
-      const records = run(
-        [mr('1', quiet)],
-        [mr('1', requested)],
-        [mr('1', { ...quiet, mergeStatus: 'CI_STILL_RUNNING' })],
-        [mr('1', requested)],
-      );
-      expect(events(records)).toEqual([changes(1)]);
-      expect(
-        events(run([mr('1', quiet)], [mr('1', { ...quiet, mergeStatus: 'CHECKING' })])),
-      ).toEqual([]);
-    });
-
-    test('announces a GitHub review decision of changes requested', () => {
-      const pr = (reviewDecision?: string) =>
-        mr('1', { forge: 'github', awaitingReviewers: [], reviewDecision } as never);
-      expect(events(run([pr()], [pr('CHANGES_REQUESTED')], [pr('CHANGES_REQUESTED')]))).toEqual([
-        changes(1),
-      ]);
-      expect(events(run([pr('CHANGES_REQUESTED')], [pr()], [pr('CHANGES_REQUESTED')]))).toEqual([
-        changes(1),
-      ]);
+    test('keeps the last known state across an unknown lookup', () => {
+      const unknown = mr('1');
+      expect(run([mr('1', requested)], [unknown]).get(unknown.url)?.changesRequested).toBe(true);
+      expect(events(run([mr('1', requested)], [unknown], [mr('1', requested)]))).toEqual([]);
+      expect(events(run([mr('1', quiet)], [unknown], [mr('1', requested)]))).toEqual([changes(1)]);
+      expect(events(run([unknown], [mr('1', requested)]))).toEqual([]);
     });
 
     test('clears once the request no longer stands', () => {
@@ -173,9 +154,8 @@ describe('observe', () => {
         requests: [mr('1', overrides)],
       });
       expect(settledFeedback(item, found(requested))).toBe(false);
-      expect(settledFeedback(item, found({ ...requested, awaitingReviewers: ['alice'] }))).toBe(
-        true,
-      );
+      expect(settledFeedback(item, found({}))).toBe(false);
+      expect(settledFeedback(item, found(quiet))).toBe(true);
       expect(settledFeedback(item, found({ ...requested, state: 'closed' }))).toBe(true);
     });
   });

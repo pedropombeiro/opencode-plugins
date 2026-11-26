@@ -696,8 +696,9 @@ Forgekeeper also watches each session's explicit PR/MR targets for four changes:
 - **Conflicts:** a target that could merge starts to conflict with its target branch.
 - **Failed jobs:** a job fails in a target's head pipeline, even while the pipeline still
   runs.
-- **Requested changes:** a reviewer requests changes to a target. A target whose review is
-  requested again, or that is approved, is no longer waiting on the author.
+- **Requested changes:** a reviewer requests changes when no other request for changes is
+  outstanding. Pending reviews from other reviewers, CI checks, and merge blockers do not
+  clear the update.
 - **Merges:** a target merges.
 
 All come from the forge's own state, compared between two lookups, never from comments
@@ -744,7 +745,8 @@ earlier. A summary turn has no tools, and gets only Forgekeeper's facts about th
 never comments.
 
 A conflict update clears once the conflict ends or the PR/MR closes. A requested-changes
-update clears once the request no longer stands. A merge update stays
+update clears when the last outstanding request no longer stands, for example when that
+reviewer is asked to review again or approves. A merge update stays
 until you acknowledge it, because the merge is the news. Updates for targets the session
 drops clear right away. Setting `watch.lifecycle` to `false` stops all four kinds, and
 retarget proposals too, since nothing notices merges then.

@@ -10,7 +10,7 @@
 // event nor repeats it, and a merged PR/MR that nothing polls anymore still
 // gets its event delivered.
 import {
-  changesRequested,
+  changesRequestedState,
   jobKey,
   pipelineFails,
   pipelineRunning,
@@ -84,6 +84,7 @@ export interface LifecycleRecord {
   changesRequested?: boolean;
   // How many times a reviewer requested changes, for distinct event IDs.
   requestCycles?: number;
+  seenChangeReviewIDs?: string[];
   // Absent in records from before Forgekeeper watched pipelines, whose next
   // lookup only records the pipeline.
   ci?: PipelineState;
@@ -158,26 +159,6 @@ function newFailures(previous: PipelineState, current: PipelineState): string[] 
   return failureKeys(current).filter((key) => !known.has(key));
 }
 
-// GitLab statuses that can hide a request for changes while a push is checked.
-const TRANSIENT_MERGE_STATUSES = new Set([
-  'CHECKING',
-  'UNCHECKED',
-  'CI_STILL_RUNNING',
-  'CI_MUST_PASS',
-]);
-
-// Whether changes are requested after a lookup. While GitLab reports a status
-// that can hide the request, the last known state stands, so a push that
-// restarts the pipeline doesn't make the same request a new one.
-function requestedChanges(request: ReviewRequest, previous: boolean | undefined) {
-  const hidden =
-    request.forge === 'gitlab' &&
-    request.state === 'opened' &&
-    !request.awaitingReviewers.length &&
-    TRANSIENT_MERGE_STATUSES.has(request.mergeStatus ?? '');
-  return hidden ? previous : changesRequested(request);
-}
-
 // The session's records after a lookup of its targets. Returns a record for
 // each request. A request without a record gets one without events.
 export function observe(
@@ -206,7 +187,15 @@ export function observe(
     const parent = found?.url ?? kept;
     let cycles = previous?.cycles ?? 0;
     let requestCycles = previous?.requestCycles ?? 0;
-    const requested = requestedChanges(request, previous?.changesRequested);
+    const observedRequest = changesRequestedState(request);
+    const reviewIDs =
+      request.forge === 'github' && observedRequest ? request.changeReviewIDs : undefined;
+    const seen = new Set(previous?.seenChangeReviewIDs);
+    const requested =
+      observedRequest === true && previous?.changesRequested === false && reviewIDs?.length
+        ? reviewIDs.some((id) => !seen.has(id))
+        : (observedRequest ?? previous?.changesRequested);
+    for (const id of reviewIDs ?? []) seen.add(id);
     const pending = [...(previous?.pending ?? [])];
     const add = (kind: LifecycleKind, id: string, extra: Partial<LifecycleEvent> = {}) => {
       if (pending.some((event) => event.id === id)) return;
@@ -265,6 +254,7 @@ export function observe(
       cycles,
       ...(requested !== undefined ? { changesRequested: requested } : {}),
       requestCycles,
+      ...(seen.size ? { seenChangeReviewIDs: [...seen] } : {}),
       ci,
       targetProject: request.targetProject,
       targetBranch: request.targetBranch,

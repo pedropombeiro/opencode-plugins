@@ -121,7 +121,7 @@ export const LIFECYCLE_SYSTEM = [
   'link: for a conflict, that the merge request cannot merge until its conflicts with its',
   'target branch are resolved; for a failed job, which jobs failed in its pipeline, and',
   'whether the pipeline is still running; for requested changes, that a reviewer asked for',
-  'changes before it can merge; for a merge, that it merged; for an approval, who',
+  'changes; for a merge, that it merged; for an approval, who',
   'approved it. Then list each <mr-detail> line, keeping what it says Forgekeeper did or',
   'proposes. Do not claim anything the request does not state, do not guess why a job failed,',
   'do not propose code changes, and do not say that you will take any action.',

@@ -3,7 +3,7 @@ import { isReviewRequest, type FeedbackItem } from './feedback-inbox';
 import {
   approvalsComplete,
   approversOf,
-  changesRequested,
+  changesRequestedState,
   pipelineFails,
   type FeedbackSnapshot,
 } from './forge';
@@ -29,7 +29,7 @@ export function settledFeedback(
   if (!request) return false;
   if (request.state !== 'opened') return true;
   if (item.kind === 'conflict') return request.conflictsKnown && !request.conflicts;
-  if (item.kind === 'changes-requested') return !changesRequested(request);
+  if (item.kind === 'changes-requested') return changesRequestedState(request) === false;
   if (item.kind === 'approval') {
     if (!approvalsComplete(request) || !item.reviewers?.length) return false;
     return !approversOf(request).some((approver) => matchesApproval(item, approver));
