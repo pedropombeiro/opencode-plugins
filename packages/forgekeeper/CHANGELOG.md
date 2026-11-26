@@ -1,5 +1,25 @@
 # Changelog
 
+## [6.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.2.0...opencode-forgekeeper-6.0.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forgekeeper:** Use target: "none" to clear session targets. Forgekeeper no longer derives session titles or PR/MR status from the checkout or title references.
+
+### Features
+
+* **forgekeeper:** announce when a reviewer requests changes ([#206](https://github.com/pedropombeiro/opencode-plugins/issues/206)) ([8b5d54a](https://github.com/pedropombeiro/opencode-plugins/commit/8b5d54ab5f3cf5c281e0c8a546e1bf4671fff752))
+* **forgekeeper:** flag outdated GitLab MR issues ([#207](https://github.com/pedropombeiro/opencode-plugins/issues/207)) ([a4a845e](https://github.com/pedropombeiro/opencode-plugins/commit/a4a845ed3009dc42d30985e281359879ddae0bc1))
+* **forgekeeper:** show GitLab approval progress and what an MR waits on ([#205](https://github.com/pedropombeiro/opencode-plugins/issues/205)) ([511438c](https://github.com/pedropombeiro/opencode-plugins/commit/511438c54e5c6dc3b9f137767b4e65a6a406dd3d))
+* **forgekeeper:** warn when a tracked GitHub issue stays open after merge ([5a1a468](https://github.com/pedropombeiro/opencode-plugins/commit/5a1a4685ff94b32ac4be2fbdefc80a3fda9b8002))
+
+
+### Bug Fixes
+
+* **forgekeeper:** keep single-line uncommitted changes inline ([ea6b68f](https://github.com/pedropombeiro/opencode-plugins/commit/ea6b68ff9d7f76815ff3e160d2cbdde5103a216c))
+* **forgekeeper:** require explicit session targets ([#209](https://github.com/pedropombeiro/opencode-plugins/issues/209)) ([e702397](https://github.com/pedropombeiro/opencode-plugins/commit/e702397a3821503058accc5d303b40e25cec49a5))
+
 ## [5.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.1.1...opencode-forgekeeper-5.2.0) (2026-11-25)
 
 
