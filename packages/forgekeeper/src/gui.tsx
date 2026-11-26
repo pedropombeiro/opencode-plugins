@@ -549,7 +549,7 @@ export default Plugin.define({
           requests = requestsOf(place);
         }
         if (requests.length === 0) {
-          ctx.toast.show({ title: 'No PR/MR for this session or branch' });
+          ctx.toast.show({ title: 'No PR/MR for this session' });
           return;
         }
         const url =
