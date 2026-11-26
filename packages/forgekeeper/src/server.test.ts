@@ -1348,6 +1348,25 @@ describe('session targets', () => {
     await reloaded.cleanup();
   });
 
+  test.each(['session.created', 'session.renamed'])(
+    'preserves references when setting the first target after %s',
+    async (type) => {
+      const app = await harness();
+      const title = '[#12, !45] Review changes';
+      app.sessions.get('one')!.title = title;
+      app.emit({ type, data: { sessionID: 'one' } });
+      await settle();
+      expect(app.sessions.get('one')?.title).toBe(title);
+      expect(await app.target()).toEqual({});
+      await app.cleanup();
+
+      const reloaded = await harness({ storage: app.storage, sessions: app.sessions });
+      await reloaded.set({ target: mr });
+      expect(reloaded.sessions.get('one')?.title).toBe(`[!456] ${title}`);
+      await reloaded.cleanup();
+    },
+  );
+
   test('replaces a legacy prefix when setting the first target without stored state', async () => {
     const app = await harness();
     app.sessions.get('one')!.title = '[#12, !45] Review changes';

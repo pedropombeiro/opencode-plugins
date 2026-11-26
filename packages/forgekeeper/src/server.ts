@@ -275,7 +275,11 @@ export async function setupServer(
     });
   }
 
-  async function update(sessionID: string, state?: SessionState): Promise<void> {
+  async function update(
+    sessionID: string,
+    state?: SessionState,
+    observedTitle = false,
+  ): Promise<void> {
     const session = await ctx.session.get({ sessionID });
     if (session.parentID || !session.title || linkedOwner(session as DirectorySession)) return;
 
@@ -288,7 +292,7 @@ export async function setupServer(
     if (prefix || state.prefix) {
       const title = reconcileTitle(session.title, prefix, state.prefix);
       if (title !== session.title) await ctx.session.update({ sessionID, title });
-    } else if (!session.fork) return;
+    } else if (!session.fork && (!observedTitle || state.prefix === null)) return;
     await save(sessionID, { targets: state.targets, ...(prefix ? { prefix } : {}) });
   }
 
@@ -696,6 +700,7 @@ export async function setupServer(
   void (async () => {
     for await (const event of ctx.event.subscribe({
       types: [
+        'session.created',
         'session.renamed',
         'session.moved',
         'session.archived',
@@ -711,8 +716,12 @@ export async function setupServer(
     })) {
       const { type } = event as { type: string };
       const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID;
-      if ((type === 'session.renamed' || type === 'session.execution.succeeded') && sessionID) {
-        void schedule(sessionID).catch(() => {});
+      if (sessionID) {
+        if (type === 'session.created' || type === 'session.renamed') {
+          void schedule(sessionID, () => update(sessionID, undefined, true)).catch(() => {});
+        } else if (type === 'session.execution.succeeded') {
+          void schedule(sessionID).catch(() => {});
+        }
       }
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
       if (type === 'session.deleted' && sessionID) watcher?.sessionDeleted(sessionID);
