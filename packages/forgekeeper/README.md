@@ -32,19 +32,19 @@ For self-managed hosts, configure `hosts` for GitLab hosts not named `gitlab.*`,
 
 Ask the agent to work on an issue or PR/MR. Forgekeeper provides `set_session_target` and
 instructions for the agent to keep the session's target up to date, including after creating
-a PR/MR. Targets persist across reloads and need not match the checked-out branch.
+a PR/MR. Targets persist across reloads and need not match the checked-out branch. A new
+session for a general question has no target, title prefix, or PR/MR status.
 
 For example, a session working on issue `#12` and MR `!45` gets a title prefix such as
 `[#12, !45]`. Several targets produce `[!101, !102]`, or `[!101, !102, !103, +3]` for a larger set.
 Your own title text is preserved.
 
 Run `/forge-detach` to clear all explicit targets without a model call. To remove only specific
-targets, pass their full URLs separated by spaces. After you remove the last target,
-Forgekeeper follows the checked-out branch and its open PR/MR again. Default branches
-get no branch-based prefix. Child sessions aren't renamed.
+targets, pass their full URLs separated by spaces. Removing the last target clears the
+Forgekeeper title prefix and PR/MR status. The agent can also clear all targets with
+`set_session_target({ target: "none" })`. Child sessions aren't renamed.
 
-See the reference for [target rules](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#session-targets) and
-[branch-based naming](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#branch-based-naming).
+See the reference for [target rules](https://github.com/pedropombeiro/opencode-plugins/blob/main/packages/forgekeeper/docs/reference.md#session-targets).
 
 ## PR/MR status
 
@@ -88,14 +88,14 @@ The report stays out of the session's history.
 
 Status normally refreshes every 2 minutes, or every 30 seconds during automated reviews and
 while new review feedback settles.
-Explicit PR/MR targets take precedence over title references and branch discovery. Issue
-targets have no PR/MR status.
+Status shows only PR/MRs set as session targets. Forgekeeper does not infer targets from
+the session title or the checked-out branch. Issue targets have no PR/MR status.
 
 ## Reviews and updates
 
 Forgekeeper watches explicit PR/MR targets for human and automated review feedback, reviewer
 approvals, conflicts, failed jobs, and merges. Recent top-level sessions can receive updates even
-if their tabs aren't open. Branch-derived PRs/MRs get status but no review notifications.
+if their tabs aren't open.
 
 New checkouts show status without collecting inbox updates. Open `/forge-feedback` and choose
 **Enable feedback inbox** (Ctrl+S in the terminal) to start monitoring this checkout. Set

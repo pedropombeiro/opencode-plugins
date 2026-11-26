@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { traits } from './forges';
-import { branchPrefix, extractIssueNumber, reconcileTitle } from './title';
+import { extractIssueNumber, reconcileTitle } from './title';
 
 describe('extractIssueNumber', () => {
   test.each([
@@ -14,17 +13,6 @@ describe('extractIssueNumber', () => {
     ['no-number-here', undefined],
   ])('%s', (branch, expected) => {
     expect(extractIssueNumber(branch)).toBe(expected);
-  });
-});
-
-describe('branchPrefix', () => {
-  test('adds the issue and merge request references', () => {
-    expect(branchPrefix(traits('gitlab'), '123-fix-login', '45')).toBe('[#123, !45]');
-  });
-
-  test('uses the branch name and a placeholder when nothing is found', () => {
-    expect(branchPrefix(traits('github'), 'tidy-up', undefined)).toBe('[tidy-up, #N/A]');
-    expect(branchPrefix(traits('gitlab'), 'tidy-up', undefined)).toBe('[tidy-up, !N/A]');
   });
 });
 
@@ -50,7 +38,7 @@ describe('reconcileTitle', () => {
     );
   });
 
-  test('removes the managed prefix when resetting on a default branch', () => {
+  test('removes the managed prefix when no targets remain', () => {
     expect(reconcileTitle('[!456] Review changes', undefined, '[!456]')).toBe('Review changes');
   });
 
@@ -58,18 +46,19 @@ describe('reconcileTitle', () => {
     expect(reconcileTitle('New title', '[!456]', '[!456]')).toBe('[!456] New title');
   });
 
-  test('keeps a long branch prefix whole, so it can be removed later', () => {
-    const branch = 'a-very-long-branch-name-that-describes-everything-it-changes-in-detail';
-    const prefix = branchPrefix(traits('gitlab'), branch, '45');
-    expect(prefix).toBe('[a-very-long-branch-name-that-describes-…, !45]');
+  test('keeps the managed prefix whole, so it can be removed later', () => {
+    const prefix = '[!101, !102, !103, +3]';
     const title = reconcileTitle(`Review ${'x'.repeat(120)}`, prefix);
     expect(title).toHaveLength(100);
     expect(title.startsWith(`${prefix} Review`)).toBe(true);
-    // Back on the default branch, the stored prefix still matches the title.
     expect(reconcileTitle(title, undefined, prefix).startsWith('Review')).toBe(true);
     // A title that is only the prefix loses it entirely.
     expect(reconcileTitle(prefix, undefined, prefix)).toBe('');
     expect(reconcileTitle(prefix, '[!46]', prefix)).toBe('[!46]');
+  });
+
+  test('preserves a user-written prefix when clearing old targets', () => {
+    expect(reconcileTitle('[#12, !45] My title', undefined, '[!46]')).toBe('[#12, !45] My title');
   });
 
   test('truncates titles to 100 characters', () => {

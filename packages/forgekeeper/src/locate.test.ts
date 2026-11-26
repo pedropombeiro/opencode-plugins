@@ -66,7 +66,6 @@ const repository = (host: string): RepositoryLookup => ({
   },
 });
 const onGitLab = { gitlab: [{ host: 'gitlab.com', path: 'g/p' }] };
-const onGitHub = { github: [{ host: 'github.com', path: 'o/r' }] };
 
 function catalog(
   forges: Partial<Record<ForgeKind, FakeForge>>,
@@ -143,9 +142,7 @@ describe('locate', () => {
       explicitTarget: true,
       requests: [merge],
     });
-    expect(
-      await locate(forges, { directory: '/repo', targets: target(pull.url), title: '[!45]' }),
-    ).toMatchObject({
+    expect(await locate(forges, { directory: '/repo', targets: target(pull.url) })).toMatchObject({
       explicitTarget: true,
       requests: [pull],
     });
@@ -287,67 +284,22 @@ describe('locate', () => {
     expect(gitlab.peak).toBe(4);
   });
 
-  test("uses a title reference on the checkout's forge", async () => {
-    expect(
-      await locate(catalog({ gitlab: new FakeForge('gitlab', merge) }, { projects: onGitLab }), {
-        directory: '/repo',
-        title: '[#12, !45]',
-      }),
-    ).toMatchObject({
-      sessionTarget: '!45 (from the session title)',
-      requests: [merge],
-    });
-    expect(
-      await locate(catalog({ github: new FakeForge('github', pull) }, { projects: onGitHub }), {
-        directory: '/repo',
-        title: '[#7]',
-      }),
-    ).toMatchObject({
-      sessionTarget: '#7 (from the session title)',
-      requests: [pull],
-    });
-  });
-
-  test('skips title references that name issues, such as `[#42, #7]`', async () => {
-    const github = new FakeForge('github', pull);
-    const lookup = await locate(catalog({ github }, { projects: onGitHub }), {
-      directory: '/repo',
-      title: '[#42, #7]',
-    });
-    expect(lookup).toMatchObject({ requests: [pull] });
-    expect(github.calls).toEqual(['number o/r 42', 'number o/r 7']);
-  });
-
-  test('falls back to the branch when no title reference is a PR/MR', async () => {
-    const gitlab = new FakeForge('gitlab', undefined, [merge]);
-    const forges = catalog(
-      { gitlab },
-      { projects: onGitLab, repository: repository('gitlab.com') },
-    );
-    // `#12` is a GitLab issue, and the checkout has no GitHub remote to check it on.
-    expect(await locate(forges, { directory: '/repo', title: '[#12, !45]' })).toMatchObject({
-      requests: [merge],
-    });
-    expect(gitlab.calls).toEqual(['number g/p 45', 'branch feature']);
-
-    const github = new FakeForge('github', undefined, [pull]);
-    const issue = catalog({ github }, { projects: onGitHub, repository: repository('github.com') });
-    expect(await locate(issue, { directory: '/repo', title: '[#42]' })).toMatchObject({
-      requests: [pull],
-    });
-    expect(github.calls).toEqual(['number o/r 42', 'branch feature']);
-  });
-
-  test("dispatches branch lookups by the source remote's forge", async () => {
-    const github = new FakeForge('github', undefined, [pull]);
-    const lookup = await locate(catalog({ github }, { repository: repository('github.com') }), {
-      directory: '/repo',
-    });
-    expect(lookup).toMatchObject({ kind: 'found', requests: [pull] });
-    expect(github.calls).toEqual(['branch feature']);
-    expect(await locate(catalog({ github }), { directory: '/repo' })).toEqual({
+  test('does not query Git or the forge when no target is set', async () => {
+    const forges: ForgeCatalog = {
+      ...catalog({}),
+      forHost: () => {
+        throw new Error('Unexpected forge lookup');
+      },
+      projects: async () => {
+        throw new Error('Unexpected project lookup');
+      },
+      repository: async () => {
+        throw new Error('Unexpected repository lookup');
+      },
+    };
+    expect(await locate(forges, { directory: '/repo' })).toEqual({
       kind: 'none',
-      reason: 'Not a Git repository',
+      reason: 'No session target is set',
     });
   });
 });
