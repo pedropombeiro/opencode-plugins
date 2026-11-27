@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-6.1.0...opencode-forgekeeper-6.1.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **forgekeeper:** check linked issue project capabilities ([eecc770](https://github.com/pedropombeiro/opencode-plugins/commit/eecc770f4104dfb381741e3483eec656d5b9e041))
+
 ## [6.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-6.0.1...opencode-forgekeeper-6.1.0) (2026-11-27)
 
 
