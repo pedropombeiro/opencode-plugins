@@ -169,16 +169,25 @@ describe('GitLabForge.issue', () => {
       expect(query).toBe(ISSUE_QUERY);
       return {
         project: {
+          activeMilestones: { nodes: [{ title: '19.7' }] },
+          labelPrefix0: { nodes: [{ title: 'group::dh' }] },
+          labelPrefix1: { nodes: [{ title: 'mentions maintenance::workflow' }] },
+          labelPrefix2: { nodes: [{ title: 'bug::ux' }] },
           workItems: {
             nodes: [
               {
                 state: 'OPEN',
+                workItemType: {
+                  widgetDefinitions: [
+                    { allowedStatuses: [{ name: 'In dev' }, { name: 'In review' }] },
+                  ],
+                },
                 widgets: [
                   {},
-                  { status: { name: 'In dev' } },
+                  { __typename: 'WorkItemWidgetStatus', status: { name: 'In dev' } },
                   { assignees: { nodes: [{ username: 'alice' }] } },
                   { labels: { nodes: [{ title: 'group::dh' }, { title: 'bug::ux' }] } },
-                  { milestone: { title: '19.7' } },
+                  { __typename: 'WorkItemWidgetMilestone', milestone: { title: '19.7' } },
                 ],
               },
             ],
@@ -193,6 +202,9 @@ describe('GitLabForge.issue', () => {
       assignees: ['alice'],
       labels: ['group::dh', 'bug::ux'],
       milestone: '19.7',
+      availableStatuses: ['In dev', 'In review'],
+      availableLabelPrefixes: ['group::', 'bug::'],
+      hasActiveMilestones: true,
     });
     expect(seen).toEqual({ project: 'g/p', iid: '9' });
   });
@@ -206,6 +218,9 @@ describe('GitLabForge.issue', () => {
       open: false,
       assignees: [],
       labels: [],
+      availableStatuses: [],
+      availableLabelPrefixes: [],
+      hasActiveMilestones: false,
     });
   });
 
@@ -213,6 +228,27 @@ describe('GitLabForge.issue', () => {
     const none = async () => ({ project: { workItems: { nodes: [] } } });
     expect(await new GitLabForge(none).issue(ref)).toBeUndefined();
     expect(await new GitLabForge(async () => ({ project: null })).issue(ref)).toBeUndefined();
+  });
+
+  test('checks subsequent label pages when the first page contains only substring matches', async () => {
+    const graphql: GraphQL = async (_host, query, variables) => {
+      if (query === ISSUE_QUERY) {
+        return {
+          project: {
+            labelPrefix0: {
+              nodes: [{ title: 'Help group::example' }],
+              pageInfo: { hasNextPage: true, endCursor: 'next' },
+            },
+            workItems: { nodes: [{ state: 'OPEN', widgets: [] }] },
+          },
+        };
+      }
+      expect(variables).toEqual({ project: ref.project, prefix: 'group::', after: 'next' });
+      return { project: { labels: { nodes: [{ title: 'group::example' }] } } };
+    };
+    expect(await new GitLabForge(graphql).issue(ref)).toMatchObject({
+      availableLabelPrefixes: ['group::'],
+    });
   });
 });
 

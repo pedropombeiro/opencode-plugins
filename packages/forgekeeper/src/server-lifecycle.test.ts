@@ -173,6 +173,8 @@ describe('PR/MR status lifecycle', () => {
       assignees: ['me'],
       labels: ['group::dh', 'bug::ux'],
       milestone: '19.7',
+      availableStatuses: ['In dev', 'In review'],
+      hasActiveMilestones: true,
     };
     const forge = new StatusForge();
     forge.set('group/a', '1');
@@ -225,6 +227,8 @@ describe('PR/MR status lifecycle', () => {
     assignees: ['me'],
     labels: ['group::dh', 'bug::ux'],
     milestone: '19.7',
+    availableStatuses: ['In dev', 'In review'],
+    hasActiveMilestones: true,
   };
   const issueUpdates = async (app: Awaited<ReturnType<typeof harness>>) =>
     (await app.feedback()).items.filter((item) => item.kind === 'issue-outdated');

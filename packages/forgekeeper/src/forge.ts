@@ -172,6 +172,9 @@ export interface GitLabIssueSnapshot {
   assignees: string[];
   labels: string[];
   milestone?: string;
+  availableStatuses?: string[];
+  availableLabelPrefixes?: string[];
+  hasActiveMilestones?: boolean;
 }
 
 export interface GitHubIssueSnapshot {

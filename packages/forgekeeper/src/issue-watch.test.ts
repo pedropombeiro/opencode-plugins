@@ -32,6 +32,9 @@ const complete: GitLabIssueSnapshot = {
   assignees: ['me'],
   labels: ['group::development health', 'feature::addition'],
   milestone: '18.10',
+  availableStatuses: ['In dev', 'In review'],
+  availableLabelPrefixes: ['group::', 'feature::'],
+  hasActiveMilestones: true,
 };
 
 const githubIssue = (open = true): GitHubIssueSnapshot => ({
@@ -65,13 +68,21 @@ describe('issueProblems', () => {
     expect(ids({ ...complete, open: false }, mr('merged'))).toEqual([]);
   });
 
+  test('skips unavailable metadata while still reporting a missing assignee', () => {
+    const bare: GitLabIssueSnapshot = { forge: 'gitlab', open: true, assignees: [], labels: [] };
+    expect(ids(bare, mr('opened'))).toEqual(['unassigned']);
+    expect(ids({ ...bare, availableStatuses: ['In progress'] }, mr('opened'))).toEqual([
+      'unassigned',
+    ]);
+    expect(ids({ ...bare, assignees: ['me'] }, mr('merged'))).toEqual(['merged']);
+  });
+
   test('flags a missing assignee, group label, type label, and milestone', () => {
     const bare: GitLabIssueSnapshot = {
-      forge: 'gitlab',
-      open: true,
-      status: 'In review',
+      ...complete,
       assignees: [],
       labels: [],
+      milestone: undefined,
     };
     expect(ids(bare, mr('opened'))).toEqual([
       'unassigned',

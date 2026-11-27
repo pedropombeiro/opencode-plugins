@@ -18,6 +18,7 @@ import {
   type ReviewRef,
 } from '../../forge';
 import type { RemoteProject, Repository } from '../../git';
+import { ISSUE_LABEL_PREFIXES } from '../../issue-watch';
 import { fetchComments, fetchDetails } from './feedback';
 import { fetchReviewRequests } from './review-requests';
 import { fetchLinkedNote, linkedNotes } from './linked-notes';
@@ -221,12 +222,31 @@ export const SOURCE_BRANCH_QUERY = query<{
   project(fullPath: $project) { mergeRequest(iid: $iid) { sourceBranch } }
 }`);
 
+type IssueLabelPage = ConnectionPage<{ title: string }>;
+const issueLabelArguments = 'searchIn: [TITLE], includeAncestorGroups: true, first: 100';
+const ISSUE_LABEL_PAGE_QUERY = query<{ project?: { labels?: IssueLabelPage | null } | null }>(
+  `query($project: ID!, $prefix: String!, $after: String!) {
+    project(fullPath: $project) {
+      labels(searchTerm: $prefix, ${issueLabelArguments}, after: $after) {
+        nodes { title }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }`,
+);
+
 export const ISSUE_QUERY = query<{
   project?: {
+    activeMilestones?: { nodes: Array<{ title: string }> } | null;
+    [key: `labelPrefix${number}`]: IssueLabelPage | null | undefined;
     workItems?: {
       nodes: Array<{
         state: string;
+        workItemType?: {
+          widgetDefinitions: Array<{ allowedStatuses?: Array<{ name: string }> | null }>;
+        };
         widgets: Array<{
+          __typename?: string;
           status?: { name: string } | null;
           assignees?: { nodes: Array<{ username: string }> };
           labels?: { nodes: Array<{ title: string }> };
@@ -237,10 +257,18 @@ export const ISSUE_QUERY = query<{
   } | null;
 }>(`query($project: ID!, $iid: String!) {
   project(fullPath: $project) {
+    activeMilestones: milestones(state: active, includeAncestors: true, first: 1) {
+      nodes { title }
+    }
+    ${ISSUE_LABEL_PREFIXES.map((prefix, index) => `labelPrefix${index}: labels(searchTerm: "${prefix}", ${issueLabelArguments}) { nodes { title } pageInfo { hasNextPage endCursor } }`).join('\n    ')}
     workItems(iid: $iid, first: 1) {
       nodes {
         state
+        workItemType {
+          widgetDefinitions { ... on WorkItemWidgetDefinitionStatus { allowedStatuses { name } } }
+        }
         widgets {
+          __typename
           ... on WorkItemWidgetStatus { status { name } }
           ... on WorkItemWidgetAssignees { assignees { nodes { username } } }
           ... on WorkItemWidgetLabels { labels { nodes { title } } }
@@ -760,6 +788,30 @@ export class GitLabForge implements Forge {
     const widgets = node.widgets;
     const milestone = widgets.find((widget) => widget.milestone)?.milestone?.title;
     const status = widgets.find((widget) => widget.status)?.status?.name;
+    const availableStatuses = widgets.some((widget) => widget.__typename === 'WorkItemWidgetStatus')
+      ? (node.workItemType?.widgetDefinitions.flatMap(({ allowedStatuses }) =>
+          (allowedStatuses ?? []).map(({ name }) => name),
+        ) ?? [])
+      : [];
+    const availableLabelPrefixes = (
+      await Promise.all(
+        ISSUE_LABEL_PREFIXES.map(async (prefix, index) => {
+          let page = data.project?.[`labelPrefix${index}`];
+          while (page) {
+            if (page.nodes.some(({ title }) => title.startsWith(prefix))) return prefix;
+            const after = page.pageInfo?.endCursor;
+            if (!page.pageInfo?.hasNextPage || !after) break;
+            const next = await this.graphql(ref.host, ISSUE_LABEL_PAGE_QUERY, {
+              project: ref.project,
+              prefix,
+              after,
+            });
+            page = next.project?.labels;
+          }
+          return undefined;
+        }),
+      )
+    ).filter((prefix) => prefix !== undefined);
     return {
       forge: 'gitlab',
       open: node.state === 'OPEN',
@@ -767,6 +819,11 @@ export class GitLabForge implements Forge {
       assignees: widgets.flatMap((widget) => widget.assignees?.nodes ?? []).map((u) => u.username),
       labels: widgets.flatMap((widget) => widget.labels?.nodes ?? []).map((l) => l.title),
       ...(milestone ? { milestone } : {}),
+      availableStatuses,
+      availableLabelPrefixes,
+      hasActiveMilestones:
+        widgets.some((widget) => widget.__typename === 'WorkItemWidgetMilestone') &&
+        Boolean(data.project?.activeMilestones?.nodes.length),
     };
   }
 
