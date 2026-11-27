@@ -1,7 +1,14 @@
 import type { Plugin } from '@opencode/plugin';
 import type { FeedbackItem } from './feedback-inbox';
 import { jobKey, type FailedJob, type ReviewRequest } from './forge';
-import { parseUrl, reference, traitsOf, type ForgeCatalog } from './forges';
+import {
+  parseReference,
+  parseUrl,
+  reference,
+  requestFullNoun,
+  traitsOf,
+  type ForgeCatalog,
+} from './forges';
 import { createIssueNotifications } from './issue-notifications';
 import { proposeRetargets, stricter } from './lifecycle-execution';
 import {
@@ -97,10 +104,11 @@ export function createLifecycleNotifications(
 
   async function publish(item: FeedbackItem, supersedes?: (entry: FeedbackItem) => boolean) {
     await host.record(item, supersedes);
+    const forge = parseReference(item.url)?.ref.forge;
     host.notice({
       sessionID: item.sessionID,
       title: item.title,
-      message: 'New merge request update in /forge-feedback.',
+      message: `New ${requestFullNoun(forge)} update in /forge-feedback.`,
       variant: 'info',
     });
   }

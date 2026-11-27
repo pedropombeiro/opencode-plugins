@@ -939,7 +939,7 @@ describe('review preparation integration', () => {
       expect(app.prompts).toHaveLength(0);
       const [record] = await claims.records.list();
       expect(record).toMatchObject({ state: 'skipped' });
-      expect(record.reason).toContain('You did not write this PR/MR');
+      expect(record.reason).toContain('You did not write this MR');
     } finally {
       await app.cleanup();
       claims.close();
@@ -3884,6 +3884,9 @@ describe('PR/MR status lifecycle', () => {
     await settle();
     expect(app.synthetic).toHaveLength(1);
     expect(app.passive[0].text).toContain('!1 can no longer merge');
+    expect(app.passive[0].text).toContain(
+      'Forgekeeper summarizes this merge request change without tools.',
+    );
     const summary = await app.request();
     expect(summary.tools).toEqual({});
     expect(summary.system[0].text).toContain('change to one of their merge requests');
@@ -3891,6 +3894,18 @@ describe('PR/MR status lifecycle', () => {
     expect(textOf(summary)).toContain(`<mr-event kind="conflict" link="${projectA}">`);
     expect(await app.toolCall()).toContain('Tools are disabled');
     await app.cleanup();
+
+    const passiveForge = new StatusForge();
+    passiveForge.set('group/a', '1');
+    const { app: passiveApp } = await watchedTargets([projectA], {
+      status: passiveForge,
+      pluginOptions: { delivery: { lifecycle: 'passive' } },
+    });
+    passiveForge.set('group/a', '1', { conflicts: true });
+    await passiveApp.refresh();
+    await settle();
+    expect(passiveApp.passive[0].text).toContain('Merge request update only. No action requested.');
+    await passiveApp.cleanup();
   });
 
   test('summarizes a lifecycle event recorded in inbox mode when asked to', async () => {
@@ -7875,7 +7890,7 @@ describe('reviewer approval notifications and automation', () => {
       // Snapshot.lookup.cleanupReady is set for both, and transition notices fired once:
       expect(refreshedMr.snapshot.lookup?.cleanupReady).toEqual({
         kind: 'merged-requests',
-        reason: 'PR/MR merged',
+        reason: 'MR merged',
       });
       expect(refreshedIssue.snapshot.lookup?.cleanupReady).toEqual({
         kind: 'closed-issues',
@@ -7883,7 +7898,7 @@ describe('reviewer approval notifications and automation', () => {
       });
       expect(app.notices()).toContainEqual({
         sessionID: 'one',
-        title: 'PR/MR merged — ready to archive',
+        title: 'MR merged — ready to archive',
         message: 'Run /forge-cleanup to archive this session and close its tab.',
         variant: 'info',
         openTab: false,
@@ -7974,6 +7989,10 @@ describe('reviewer approval notifications and automation', () => {
         skippedErrors: 0,
       });
       await expect(disabled.cleanupSessions(['one'])).rejects.toThrow('PR/MR status is disabled');
+      await expect(disabled.summarizeFeedback('missing')).rejects.toThrow(
+        'PR/MR status is disabled',
+      );
+      await expect(disabled.actOnFeedback('missing')).rejects.toThrow('PR/MR status is disabled');
     } finally {
       await disabled.cleanup();
     }

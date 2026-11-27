@@ -147,6 +147,32 @@ describe('createStatusClient', () => {
     expect(app.client.snapshot({ directory: '/a', key: 'ses_1' })).toEqual(found('1'));
   });
 
+  test('uses the directory forge in unavailable errors', async () => {
+    let fail = false;
+    const client = createStatusClient({
+      clientID: 'cli',
+      watch: async () => {
+        if (fail) throw new Error('offline');
+        return { enabled: true, forge: 'github', statuses: { ses_1: found('1') } };
+      },
+      refresh: async () => {
+        if (fail) throw new Error('offline');
+        return { enabled: true, forge: 'github', snapshot: found('1') };
+      },
+      release: async () => {},
+      onChange: () => {},
+    });
+    client.show({ directory: '/gh', key: 'ses_1' });
+    await flush();
+    expect(client.forge('/gh')).toBe('github');
+    fail = true;
+    await client.refresh({ directory: '/gh', key: 'ses_1' });
+    expect(client.snapshot({ directory: '/gh', key: 'ses_1' }).error?.message).toBe(
+      'PR status service unavailable: offline',
+    );
+    client.dispose();
+  });
+
   test('keeps whether a failure concerns explicit targets while the server is unavailable', async () => {
     const app = harness();
     const error = { kind: 'auth' as const, message: 'GitLab authentication failed', at: 0 };

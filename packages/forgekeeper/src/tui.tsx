@@ -16,8 +16,15 @@ import {
   segmentsWidth,
   type Tone,
 } from './format';
-import { yesNo, type ReviewRequest } from './forge';
-import { reference, traitsOf } from './forges';
+import { yesNo, type ForgeKind, type ReviewRequest } from './forge';
+import {
+  forgeScope,
+  parseReference,
+  reference,
+  requestNoun,
+  requestPlural,
+  traitsOf,
+} from './forges';
 import { automatedReview } from './automated-review-watch';
 import { mapLimit } from './limit';
 import { showNotice } from './notice';
@@ -34,7 +41,7 @@ import {
   type CleanupScanResult,
 } from './session-cleanup';
 import { samePlace, type Place } from './status-client';
-import type { Snapshot } from './store';
+import { snapshotForge, type Lookup, type Snapshot } from './store';
 import {
   canActOnFeedback,
   feedbackFooter,
@@ -46,7 +53,6 @@ import {
   type InboxState,
 } from './feedback-inbox';
 import type { Repository } from './git';
-import type { Lookup } from './store';
 
 type StatusDialogAction = 'close' | 'cleanup' | 'refresh';
 
@@ -84,11 +90,11 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 let nextCleanupScanSeq = 0;
 const nextScanID = () => `cleanup-${Date.now()}-${++nextCleanupScanSeq}`;
 
-function emptyCleanupMessage(skippedErrors: number): string {
+function emptyCleanupMessage(skippedErrors: number, forge?: ForgeKind): string {
   if (skippedErrors > 0) {
     return `No eligible sessions found (${skippedErrors} skipped due to lookup errors).`;
   }
-  return 'No sessions with all PRs/MRs merged or tracked issues closed.';
+  return `No sessions with all ${requestPlural(forge)} merged or tracked issues closed.`;
 }
 
 function cleanupDialogTitle(skippedErrors: number): string {
@@ -147,6 +153,14 @@ export default {
       return client.enabled(directory);
     };
 
+    const forgeFor = (directory: string): ForgeKind | undefined => {
+      version();
+      return client.forge(directory);
+    };
+
+    const sessionForge = (place = currentPlace()): ForgeKind | undefined =>
+      snapshotForge(snapshotOf(place), forgeFor(place.directory));
+
     const refresh = (place: Place) => client.refresh(place);
 
     const color = (tone: Tone) => {
@@ -173,11 +187,14 @@ export default {
       });
 
       const snapshot = createMemo(() => snapshotOf(place()));
+      const forge = createMemo(() => forgeFor(place().directory));
       const fullWidth = createMemo(() =>
-        enabledFor(place().directory) ? segmentsWidth(footerSegments(snapshot())) : 0,
+        enabledFor(place().directory) ? segmentsWidth(footerSegments(snapshot(), forge())) : 0,
       );
       const [availableWidth, setAvailableWidth] = createSignal(0);
-      const segments = createMemo(() => responsiveFooterSegments(snapshot(), availableWidth()));
+      const segments = createMemo(() =>
+        responsiveFooterSegments(snapshot(), availableWidth(), forge()),
+      );
 
       return (
         <Show when={fullWidth() > 0}>
@@ -252,7 +269,7 @@ export default {
     const statusOff = (place: Place) => {
       if (enabledFor(place.directory)) return false;
       context.ui.toast.show({
-        message: "PR/MR status is off in the plugin's options (status: false)",
+        message: `${requestNoun(sessionForge(place))} status is off in the plugin's options (status: false)`,
         variant: 'info',
       });
       return true;
@@ -366,18 +383,19 @@ export default {
       );
     }
 
-    function StatusDetails(props: { snapshot: Snapshot }) {
+    function StatusDetails(props: { snapshot: Snapshot; forge?: ForgeKind }) {
       const lookup = () => {
         const value = props.snapshot.lookup;
         return value?.kind === 'found' ? value : undefined;
       };
+      const noun = () => requestNoun(snapshotForge(props.snapshot, props.forge));
       return (
         <box gap={1} flexShrink={0}>
           <Show
             when={lookup()}
             fallback={
               <text fg={props.snapshot.error ? color('error') : context.theme.text.muted}>
-                {detailsMessage(props.snapshot)}
+                {detailsMessage(props.snapshot, props.forge)}
               </text>
             }
           >
@@ -406,7 +424,7 @@ export default {
                   )}
                 </For>
                 <Show when={found().requests.length === 0}>
-                  <text fg={context.theme.text.muted}>No PR/MR status available.</text>
+                  <text fg={context.theme.text.muted}>No {noun()} status available.</text>
                 </Show>
                 <For each={found().requests}>
                   {(request) => (
@@ -449,6 +467,7 @@ export default {
     function CleanupProgressDialog(props: {
       title: string;
       mode: 'scan' | 'cleanup';
+      forge?: () => ForgeKind | undefined;
       progress: () => CleanupProgressEvent | undefined;
     }) {
       const [frame, setFrame] = createSignal(0);
@@ -469,7 +488,8 @@ export default {
           </box>
           <box height={1} flexShrink={0}>
             <text wrapMode="none" fg={context.theme.text.muted}>
-              {SPINNER_FRAMES[frame()]} {formatCleanupProgress(props.progress(), props.mode)}
+              {SPINNER_FRAMES[frame()]}{' '}
+              {formatCleanupProgress(props.progress(), props.mode, props.forge?.())}
             </text>
           </box>
         </box>
@@ -496,6 +516,7 @@ export default {
             <CleanupProgressDialog
               title="Clean up finished sessions"
               mode="cleanup"
+              forge={() => forgeFor(directory)}
               progress={progress}
             />
           ),
@@ -600,6 +621,8 @@ export default {
         Math.max(1, Math.min(24, Math.floor(terminalHeight() * 0.6) - 5)),
       );
       const snapshot = createMemo(() => snapshotOf(props.place));
+      const defaultForge = createMemo(() => forgeFor(props.place.directory));
+      const noun = createMemo(() => requestNoun(snapshotForge(snapshot(), defaultForge())));
       const canCleanup = createMemo(() => props.place.key !== HOME && !!cleanupReadyOf(snapshot()));
       const [cleaning, setCleaning] = createSignal(false);
       const reload = () => {
@@ -686,7 +709,7 @@ export default {
         >
           <box height={1} flexShrink={0} flexDirection="row" justifyContent="space-between">
             <text fg={context.theme.text.base}>
-              <b>PR/MR status</b>
+              <b>{noun()} status</b>
             </text>
             <text fg={context.theme.text.muted} onMouseUp={close}>
               esc
@@ -699,7 +722,7 @@ export default {
             scrollX={false}
             contentOptions={{ flexShrink: 0 }}
           >
-            <StatusDetails snapshot={snapshot()} />
+            <StatusDetails snapshot={snapshot()} forge={defaultForge()} />
           </scrollbox>
           <box height={1} flexShrink={0} flexDirection="row" justifyContent="flex-end">
             <For each={availableActions()}>
@@ -791,8 +814,10 @@ export default {
         context.ui.dialog.clear();
         void showFeedback();
       };
+      const inboxForge =
+        forgeScope(items.map((item) => parseReference(item.url)?.ref.forge)) ?? sessionForge(place);
       const selected = await context.ui.dialog.select({
-        title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
+        title: `Review feedback and ${requestNoun(inboxForge)} updates${state.paused ? ' (monitoring paused)' : ''}`,
         options: items.map((item) => ({
           title: item.title,
           description: feedbackItemDescription(item),
@@ -896,12 +921,16 @@ export default {
         requests = requestsFor(place);
       }
       if (requests.length === 0) {
-        context.ui.toast.show({ message: 'No PR/MR for this session', variant: 'info' });
+        context.ui.toast.show({
+          message: `No ${requestNoun(sessionForge(place))} for this session`,
+          variant: 'info',
+        });
         return;
       }
       if (requests.length === 1) return openUrl(requests[0].url);
+      const forge = forgeScope(requests.map((mr) => mr.forge));
       const url = await context.ui.dialog.select({
-        title: 'Open PR/MR',
+        title: `Open ${requestNoun(forge)}`,
         actions: [
           {
             bind: 'ctrl+w',
@@ -944,6 +973,7 @@ export default {
             <CleanupProgressDialog
               title="Clean up finished sessions"
               mode="scan"
+              forge={() => forgeFor(directory)}
               progress={progress}
             />
           ),
@@ -976,8 +1006,7 @@ export default {
           transitioning = true;
           if (progressOpen) context.ui.dialog.clear();
           context.ui.toast.show({
-            message:
-              'PR/MR status is off. Enable options.status in opencode.json to use this command.',
+            message: `${requestNoun(forgeFor(directory))} status is off. Enable options.status in opencode.json to use this command.`,
             variant: 'info',
           });
           return;
@@ -986,7 +1015,7 @@ export default {
           transitioning = true;
           if (progressOpen) context.ui.dialog.clear();
           context.ui.toast.show({
-            message: emptyCleanupMessage(scan.skippedErrors),
+            message: emptyCleanupMessage(scan.skippedErrors, forgeFor(directory)),
             variant: 'info',
           });
           return;
@@ -1106,7 +1135,7 @@ export default {
             },
             {
               id: 'forge.review.status',
-              title: 'Show PR/MR status',
+              title: `Show ${requestNoun(sessionForge())} status`,
               group: 'Forge',
               palette: true,
               slash: { name: 'forge-status', aliases: ['mr-status', 'pr-status'] },
@@ -1114,7 +1143,7 @@ export default {
             },
             {
               id: 'forge.review.open',
-              title: 'Open PR/MR in browser',
+              title: `Open ${requestNoun(sessionForge())} in browser`,
               group: 'Forge',
               palette: true,
               slash: { name: 'forge-open', aliases: ['mr-open', 'pr-open'] },

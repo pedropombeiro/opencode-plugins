@@ -39,12 +39,21 @@ import {
   approvalsComplete,
   approversOf,
   type FeedbackSnapshot,
+  type ForgeKind,
   type IssueSnapshot,
   type ReviewerApproval,
   type ReviewRequest,
   type ReviewRequestHistory,
 } from './forge';
-import { parseReference, parseUrl, traitsOf, type ForgeCatalog } from './forges';
+import {
+  forgeScope,
+  parseReference,
+  parseUrl,
+  requestFullNoun,
+  requestNoun,
+  traitsOf,
+  type ForgeCatalog,
+} from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
 import { investigatesJobs, isJobFailure } from './job-investigation';
 import { REQUEST_INTERVAL } from './review-request-watch';
@@ -114,6 +123,7 @@ export interface StatusHost {
   isTarget: (sessionID: string, url: string) => boolean;
   publish: (key: string, snapshot: Snapshot) => void;
   notice: (notice: Notice) => void;
+  forge?: () => Promise<ForgeKind | undefined>;
   feedbackChanged?: (directory?: string) => void;
   sessionsCleanedUp?: (sessionIDs: string[], options?: { archive?: boolean }) => void;
   cleanupProgress?: (progress: CleanupProgress) => void;
@@ -710,7 +720,13 @@ export async function setupStatus(
       record,
       notice,
       error: (error) =>
-        reportOnce('feedback-fetch', 'Could not check PR/MR review feedback', error),
+        void Promise.resolve(host.forge?.()).then((forge) =>
+          reportOnce(
+            'feedback-fetch',
+            `Could not check ${requestNoun(forge)} review feedback`,
+            error,
+          ),
+        ),
       approvalError: (error) => reportOnce('approvals', 'Could not record review approvals', error),
     },
     deps.now,
@@ -727,7 +743,10 @@ export async function setupStatus(
       await record(item, supersedes);
     },
     notice,
-    error: (error) => reportOnce('lifecycle', 'Could not record merge request changes', error),
+    error: (error) =>
+      void Promise.resolve(host.forge?.()).then((forge) =>
+        reportOnce('lifecycle', `Could not record ${requestFullNoun(forge)} changes`, error),
+      ),
   });
   const retryLifecycle = () =>
     lifecycle.watcher ? tracked(lifecycle.watcher.retry()) : Promise.resolve();
@@ -831,7 +850,10 @@ export async function setupStatus(
     feedbackTargets: (sessionID, requests) => subscriptions.update(sessionID, requests),
     ...(lifecycle.watcher ? { lifecycle: lifecycle.watcher } : {}),
     ...(reviews.approvals ? { approvals: reviews.approvals } : {}),
-    onWatchError: (error) => reportOnce('watch', 'PR/MR status watcher failed', error),
+    onWatchError: (error) =>
+      void Promise.resolve(host.forge?.()).then((forge) =>
+        reportOnce('watch', `${requestNoun(forge)} status watcher failed`, error),
+      ),
     interval: settings.pollSeconds * 1000,
     activeInterval: Math.min(settings.pollSeconds, REVIEW_POLL_SECONDS) * 1000,
     now: deps.now,
@@ -1108,7 +1130,9 @@ export async function setupStatus(
             if (checked.state === 'valid') current = checked.item;
           }
           if (!(await summaries.deliver(current, true)))
-            throw new Error("The update's session no longer targets this PR/MR here");
+            throw new Error(
+              `The update's session no longer targets this ${requestNoun(parseReference(current.url)?.ref.forge)} here`,
+            );
           return decorateInbox(await inbox.list());
         })(),
       ),
@@ -1253,10 +1277,12 @@ export async function setupStatus(
       };
       const cleanedLocal = new Set<string>();
       const cleanedForeign = new Map<string, Set<string>>();
+      const defaultForge = await host.forge?.();
       const result = await runCleanupSessions(sessionIDs, {
         projectID,
         directory,
         forges: deps.forges,
+        ...(defaultForge ? { defaultForge } : {}),
         getSession: readSession,
         archiveSession: async (sessionID) => {
           const updated = (await ctx.session.update({ sessionID, archived: true })) as
@@ -1314,9 +1340,13 @@ export async function setupStatus(
     // doesn't depend on that lookup succeeding.
     targetsChanged(sessionID: string, targets: readonly Target[]) {
       const classified = classifyTargets(targetOutput(targets)) ?? [];
+      const mergeRequests = classified.flatMap((target) =>
+        target.kind === 'merge-request' ? [target] : [],
+      );
       service.setTargeted(
         sessionID,
-        classified.some((target) => target.kind === 'merge-request'),
+        mergeRequests.length > 0,
+        forgeScope(mergeRequests.map((target) => target.ref.forge)),
       );
       if (targets.length === 0) void cleanupWatch.forget(sessionID);
       // Retire dropped targets and invalidate cached status BEFORE triggering a

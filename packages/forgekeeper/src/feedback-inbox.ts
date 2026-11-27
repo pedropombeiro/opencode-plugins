@@ -1,3 +1,4 @@
+import { parseReference, requestNoun } from './forges';
 import type { AutomationStatus } from './review-automation';
 
 export interface FeedbackItem {
@@ -168,7 +169,13 @@ export function linkOptions(item: Pick<FeedbackItem, 'url' | 'links' | 'kind'>) 
       value: url,
     })),
     ...(links.includes(item.url)
-      ? [{ title: 'PR/MR overview', description: item.url, value: item.url }]
+      ? [
+          {
+            title: `${requestNoun(parseReference(item.url)?.ref.forge)} overview`,
+            description: item.url,
+            value: item.url,
+          },
+        ]
       : []),
   ];
 }

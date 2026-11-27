@@ -33,6 +33,7 @@ import type { Target } from './target';
 
 const mrUrl = (iid: string, project = 'group/app') =>
   `https://gitlab.com/${project}/-/merge_requests/${iid}`;
+const prUrl = (iid: string, project = 'acme/app') => `https://github.com/${project}/pull/${iid}`;
 const glIssueUrl = (iid: string, project = 'group/app') =>
   `https://gitlab.com/${project}/-/issues/${iid}`;
 const ghIssueUrl = (iid: string, project = 'acme/app') =>
@@ -153,7 +154,7 @@ describe('session-cleanup helpers', () => {
     expect(allRequestsMerged(singleMerged)).toBe(true);
     expect(cleanupReadyOf(singleMerged)).toEqual({
       kind: 'merged-requests',
-      reason: 'PR/MR merged',
+      reason: 'MR merged',
     });
 
     const multiMerged = {
@@ -165,6 +166,35 @@ describe('session-cleanup helpers', () => {
       },
     };
     expect(cleanupReadyOf(multiMerged)).toEqual({
+      kind: 'merged-requests',
+      reason: 'All MRs merged',
+    });
+
+    const prMerged = {
+      loading: false,
+      lookup: {
+        kind: 'found' as const,
+        explicitTarget: true,
+        requests: [{ ...makeMr('7', 'merged'), forge: 'github' as const, url: prUrl('7') }],
+      },
+    };
+    expect(cleanupReadyOf(prMerged)).toEqual({
+      kind: 'merged-requests',
+      reason: 'PR merged',
+    });
+
+    const mixedMerged = {
+      loading: false,
+      lookup: {
+        kind: 'found' as const,
+        explicitTarget: true,
+        requests: [
+          makeMr('1', 'merged'),
+          { ...makeMr('7', 'merged'), forge: 'github' as const, url: prUrl('7') },
+        ],
+      },
+    };
+    expect(cleanupReadyOf(mixedMerged)).toEqual({
       kind: 'merged-requests',
       reason: 'All PRs/MRs merged',
     });
@@ -529,7 +559,7 @@ describe('cleanupCandidates & cleanupSessions', () => {
     expect(result.failed).toEqual([
       { sessionID: 'became-busy', reason: 'Session is currently running' },
       { sessionID: 'other-project', reason: 'Session belongs to another project' },
-      { sessionID: 'unmerged-mr', reason: 'Not all PRs/MRs are merged' },
+      { sessionID: 'unmerged-mr', reason: 'Not all MRs are merged' },
       { sessionID: 'archive-throws', reason: 'disk full' },
     ]);
     expect(cleaned).toEqual([
@@ -611,7 +641,7 @@ describe('cleanupCandidates & cleanupSessions', () => {
     );
     expect(mergedLookup.lookup.cleanupReady).toEqual({
       kind: 'merged-requests',
-      reason: 'PR/MR merged',
+      reason: 'MR merged',
     });
 
     const closedIssueLookup = await resolveLookupCleanupReady(
@@ -793,8 +823,21 @@ describe('cleanupCandidates & cleanupSessions', () => {
     // 1 GitLab issue batch + 1 GitHub issue batch
     expect(issueBatches).toHaveLength(2);
     expect(progressEvents.some((e) => e.phase === 'targets' && e.total === 32)).toBe(true);
+    expect(formatCleanupProgress(undefined, 'scan', 'github')).toBe(
+      'Checking sessions for merged PRs and closed issues…',
+    );
+    expect(formatCleanupProgress(undefined, 'cleanup')).toBe('Verifying and archiving sessions…');
+    expect(formatCleanupProgress({ phase: 'sessions', checked: 5, total: 0 })).toBe(
+      'Scanning project sessions… (5 found)',
+    );
     expect(formatCleanupProgress({ phase: 'targets', checked: 25, total: 32 }, 'scan')).toContain(
       '(25/32)',
+    );
+    expect(formatCleanupProgress({ phase: 'verifying', checked: 1, total: 2 }, 'cleanup')).toBe(
+      'Verifying target status before archiving… (1/2)',
+    );
+    expect(formatCleanupProgress({ phase: 'archiving', checked: 1, total: 2 }, 'cleanup')).toBe(
+      'Archiving sessions… (1/2)',
     );
 
     // Fork cycles, explicit empty overrides, and mid-scan AbortSignal are handled cleanly:
@@ -982,5 +1025,53 @@ describe('cleanupCandidates & cleanupSessions', () => {
       ],
     });
     expect(cleaned).toEqual([{ id: 's1', directory: '/repo' }]);
+
+    sessions.set('subagent', {
+      id: 'subagent',
+      parentID: 's1',
+      projectID: 'proj',
+      time: { updated: 30 },
+      location: { directory: '/repo' },
+    });
+    sessions.set('untargeted', {
+      id: 'untargeted',
+      projectID: 'proj',
+      time: { updated: 40 },
+      location: { directory: '/repo' },
+    });
+    sessions.set('mixed-issues-with-unknown', {
+      id: 'mixed-issues-with-unknown',
+      projectID: 'proj',
+      time: { updated: 50 },
+      location: { directory: '/repo' },
+    });
+    const rejected = await cleanupSessions(
+      ['subagent', 'untargeted', 'mixed-issues-with-unknown'],
+      {
+        projectID: 'proj',
+        directory: '/repo',
+        forges,
+        defaultForge: 'github',
+        getSession: async (id) => sessions.get(id),
+        archiveSession: async () => 'archived',
+        storedTargets: async (id) =>
+          id === 'mixed-issues-with-unknown'
+            ? [
+                { url: glIssueUrl('10') },
+                { url: ghIssueUrl('20') },
+                { url: 'https://example.com/1' },
+              ]
+            : [],
+        onSessionCleaned: async () => {},
+      },
+    );
+    expect(rejected.failed).toEqual([
+      { sessionID: 'subagent', reason: 'Only root sessions can be cleaned up' },
+      { sessionID: 'untargeted', reason: 'Session has no tracked PR or issue targets' },
+      {
+        sessionID: 'mixed-issues-with-unknown',
+        reason: 'Session has no tracked PR/MR or issue targets',
+      },
+    ]);
   });
 });

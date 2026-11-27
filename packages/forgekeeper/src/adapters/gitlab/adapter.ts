@@ -407,6 +407,7 @@ const countUnresolved = (page: DiscussionPage) =>
 export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
   kind: 'gitlab',
   noun: 'MR',
+  fullNoun: 'merge request',
   ci: 'pipeline',
   // Self-managed instances are usually named gitlab.<domain>.
   recognizes: (host) => /(^|\.)gitlab\./.test(host),

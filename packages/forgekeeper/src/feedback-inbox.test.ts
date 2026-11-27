@@ -146,11 +146,19 @@ describe('feedback inbox', () => {
     });
     expect(options.map((option) => option.value)).toEqual([`${url}#note_7`, `${url}#note_8`, url]);
     expect(options[0].title).toBe('Comment 1 of 2 (#note_7)');
-    expect(options.at(-1)?.title).toBe('PR/MR overview');
+    expect(options.at(-1)?.title).toBe('MR overview');
     expect(linkOptions({ url, links: [`${url}#note_7`] })[0].title).toBe('Comment (#note_7)');
     // An update stored without comment links offers only the PR/MR.
     expect(linkOptions({ url, links: [url] })).toEqual([
-      { title: 'PR/MR overview', description: url, value: url },
+      { title: 'MR overview', description: url, value: url },
+    ]);
+    const prUrl = 'https://github.com/o/r/pull/42';
+    expect(linkOptions({ url: prUrl, links: [prUrl] })).toEqual([
+      { title: 'PR overview', description: prUrl, value: prUrl },
+    ]);
+    const unknownUrl = 'https://custom.example/item/1';
+    expect(linkOptions({ url: unknownUrl, links: [unknownUrl] })).toEqual([
+      { title: 'PR/MR overview', description: unknownUrl, value: unknownUrl },
     ]);
     // The PR/MR's own link passes the same filter as comment links.
     const insecure = 'http://gitlab.com/g/p/-/merge_requests/1';
@@ -165,7 +173,7 @@ describe('feedback inbox', () => {
       linkOptions({ url, kind: 'ci-failed', links: ['https://gitlab.com/g/p/-/jobs/9', url] }).map(
         (option) => option.title,
       ),
-    ).toEqual(['Failed job (jobs/9)', 'PR/MR overview']);
+    ).toEqual(['Failed job (jobs/9)', 'MR overview']);
   });
 
   test('offers the issue link before the MR overview', () => {
@@ -173,13 +181,13 @@ describe('feedback inbox', () => {
     const issue = 'https://gitlab.com/g/p/-/issues/9';
     expect(linkOptions({ url, kind: 'issue-outdated', links: [issue, url] })).toEqual([
       { title: 'Issue', description: issue, value: issue },
-      { title: 'PR/MR overview', description: url, value: url },
+      { title: 'MR overview', description: url, value: url },
     ]);
     const pr = 'https://github.com/acme/app/pull/42';
     const ghIssue = 'https://github.com/acme/platform/issues/9';
     expect(linkOptions({ url: pr, kind: 'issue-outdated', links: [ghIssue, pr] })).toEqual([
       { title: 'Issue', description: ghIssue, value: ghIssue },
-      { title: 'PR/MR overview', description: pr, value: pr },
+      { title: 'PR overview', description: pr, value: pr },
     ]);
   });
 

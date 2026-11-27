@@ -11,6 +11,7 @@ import {
   type ReviewRef,
   type ReviewRequest,
 } from './forge';
+import { parseReference, requestNoun } from './forges';
 import {
   failuresDigest,
   INVESTIGATION_QUIET_TIME,
@@ -113,12 +114,17 @@ export type ExecutionOutcome = 'pending' | 'running' | 'completed' | 'failed' | 
 // uncertain.
 type ClaimHolder = 'free' | 'live' | 'running' | 'uncertain';
 
-const CLAIM_HELD: Record<Exclude<ClaimHolder, 'free'>, string> = {
-  live: 'Another feedback task is queued or running for this PR/MR',
-  running: 'The earlier coding turn is still running',
-  uncertain:
-    'An earlier coding turn on this PR/MR has an uncertain outcome. Inspect the session, then use Retry feedback work to clear it.',
-};
+function claimHeldMessage(holder: Exclude<ClaimHolder, 'free'>, url: string): string {
+  const noun = requestNoun(parseReference(url)?.ref.forge);
+  switch (holder) {
+    case 'live':
+      return `Another feedback task is queued or running for this ${noun}`;
+    case 'running':
+      return 'The earlier coding turn is still running';
+    case 'uncertain':
+      return `An earlier coding turn on this ${noun} has an uncertain outcome. Inspect the session, then use Retry feedback work to clear it.`;
+  }
+}
 
 const ORPHANED = 'The owning session was deleted.';
 
@@ -710,7 +716,7 @@ export function createReviewAutomation(host: AutomationHost) {
       await settleUnclaimed(
         record,
         'skipped',
-        'Another execution owns this PR/MR. Inspect it before an explicit retry.',
+        `Another execution owns this ${requestNoun(parseReference(record.item.url)?.ref.forge)}. Inspect it before an explicit retry.`,
       );
       return undefined;
     }
@@ -1190,7 +1196,7 @@ export function createReviewAutomation(host: AutomationHost) {
         // An earlier attempt's claim, of this batch or another, is freed
         // once its turn is over, or on explicit retry once it's uncertain.
         const holder = await reconcileClaim(item.url, retry);
-        if (holder !== 'free') throw new Error(CLAIM_HELD[holder]);
+        if (holder !== 'free') throw new Error(claimHeldMessage(holder, item.url));
         const conflict = await ownershipConflictReason(item);
         const record = await startAttempt(item, existing, {
           manual: true,

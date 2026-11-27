@@ -253,16 +253,12 @@ export async function fetchBranch(
 export type ProjectsLookup =
   { kind: 'projects'; projects: RemoteProject[] } | { kind: 'none'; reason: string };
 
-// Lists the projects on accepted hosts behind a checkout's remotes, `origin`
-// first and all on one host, for looking up a PR/MR by number regardless of the
-// checked-out branch.
-export async function resolveProjects(
+export async function resolveRemoteProjects(
   run: Exec,
   directory: string,
-  accepted: HostFilter,
-): Promise<ProjectsLookup> {
+): Promise<Array<{ remote: string; project: RemoteProject }> | undefined> {
   const remoteConfig = await git(run, directory, ['config', '--get-regexp', '^remote\\..*\\.url$']);
-  if (remoteConfig === undefined) return { kind: 'none', reason: 'No Git remotes' };
+  if (remoteConfig === undefined) return undefined;
 
   const remotes: Array<[string, string]> = [];
   for (const line of remoteConfig.split('\n')) {
@@ -271,10 +267,28 @@ export async function resolveProjects(
   }
   remotes.sort(([a], [b]) => Number(b === 'origin') - Number(a === 'origin'));
 
-  const projects: RemoteProject[] = [];
-  for (const [, url] of remotes) {
+  const entries: Array<{ remote: string; project: RemoteProject }> = [];
+  for (const [remote, url] of remotes) {
     const project = parseRemote(url);
-    if (!project || !accepted(project.host)) continue;
+    if (project) entries.push({ remote, project });
+  }
+  return entries;
+}
+
+// Lists the projects on accepted hosts behind a checkout's remotes, `origin`
+// first and all on one host, for looking up a PR/MR by number regardless of the
+// checked-out branch.
+export async function resolveProjects(
+  run: Exec,
+  directory: string,
+  accepted: HostFilter,
+): Promise<ProjectsLookup> {
+  const entries = await resolveRemoteProjects(run, directory);
+  if (entries === undefined) return { kind: 'none', reason: 'No Git remotes' };
+
+  const projects: RemoteProject[] = [];
+  for (const { project } of entries) {
+    if (!accepted(project.host)) continue;
     if (projects.length > 0 && project.host !== projects[0].host) continue;
     if (projects.some((known) => known.path.toLowerCase() === project.path.toLowerCase())) continue;
     projects.push(project);

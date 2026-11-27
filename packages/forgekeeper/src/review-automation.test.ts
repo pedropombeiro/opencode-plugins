@@ -520,13 +520,29 @@ describe('review automation', () => {
     await f.settled();
     expect(f.record().state).toBe('failed');
     f.host.inbox = async () => ({ items: [next], paused: false });
-    await expect(f.automation.act(next)).rejects.toThrow('Retry feedback work');
+    await expect(f.automation.act(next)).rejects.toThrow(
+      'An earlier coding turn on this MR has an uncertain outcome. Inspect the session, then use Retry feedback work to clear it.',
+    );
     expect(f.claim()?.batch).toBe(automationBatch(item));
     await f.automation.act(next, true);
     outcome = 'completed';
     await f.settled();
     expect(f.records.get(automationBatch(next))?.state).toBe('completed');
     expect(f.claim()).toBeUndefined();
+  });
+
+  test('refuses manual action when another batch holds the live claim', async () => {
+    const gate = deferred();
+    const f = fixture({ submit: () => gate.promise });
+    const next = { ...item, id: 'next', commentIDs: ['2'], postedAt: 200 };
+    f.setItems([item, next]);
+    await f.automation.selectAutomatic(item);
+    await until(() => f.record()?.state === 'running');
+    await expect(f.automation.act(next)).rejects.toThrow(
+      'Another feedback task is queued or running for this MR',
+    );
+    gate.resolve();
+    await f.settled();
   });
 
   test('an explicit retry never frees the claim of a turn that is still running', async () => {

@@ -1,3 +1,5 @@
+import type { ForgeKind } from './forge';
+import { requestNoun } from './forges';
 import { HEARTBEAT, HOME, type Input, type Output } from './rpc';
 import type { Snapshot } from './store';
 
@@ -42,6 +44,7 @@ export function createStatusClient(options: StatusClientOptions) {
   const shown = new Map<string, Set<string>>();
   // Whether each directory's server has status on (`status`).
   const enabled = new Map<string, boolean>();
+  const forges = new Map<string, ForgeKind>();
   let visible: Place | undefined;
   let disposed = false;
 
@@ -64,7 +67,7 @@ export function createStatusClient(options: StatusClientOptions) {
     const reason = error instanceof Error ? error.message : String(error);
     const failure = {
       kind: 'request' as const,
-      message: `PR/MR status service unavailable: ${reason}`,
+      message: `${requestNoun(forges.get(directory))} status service unavailable: ${reason}`,
       at: now(),
     };
     for (const key of shown.get(directory) ?? []) {
@@ -104,6 +107,7 @@ export function createStatusClient(options: StatusClientOptions) {
       if (disposed) return;
       failures.delete(directory);
       enabled.set(directory, result.enabled);
+      if (result.forge) forges.set(directory, result.forge);
       for (const [key, snapshot] of Object.entries(result.statuses)) {
         if (isShown({ directory, key })) apply({ directory, key }, snapshot);
       }
@@ -131,6 +135,7 @@ export function createStatusClient(options: StatusClientOptions) {
     snapshot: (place: Place): Snapshot => snapshots.get(placeID(place)) ?? { loading: false },
     // Unknown until the directory's server answers, and on by default.
     enabled: (directory: string) => enabled.get(directory) ?? true,
+    forge: (directory: string): ForgeKind | undefined => forges.get(directory),
     // A session lives in one directory. When it moves, such as to another
     // worktree, its lease moves too, so the old directory's server stops
     // watching it.
@@ -161,6 +166,7 @@ export function createStatusClient(options: StatusClientOptions) {
         const result = await options.refresh(place.directory, place.key);
         if (disposed) return;
         enabled.set(place.directory, result.enabled);
+        if (result.forge) forges.set(place.directory, result.forge);
         apply(place, result.snapshot);
         options.onChange();
       } catch (error) {

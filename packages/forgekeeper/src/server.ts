@@ -1,4 +1,6 @@
 import type { Plugin } from '@opencode/plugin';
+import type { ForgeKind } from './forge';
+import { requestNoun } from './forges';
 import { CONCURRENCY, mapLimit } from './limit';
 import type { TitleLookups } from './lookups';
 import { createKeyedQueue } from './keyed-queue';
@@ -180,6 +182,16 @@ export async function setupServer(
   };
 
   let watcher: Status | undefined;
+  let directoryForgePromise: Promise<ForgeKind | undefined> | undefined;
+  const directoryForge = () =>
+    (directoryForgePromise ??=
+      status?.forges.detectForge?.(ctx.location.directory).catch(() => undefined) ??
+      Promise.resolve(undefined));
+  const requireWatcher = async () => {
+    if (watcher) return watcher;
+    const forge = await directoryForge();
+    throw new Error(`${requestNoun(forge)} status is disabled`);
+  };
   const rpc = await ctx.rpc.register(
     ForgeSessionRpc,
     implement({
@@ -200,16 +212,30 @@ export async function setupServer(
               targets: [],
             },
       target: async ({ sessionID }) => targetOutput((await stateFor(sessionID)).targets),
-      watch: async ({ clientID, keys, visible }) =>
-        watcher
-          ? { enabled: true, statuses: json(watcher.service.watch(clientID, keys, visible)) }
-          : { enabled: false, statuses: {} },
+      watch: async ({ clientID, keys, visible }) => {
+        const forge = await directoryForge();
+        return watcher
+          ? {
+              enabled: true,
+              ...(forge ? { forge } : {}),
+              statuses: json(watcher.service.watch(clientID, keys, visible)),
+            }
+          : { enabled: false, ...(forge ? { forge } : {}), statuses: {} };
+      },
       release: async ({ clientID }) => {
         watcher?.service.release(clientID);
         return {};
       },
-      refresh: async ({ key }) =>
-        watcher ? { enabled: true, snapshot: json(await watcher.refresh(key)) } : DISABLED,
+      refresh: async ({ key }) => {
+        const forge = await directoryForge();
+        return watcher
+          ? {
+              enabled: true,
+              ...(forge ? { forge } : {}),
+              snapshot: json(await watcher.refresh(key)),
+            }
+          : { ...DISABLED, ...(forge ? { forge } : {}) };
+      },
       feedback: async () => (watcher ? watcher.feedbackState() : { items: [], paused: false }),
       markFeedbackRead: async ({ ids }) =>
         watcher
@@ -219,14 +245,8 @@ export async function setupServer(
         watcher
           ? watcher.decorateInbox(await watcher.inbox.acknowledge(id))
           : { items: [], paused: false },
-      summarizeFeedback: async ({ id }) => {
-        if (!watcher) throw new Error('PR/MR status is disabled');
-        return watcher.summarize(id);
-      },
-      actOnFeedback: async ({ id, retry }) => {
-        if (!watcher) throw new Error('PR/MR status is disabled');
-        return watcher.act(id, retry);
-      },
+      summarizeFeedback: async ({ id }) => (await requireWatcher()).summarize(id),
+      actOnFeedback: async ({ id, retry }) => (await requireWatcher()).act(id, retry),
       pauseFeedback: async ({ paused }) => {
         if (!watcher) return { items: [], paused: false };
         const state = await watcher.inbox.pause(paused);
@@ -239,16 +259,16 @@ export async function setupServer(
         watcher
           ? json(await watcher.cleanupCandidates({ scanID, signal: context?.signal }))
           : { enabled: false, candidates: [], skippedErrors: 0 },
-      cleanupSessions: async ({ sessionIDs, scanID, allowClientArchive, finalizeArchived }) => {
-        if (!watcher) throw new Error('PR/MR status is disabled');
-        return json(
-          await watcher.cleanupSessions(sessionIDs, {
+      cleanupSessions: async ({ sessionIDs, scanID, allowClientArchive, finalizeArchived }) =>
+        json(
+          await (
+            await requireWatcher()
+          ).cleanupSessions(sessionIDs, {
             scanID,
             allowClientArchive,
             finalizeArchived,
           }),
-        );
-      },
+        ),
     }),
   );
 
@@ -270,6 +290,7 @@ export async function setupServer(
           .emit('status', { directory: ctx.location.directory, key, snapshot: json(snapshot) })
           .catch(() => {}),
       notice: (notice) => void rpc.events.emit('notice', json(notice)).catch(() => {}),
+      forge: directoryForge,
       feedbackChanged: (directory = ctx.location.directory) =>
         void rpc.events.emit('feedbackChanged', { directory }).catch(() => {}),
       sessionsCleanedUp: (sessionIDs, options) =>
@@ -707,13 +728,14 @@ export async function setupServer(
           (event as { created?: number }).created ?? Date.now(),
         );
     }
-  })().catch((error) => {
+  })().catch(async (error) => {
     // Without events, titles and statuses stop following renames and turns until reload.
     if (controller.signal.aborted) return;
     const reason = error instanceof Error ? error.message : String(error);
+    const forge = await directoryForge();
     void rpc.events
       .emit('notice', {
-        message: `Session title and PR/MR status updates stopped: ${reason}`,
+        message: `Session title and ${requestNoun(forge)} status updates stopped: ${reason}`,
         variant: 'error',
       })
       .catch(() => {});

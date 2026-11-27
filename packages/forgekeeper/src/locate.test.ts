@@ -140,10 +140,12 @@ describe('locate', () => {
       kind: 'found',
       sessionTarget: merge.url,
       explicitTarget: true,
+      forge: 'gitlab',
       requests: [merge],
     });
     expect(await locate(forges, { directory: '/repo', targets: target(pull.url) })).toMatchObject({
       explicitTarget: true,
+      forge: 'github',
       requests: [pull],
     });
     expect(gitlab.calls).toEqual(['number g/p 45']);
@@ -160,6 +162,7 @@ describe('locate', () => {
       kind: 'none',
       reason: 'Unsupported session target host',
       explicitTarget: true,
+      forge: 'github',
     });
   });
 
@@ -168,15 +171,19 @@ describe('locate', () => {
     const forges = catalog({ gitlab }, { repository: repository('gitlab.com') });
     expect(await locate(forges, { directory: '/repo', targets: target(merge.url) })).toEqual({
       kind: 'none',
-      reason: 'Explicit PR/MR target could not be resolved',
+      reason: 'Explicit MR target could not be resolved',
       explicitTarget: true,
+      forge: 'gitlab',
     });
     const issue = await locate(forges, {
       directory: '/repo',
       targets: target('https://gitlab.com/g/p/-/issues/3'),
     });
-    expect(issue).toMatchObject({ kind: 'none' });
-    expect(issue.kind === 'none' && issue.explicitTarget).toBeFalsy();
+    expect(issue).toEqual({
+      kind: 'none',
+      reason: 'The session target is not an MR (https://gitlab.com/g/p/-/issues/3)',
+      forge: 'gitlab',
+    });
     expect(gitlab.calls).toEqual(['number g/p 45']);
   });
 
@@ -200,8 +207,9 @@ describe('locate', () => {
     });
     expect(lookup).toEqual({
       kind: 'found',
-      sessionTarget: '2 PRs/MRs set with set_session_target',
+      sessionTarget: '2 MRs set with set_session_target',
       explicitTarget: true,
+      forge: 'gitlab',
       requests: [mergeOf('2'), mergeOf('1')],
     });
   });
@@ -220,7 +228,7 @@ describe('locate', () => {
       requests: [mergeOf('1'), mergeOf('2', { duoReviewState: 'REVIEW_STARTED' })],
       failed: [
         { url: mergeOf('2').url, reason: 'glab failed' },
-        { url: mergeOf('3').url, reason: 'Explicit PR/MR target could not be resolved' },
+        { url: mergeOf('3').url, reason: 'Explicit MR target could not be resolved' },
       ],
     });
     // Without a previous result, the failed target is only listed.
@@ -243,15 +251,22 @@ describe('locate', () => {
       }),
     ).toEqual({
       kind: 'none',
-      reason: 'No session target PR/MR could be resolved',
+      reason: 'No session target MR could be resolved',
       explicitTarget: true,
+      forge: 'gitlab',
     });
     expect(
       await locate(catalog({}), {
         directory: '/repo',
         targets: targets('https://gitlab.com/g/p/-/issues/1', 'https://gitlab.com/g/p/-/issues/2'),
       }),
-    ).toEqual({ kind: 'none', reason: 'No session target is a PR/MR' });
+    ).toEqual({ kind: 'none', reason: 'No session target is an MR', forge: 'gitlab' });
+    expect(
+      await locate(catalog({}), {
+        directory: '/repo',
+        targets: targets('https://github.com/o/r/issues/1', 'https://gitlab.com/g/p/-/issues/2'),
+      }),
+    ).toEqual({ kind: 'none', reason: 'No session target is a PR/MR', forge: 'mixed' });
   });
 
   test('limits concurrent lookups', async () => {

@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import type { Exec } from './exec';
-import { Forges, hostsFrom, parseReference } from './forges';
+import {
+  aRequestNoun,
+  Forges,
+  forgeScope,
+  hostsFrom,
+  parseReference,
+  requestFullNoun,
+  requestNoun,
+  requestPlural,
+  sharedForge,
+} from './forges';
 import { GitHubForge } from './adapters/github/adapter';
 import { GitLabForge } from './adapters/gitlab/adapter';
 
@@ -100,5 +110,56 @@ describe('Forges', () => {
       kind: 'none',
       reason: 'Not a supported forge remote',
     });
+  });
+
+  test('detects the directory forge from origin or shared remotes', async () => {
+    expect(await forges.detectForge('/repo')).toBe('github');
+
+    const gitlabOrigin: Exec = async () => ({
+      code: 0,
+      stderr: '',
+      stdout:
+        'remote.origin.url git@gitlab.example.com:g/p.git\nremote.mirror.url git@github.com:o/r.git',
+    });
+    expect(await new Forges(gitlabOrigin, forges.hosts).detectForge('/repo')).toBe('gitlab');
+
+    const nonOriginUniform: Exec = async () => ({
+      code: 0,
+      stderr: '',
+      stdout:
+        'remote.upstream.url git@github.com:o/r.git\nremote.fork.url git@ghe.example.com:f/r.git',
+    });
+    expect(await new Forges(nonOriginUniform, forges.hosts).detectForge('/repo')).toBe('github');
+
+    const nonOriginMixed: Exec = async () => ({
+      code: 0,
+      stderr: '',
+      stdout:
+        'remote.upstream.url git@github.com:o/r.git\nremote.lab.url git@gitlab.example.com:g/p.git',
+    });
+    expect(await new Forges(nonOriginMixed, forges.hosts).detectForge('/repo')).toBeUndefined();
+
+    const noRemotes: Exec = async () => ({ code: 1, stderr: '', stdout: '' });
+    expect(await new Forges(noRemotes, forges.hosts).detectForge('/repo')).toBeUndefined();
+  });
+
+  test('formats forge nouns and scopes', () => {
+    expect(requestNoun('github')).toBe('PR');
+    expect(requestNoun('gitlab')).toBe('MR');
+    expect(requestNoun(undefined)).toBe('PR/MR');
+    expect(requestPlural('github')).toBe('PRs');
+    expect(requestPlural('gitlab')).toBe('MRs');
+    expect(requestPlural(undefined)).toBe('PRs/MRs');
+    expect(aRequestNoun('github')).toBe('a PR');
+    expect(aRequestNoun('gitlab')).toBe('an MR');
+    expect(aRequestNoun(undefined)).toBe('a PR/MR');
+    expect(requestFullNoun('github')).toBe('pull request');
+    expect(requestFullNoun('gitlab')).toBe('merge request');
+    expect(requestFullNoun(undefined)).toBe('PR/MR');
+    expect(sharedForge(['github', 'github'])).toBe('github');
+    expect(sharedForge(['github', 'gitlab'])).toBeUndefined();
+    expect(forgeScope([])).toBeUndefined();
+    expect(forgeScope(['gitlab'])).toBe('gitlab');
+    expect(forgeScope(['github', 'gitlab'])).toBe('mixed');
   });
 });

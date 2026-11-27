@@ -1,17 +1,21 @@
 import type { ComposerPillTone, ComposerPillView } from '@opencode/plugin/gui';
+import type { ForgeKind } from './forge';
+import { requestNoun } from './forges';
 import { footerSegments, type Segment, type Tone } from './format';
 import { cleanupReadyOf } from './session-cleanup';
-import type { Snapshot } from './store';
+import { snapshotForge, type Snapshot } from './store';
 
 export function statusPill(
   snapshot: Snapshot,
   updates: string | undefined,
   actions: { external(url: string): void; status(): void; feedback(): void; cleanup?(): void },
+  defaultForge?: ForgeKind,
 ): ComposerPillView | undefined {
-  const segments = footerSegments(snapshot);
+  const segments = footerSegments(snapshot, defaultForge);
   const ready = cleanupReadyOf(snapshot);
   const issueClosed = !segments.length && ready?.kind === 'closed-issues';
   if (!segments.length && !updates && !issueClosed) return undefined;
+  const noun = requestNoun(snapshotForge(snapshot, defaultForge));
   const firstStatus = segments.findIndex((segment) => !segment.essential || !segment.url);
   const referenceCount = firstStatus < 0 ? segments.length : Math.max(1, firstStatus);
   const pending =
@@ -38,7 +42,7 @@ export function statusPill(
       .filter(Boolean)
       .join(' · '),
     tone: pillTone(tones),
-    title: 'PR/MR status',
+    title: `${noun} status`,
     rows: [
       ...segments.map((segment, index) => ({
         id: `segment-${index}`,
@@ -56,7 +60,7 @@ export function statusPill(
       })),
       {
         id: 'details',
-        label: 'Show PR/MR status',
+        label: `Show ${noun} status`,
         icon: 'status',
         run: actions.status,
       },

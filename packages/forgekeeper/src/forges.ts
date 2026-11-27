@@ -2,6 +2,7 @@ import type { Exec } from './exec';
 import type { Forge, ForgeKind, ForgeTraits, ReviewRef, ReviewRequest } from './forge';
 import {
   resolveProjects,
+  resolveRemoteProjects,
   resolveRepository,
   type RemoteProject,
   type RepositoryLookup,
@@ -13,6 +14,8 @@ const registry = { gitlab: gitlabTraits, github: githubTraits };
 
 export const kinds = Object.keys(registry) as ForgeKind[];
 
+export type ForgeScope = ForgeKind | 'mixed';
+
 // The traits of one forge.
 export const traits = <Kind extends ForgeKind>(kind: Kind) => registry[kind];
 
@@ -23,6 +26,65 @@ export const traitsOf = (request: Pick<ReviewRequest, 'forge'>): ForgeTraits =>
 
 // The request's number as its forge writes it, such as `!45` or `#7`.
 export const reference = (request: ReviewRequest) => traitsOf(request).reference(request.iid);
+
+export function sharedForge(forges: Iterable<ForgeKind | undefined>): ForgeKind | undefined {
+  const unique = new Set<ForgeKind>();
+  for (const forge of forges) {
+    if (forge) unique.add(forge);
+  }
+  return unique.size === 1 ? [...unique][0] : undefined;
+}
+
+export function forgeScope(forges: Iterable<ForgeKind | undefined>): ForgeScope | undefined {
+  const unique = new Set<ForgeKind>();
+  for (const forge of forges) {
+    if (forge) unique.add(forge);
+  }
+  if (unique.size === 0) return undefined;
+  if (unique.size === 1) return [...unique][0];
+  return 'mixed';
+}
+
+export function requestNoun(forge?: ForgeScope): string {
+  switch (forge) {
+    case 'gitlab':
+    case 'github':
+      return registry[forge].noun;
+    default:
+      return 'PR/MR';
+  }
+}
+
+export function requestPlural(forge?: ForgeScope): string {
+  switch (forge) {
+    case 'gitlab':
+    case 'github':
+      return `${registry[forge].noun}s`;
+    default:
+      return 'PRs/MRs';
+  }
+}
+
+export function aRequestNoun(forge?: ForgeScope): string {
+  switch (forge) {
+    case 'gitlab':
+      return 'an MR';
+    case 'github':
+      return 'a PR';
+    default:
+      return 'a PR/MR';
+  }
+}
+
+export function requestFullNoun(forge?: ForgeScope): string {
+  switch (forge) {
+    case 'gitlab':
+    case 'github':
+      return registry[forge].fullNoun;
+    default:
+      return 'PR/MR';
+  }
+}
 
 // The PR/MR a web URL names on any forge.
 export function parseUrl(url: string): ReviewRef | undefined {
@@ -66,6 +128,7 @@ export interface ForgeCatalog {
   forHost(host: string, directory: string): Forge | undefined;
   projects(directory: string, kind: ForgeKind): Promise<RemoteProject[]>;
   repository(directory: string): Promise<RepositoryLookup>;
+  detectForge?(directory: string): Promise<ForgeKind | undefined>;
 }
 
 // Selects and creates forge adapters for a checkout. Adapters are created per
@@ -99,5 +162,14 @@ export class Forges implements ForgeCatalog {
 
   repository(directory: string): Promise<RepositoryLookup> {
     return resolveRepository(this.run, directory, (host) => this.kind(host) !== undefined);
+  }
+
+  async detectForge(directory: string): Promise<ForgeKind | undefined> {
+    const entries = await resolveRemoteProjects(this.run, directory);
+    if (!entries?.length) return undefined;
+    const origin = entries.find((entry) => entry.remote === 'origin');
+    const originForge = origin ? this.kind(origin.project.host) : undefined;
+    if (originForge) return originForge;
+    return sharedForge(entries.map((entry) => this.kind(entry.project.host)));
   }
 }

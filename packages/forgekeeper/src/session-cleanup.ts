@@ -6,7 +6,14 @@ import type {
   RequestStateSnapshot,
   ReviewRef,
 } from './forge';
-import { parseReference, traits, type ForgeCatalog } from './forges';
+import {
+  forgeScope,
+  parseReference,
+  requestNoun,
+  requestPlural,
+  traits,
+  type ForgeCatalog,
+} from './forges';
 import { CONCURRENCY, mapLimit } from './limit';
 import {
   freshPresence,
@@ -124,9 +131,12 @@ export function allRequestsMerged(snapshot: Snapshot): boolean {
 export function cleanupReadyOf(snapshot: Snapshot): CleanupReady | undefined {
   if (snapshot.lookup?.cleanupReady) return snapshot.lookup.cleanupReady;
   if (!allRequestsMerged(snapshot) || snapshot.lookup?.kind !== 'found') return undefined;
+  const requests = snapshot.lookup.requests;
+  const forge = forgeScope(requests.map((request) => request.forge));
   return {
     kind: 'merged-requests',
-    reason: snapshot.lookup.requests.length === 1 ? 'PR/MR merged' : 'All PRs/MRs merged',
+    reason:
+      requests.length === 1 ? `${requestNoun(forge)} merged` : `All ${requestPlural(forge)} merged`,
   };
 }
 
@@ -147,11 +157,13 @@ export function worktreeLabel(directory: string): string {
 export function formatCleanupProgress(
   progress: CleanupProgressEvent | undefined,
   mode: 'scan' | 'cleanup' = 'scan',
+  defaultForge?: ForgeKind,
 ): string {
+  const plural = requestPlural(defaultForge);
   if (!progress) {
     return mode === 'cleanup'
       ? 'Verifying and archiving sessions…'
-      : 'Checking sessions for merged PRs/MRs and closed issues…';
+      : `Checking sessions for merged ${plural} and closed issues…`;
   }
   const counts = progress.total > 0 ? ` (${progress.checked}/${progress.total})` : '';
   switch (progress.phase) {
@@ -160,7 +172,7 @@ export function formatCleanupProgress(
       return `Scanning project sessions…${scanned}`;
     }
     case 'targets':
-      return `Checking PRs/MRs and tracked issues…${counts}`;
+      return `Checking ${plural} and tracked issues…${counts}`;
     case 'verifying':
       return `Verifying target status before archiving…${counts}`;
     case 'archiving':
@@ -437,14 +449,16 @@ async function evaluateTargets(
         });
       }
       if (hadError) {
+        const forge = forgeScope(entry.mergeRequests.map((item) => item.ref.forge));
         evaluations.set(entry.sessionID, {
           status: 'error',
-          reason: 'Could not verify PR/MR status',
+          reason: `Could not verify ${requestNoun(forge)} status`,
         });
       } else if (unmerged) {
+        const forge = forgeScope(entry.mergeRequests.map((item) => item.ref.forge));
         evaluations.set(entry.sessionID, {
           status: 'ineligible',
-          reason: 'Not all PRs/MRs are merged',
+          reason: `Not all ${requestPlural(forge)} are merged`,
         });
       } else {
         evaluations.set(entry.sessionID, {
@@ -513,6 +527,7 @@ export interface CleanupDependencies {
   projectID?: string;
   directory: string;
   forges: ForgeCatalog;
+  defaultForge?: ForgeKind;
   listSessions: () => Promise<ListedSession[]>;
   getSession: (sessionID: string) => Promise<ListedSession | undefined>;
   archiveSession: (sessionID: string) => Promise<ArchiveOutcome | void>;
@@ -805,10 +820,11 @@ export async function cleanupSessions(
     const raw = await resolveSessionTargets(session, loadedSessions, targetMap, deps.storedTargets);
     const { mergeRequests, issues, unknown } = splitCleanupTargets(raw);
     if (mergeRequests.length === 0 && (unknown > 0 || issues.length === 0)) {
+      const forge = forgeScope(issues.map((item) => item.ref.forge)) ?? deps.defaultForge;
       return {
         kind: 'failed' as const,
         sessionID,
-        reason: 'Session has no tracked PR/MR or issue targets',
+        reason: `Session has no tracked ${requestNoun(forge)} or issue targets`,
       };
     }
     return {
@@ -938,9 +954,13 @@ export async function resolveLookupCleanupReady(
     }
     const complete = !lookup.failed?.length && lookup.requests.length === mergeRequests.length;
     if (complete && lookup.requests.every((request) => request.state === 'merged')) {
+      const forge = forgeScope(lookup.requests.map((request) => request.forge));
       const cleanupReady: CleanupReady = {
         kind: 'merged-requests',
-        reason: lookup.requests.length === 1 ? 'PR/MR merged' : 'All PRs/MRs merged',
+        reason:
+          lookup.requests.length === 1
+            ? `${requestNoun(forge)} merged`
+            : `All ${requestPlural(forge)} merged`,
       };
       return {
         lookup: { ...lookup, cleanupReady },

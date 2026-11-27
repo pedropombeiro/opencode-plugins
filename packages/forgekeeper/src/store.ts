@@ -1,4 +1,5 @@
-import { ForgeError, type ErrorKind, type ReviewRequest } from './forge';
+import { ForgeError, type ErrorKind, type ForgeKind, type ReviewRequest } from './forge';
+import { forgeScope, parseUrl, type ForgeScope } from './forges';
 import type { Repository } from './git';
 
 export interface CleanupReady {
@@ -9,7 +10,13 @@ export interface CleanupReady {
 // `explicitTarget` on `none` marks explicit PR/MR targets that couldn't be
 // resolved, unlike targets that aren't PRs/MRs, such as issues.
 export type Lookup =
-  | { kind: 'none'; reason: string; explicitTarget?: boolean; cleanupReady?: CleanupReady }
+  | {
+      kind: 'none';
+      reason: string;
+      explicitTarget?: boolean;
+      cleanupReady?: CleanupReady;
+      forge?: ForgeScope;
+    }
   // `repository` is set for branch lookups. A session target lookup sets
   // `sessionTarget` instead, a display label for where the PR/MR came from,
   // because it ignores the checked-out branch.
@@ -24,13 +31,17 @@ export type Lookup =
       requests: ReviewRequest[];
       failed?: { url: string; reason: string }[];
       cleanupReady?: CleanupReady;
+      forge?: ForgeScope;
     };
 
 // Thrown when no explicit PR/MR target could be looked up. The failure
 // concerns PRs/MRs that the session is known to work on, unlike a failed
 // branch lookup, which may concern no PR/MR at all.
 export class TargetLookupError extends Error {
-  constructor(readonly cause: unknown) {
+  constructor(
+    readonly cause: unknown,
+    readonly forge?: ForgeScope,
+  ) {
     super(cause instanceof Error ? cause.message : String(cause));
   }
 }
@@ -47,7 +58,33 @@ export interface Snapshot {
   fetchedAt?: number;
   error?: { kind: ErrorKind; message: string; at: number };
   targeted?: boolean;
+  forge?: ForgeScope;
   loading: boolean;
+}
+
+export function snapshotForge(
+  snapshot: Snapshot | undefined,
+  fallback?: ForgeKind,
+): ForgeKind | undefined {
+  const lookup = snapshot?.lookup;
+  const scope =
+    snapshot?.forge ??
+    lookup?.forge ??
+    (lookup?.kind === 'found'
+      ? forgeScope([
+          ...lookup.requests.map((request) => request.forge),
+          ...(lookup.failed ?? []).map((failure) => parseUrl(failure.url)?.forge),
+        ])
+      : undefined);
+  switch (scope) {
+    case 'gitlab':
+    case 'github':
+      return scope;
+    case 'mixed':
+      return undefined;
+    default:
+      return fallback;
+  }
 }
 
 export interface StoreOptions {
@@ -170,6 +207,7 @@ export function createStatusStore(options: StoreOptions) {
             fetchedAt: now(),
             error: undefined,
             targeted: lookup.explicitTarget === true ? true : undefined,
+            forge: lookup.forge,
             loading: false,
           });
           // A failing callback must not leave the load in flight forever.
@@ -195,7 +233,7 @@ export function createStatusStore(options: StoreOptions) {
               message: cause instanceof Error ? cause.message : String(cause),
               at: now(),
             },
-            ...(target ? { targeted: true } : {}),
+            ...(target ? { targeted: true, forge: error.forge } : {}),
           });
         },
       )
@@ -257,10 +295,19 @@ export function createStatusStore(options: StoreOptions) {
     },
     // Records whether the key has explicit PR/MR targets, such as after a
     // target change, before the next lookup confirms it.
-    setTargeted(key: string, targeted: boolean) {
+    setTargeted(key: string, targeted: boolean, forge?: ForgeScope) {
       const value = entries.get(key);
-      if (!value || disposed || (value.snapshot.targeted === true) === targeted) return;
-      update(key, value, { targeted: targeted ? true : undefined });
+      const nextForge = targeted ? forge : undefined;
+      if (
+        !value ||
+        disposed ||
+        ((value.snapshot.targeted === true) === targeted && value.snapshot.forge === nextForge)
+      )
+        return;
+      update(key, value, {
+        targeted: targeted ? true : undefined,
+        forge: nextForge,
+      });
     },
     dispose() {
       disposed = true;
