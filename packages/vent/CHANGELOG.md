@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-vent-0.1.1...opencode-vent-0.2.0) (2026-11-27)
+
+
+### Features
+
+* **vent:** track assignment and status during resolution ([f80ade4](https://github.com/pedropombeiro/opencode-plugins/commit/f80ade47f6f22df2573ea7ede81eb9355b435e70))
+
 ## [0.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-vent-0.1.0...opencode-vent-0.1.1) (2026-11-27)
 
 
