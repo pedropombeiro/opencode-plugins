@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import type { Plugin } from '@opencode/plugin';
-import { feedbackRef } from './commands';
 import type { FeedbackTarget } from './forge';
 import type {
   CommentDetail,
@@ -2191,7 +2190,7 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
-  test('offers the status commands only with status on', async () => {
+  test('registers forge-detach and removes or clears session targets', async () => {
     const off = await harness();
     expect(off.commandNames()).toEqual(['forge-detach']);
     const first = 'https://gitlab.com/group/project/-/merge_requests/1';
@@ -2204,103 +2203,7 @@ describe('PR/MR status lifecycle', () => {
     expect(off.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     await off.cleanup();
     const { app } = await watchedFeedback();
-    expect(app.commandNames()).toEqual([
-      'forge-detach',
-      'forge-report',
-      'forge-inbox',
-      'forge-prune',
-    ]);
-    await app.cleanup();
-  });
-
-  test('shows the PR/MR status in a tool-free turn that keeps it out of the session', async () => {
-    const { app, forge } = await watchedFeedback();
-    forge.set('group/a', '1', {
-      title: 'Add the widget',
-      draft: false,
-      unresolvedThreads: 0,
-      threadsComplete: true,
-      awaitingReviewers: [],
-      reviewersComplete: true,
-    });
-    const [queued] = await app.runCommand('forge-report');
-    expect(queued).toMatchObject({
-      sessionID: 'one',
-      resume: true,
-      delivery: 'queue',
-      metadata: { forgekeeper: 'review-summary' },
-    });
-    expect(queued.id).toStartWith('msg_forgekeeper_summary_');
-    expect(queued.text).toStartWith('PR/MR status');
-    expect(queued.text).not.toContain(projectA);
-
-    const relay = await app.request();
-    expect(relay.tools).toEqual({});
-    expect(relay.system[0].text).toContain('report from Forgekeeper');
-    const text = relay.messages[0].content[0].text;
-    expect(text).toContain('<forgekeeper-report>');
-    expect(text).toContain(`- ${projectA}`);
-    expect(await app.toolCall()).toContain('Tools are disabled');
-
-    app.prompt();
-    expect(Object.keys((await app.request()).tools)).toEqual(['read', 'bash']);
-    await app.cleanup();
-  });
-
-  test('bounds oversized command reports and gives relay turns their own output budget', async () => {
-    const { app, forge } = await watchedFeedback();
-    forge.set('group/a', '1', { title: 'x'.repeat(10_000), awaitingReviewers: [] });
-    await app.runCommand('forge-report');
-    const relay = await app.request();
-    const text = relay.messages[0].content[0].text;
-    expect(text).toContain('Report shortened because of its size.');
-    expect(text.length).toBeLessThan(6_500);
-    expect(relay.options.maxTokens).toBeGreaterThanOrEqual(
-      new TextEncoder().encode(text).length + 512,
-    );
-    expect(relay.tools).toEqual({});
-    app.prompt();
-    forge.set('group/a', '1', { title: 'x'.repeat(3_000), awaitingReviewers: [] });
-    await app.runCommand('forge-report');
-    const complete = await app.request();
-    expect(complete.messages[0].content[0].text).toContain('x'.repeat(3_000));
-    expect(complete.options.maxTokens).toBeGreaterThan(3_000);
-    await app.cleanup();
-  });
-
-  test('lists, acknowledges, and summarizes review updates by stable ID', async () => {
-    const { app } = await watchedFeedback({
-      pluginOptions: { delivery: { reviews: 'inbox' } },
-    });
-    await app.refresh();
-    await settle();
-    const [item] = (await app.feedback()).items;
-    expect(item).toBeDefined();
-
-    const reportOf = async (args: string) => {
-      const before = app.passive.length;
-      await app.runCommand('forge-inbox', args);
-      if (app.passive.length === before) return undefined;
-      const relay = await app.request();
-      app.prompt();
-      return relay.messages[0].content[0].text as string;
-    };
-    const listed = await reportOf('');
-    expect(listed).toContain(`1. ${item.title}`);
-    expect(listed).toContain(`- ${projectA}#note_7`);
-    expect(await reportOf('summarize 0000000000000000')).toContain('No pending update with ID');
-    expect(await reportOf('frobnicate')).toContain('did not understand "frobnicate"');
-
-    // Summarizing starts the summary's own turn instead of a report.
-    await app.runCommand('forge-inbox', `summarize ${feedbackRef(item.id)}`);
-    expect(app.passive.at(-1)!.text).toContain('Forgekeeper summarizes this review feedback');
-    await app.request();
-    app.prompt();
-
-    const acknowledged = await reportOf(`ack ${feedbackRef(item.id)}`);
-    expect(acknowledged).toContain(`Acknowledged: ${item.title}`);
-    expect(acknowledged).toContain('No pending review updates for this session.');
-    expect((await app.feedback()).items).toEqual([]);
+    expect(app.commandNames()).toEqual(['forge-detach']);
     await app.cleanup();
   });
 
@@ -8020,7 +7923,7 @@ describe('reviewer approval notifications and automation', () => {
     }
   });
 
-  test('prunes inbox items when session.archived event fires and supports /forge-prune command', async () => {
+  test('prunes inbox items when session.archived event fires', async () => {
     const forge = new StatusForge();
     const mr1 = 'https://gitlab.com/group/a/-/merge_requests/1';
     forge.set('group/a', '1', { state: 'merged' });
@@ -8058,37 +7961,6 @@ describe('reviewer approval notifications and automation', () => {
       app.emit({ type: 'session.archived', data: { sessionID: 'two' } });
       await settle();
       expect((await app.feedback()).items).toEqual([]);
-
-      // `/forge-prune` lists eligible session `one` in a relay turn:
-      await app.runCommand('forge-prune', '', 'two');
-      const listRelay = await app.request('two');
-      const listText = listRelay.messages[0].content[0].text;
-      expect(listText).toContain('[!1] Review changes');
-      expect(listText).toContain('!1 merged');
-
-      // `/forge-prune all` archives `one` and relays the summary to `two`:
-      app.prompt('two');
-      await app.runCommand('forge-prune', 'all', 'two');
-      const cleanRelay = await app.request('two');
-      expect(cleanRelay.messages[0].content[0].text).toContain('Archived: [!1] Review changes');
-      expect(
-        (sessions.get('one') as { time?: { archived?: number } })?.time?.archived,
-      ).toBeDefined();
-
-      // Self-archiving with `/forge-prune all` emits a notice instead of relaying into the archived session:
-      await app.set({ target: mr1 }, 'two');
-      await settle();
-      const syntheticBefore = app.synthetic.length;
-      await app.runCommand('forge-prune', 'all', 'two');
-      await settle();
-      expect(
-        (sessions.get('two') as { time?: { archived?: number } })?.time?.archived,
-      ).toBeDefined();
-      expect(app.synthetic.length).toBe(syntheticBefore);
-      expect(app.notices()).toContainEqual({
-        message: 'Archived: [!1] Other session',
-        variant: 'info',
-      });
     } finally {
       await app.cleanup();
     }

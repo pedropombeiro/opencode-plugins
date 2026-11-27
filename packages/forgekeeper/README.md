@@ -80,19 +80,6 @@ Conflicts appear in both the composer pill and the status panel:
 
 ![OpenCode Desktop showing a PR with merge conflicts in the composer pill and Forgekeeper status panel.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/desktop-conflicts.png)
 
-The OpenCode web app loads neither the terminal nor the desktop part, but it offers three
-commands that answer in the conversation:
-
-| Command         | Action                                                                                                              |
-| --------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `/forge-report` | Show the PR/MR status of the session.                                                                               |
-| `/forge-inbox`  | List the session's pending updates. `ack <id>` or `ack all` acknowledges them, and `summarize <id>` summarizes one. |
-| `/forge-prune`  | List or archive (`<id>` or `all`) idle sessions whose PRs/MRs have merged or tracked issues have closed.            |
-
-Each answer is a short tool-free model turn that shows a report written from forge data.
-Those apps don't display the text of messages that plugins add, so the model shows it.
-The report stays out of the session's history.
-
 Status normally refreshes every 2 minutes, or every 30 seconds during automated reviews and
 while new review feedback settles.
 Status shows only PR/MRs set as session targets. Forgekeeper does not infer targets from

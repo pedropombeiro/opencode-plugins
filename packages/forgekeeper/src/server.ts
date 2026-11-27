@@ -1,23 +1,5 @@
 import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
-import {
-  CLEANUP_COMMAND,
-  CLEANUP_TITLE,
-  cleanupRef,
-  cleanupReport,
-  FEEDBACK_COMMAND,
-  FEEDBACK_TITLE,
-  feedbackReport,
-  feedbackRef,
-  invalidCleanupReport,
-  invalidFeedbackReport,
-  parseCleanupAction,
-  parseFeedbackAction,
-  STATUS_COMMAND,
-  STATUS_TITLE,
-  statusReport,
-} from './commands';
-import { sessionItems } from './feedback-inbox';
 import type { TitleLookups } from './lookups';
 import { createKeyedQueue } from './keyed-queue';
 import { statusOptions } from './options';
@@ -465,101 +447,6 @@ export async function setupServer(
     }
   });
 
-  // Each answer is a report that a tool-free turn shows, or undefined when
-  // the command started a turn of its own, such as a summary.
-  async function feedbackCommand(
-    status: Status,
-    sessionID: string,
-    input: string,
-  ): Promise<string | undefined> {
-    const action = parseFeedbackAction(input);
-    if (action.kind === 'invalid') return invalidFeedbackReport(action.input);
-    const state = await status.inbox.list();
-    if (action.kind === 'list') return feedbackReport(state, sessionID);
-    const items = sessionItems(state, sessionID);
-    const chosen =
-      action.which === 'all'
-        ? items
-        : items.filter((item) => feedbackRef(item.id) === action.which);
-    if (action.which !== 'all' && chosen.length > 1)
-      return 'Ambiguous update ID. Use the feedback panel.';
-    if (chosen.length === 0)
-      return feedbackReport(
-        state,
-        sessionID,
-        action.which === 'all' ? undefined : `No pending update with ID ${action.which}.`,
-      );
-    if (action.kind === 'summarize') {
-      await status.summarize(chosen[0].id);
-      return undefined;
-    }
-    let next = state;
-    for (const item of chosen) next = await status.inbox.acknowledge(item.id);
-    const note =
-      chosen.length === 1
-        ? `Acknowledged: ${chosen[0].title}`
-        : `Acknowledged ${chosen.length} updates.`;
-    return feedbackReport(next, sessionID, note);
-  }
-
-  async function cleanupCommand(
-    status: Status,
-    sessionID: string,
-    input: string,
-  ): Promise<{ report?: string; notice?: string }> {
-    const action = parseCleanupAction(input);
-    if (action.kind === 'invalid') return { report: invalidCleanupReport(action.input) };
-    const scan = await status.cleanupCandidates();
-    if (action.kind === 'list') return { report: cleanupReport(scan) };
-    const chosen =
-      action.which === 'all'
-        ? scan.candidates
-        : scan.candidates.filter((candidate) => cleanupRef(candidate.sessionID) === action.which);
-    if (action.which !== 'all' && chosen.length > 1)
-      return { report: 'Ambiguous session ID. Use /forge-cleanup.' };
-    if (chosen.length === 0) {
-      return {
-        report: cleanupReport(
-          scan,
-          action.which === 'all' ? undefined : `No eligible session with ID ${action.which}.`,
-        ),
-      };
-    }
-    const result = await status.cleanupSessions(chosen.map((candidate) => candidate.sessionID));
-    const archivedSet = new Set(result.archived);
-    const alreadySet = new Set(result.alreadyArchived);
-    const doneSet = new Set([...result.archived, ...result.alreadyArchived]);
-    const archivedTitles = chosen
-      .filter((candidate) => archivedSet.has(candidate.sessionID))
-      .map((candidate) => candidate.title);
-    const alreadyTitles = chosen
-      .filter((candidate) => alreadySet.has(candidate.sessionID))
-      .map((candidate) => candidate.title);
-    const summaryParts: string[] = [];
-    if (archivedTitles.length === 1) summaryParts.push(`Archived: ${archivedTitles[0]}`);
-    else if (archivedTitles.length > 1)
-      summaryParts.push(`Archived ${archivedTitles.length} sessions.`);
-    if (alreadyTitles.length === 1) summaryParts.push(`Already archived: ${alreadyTitles[0]}`);
-    else if (alreadyTitles.length > 1)
-      summaryParts.push(`${alreadyTitles.length} sessions were already archived.`);
-    if (result.failed.length) {
-      summaryParts.push(
-        ...result.failed.map(
-          (failure) => `Could not archive ${failure.sessionID}: ${failure.reason}`,
-        ),
-      );
-    }
-    const note = summaryParts.join('\n') || 'No sessions were archived.';
-    if (doneSet.has(sessionID)) {
-      return { notice: note };
-    }
-    const remaining = {
-      ...scan,
-      candidates: scan.candidates.filter((candidate) => !doneSet.has(candidate.sessionID)),
-    };
-    return { report: cleanupReport(remaining, note) };
-  }
-
   const commands = await ctx.command.transform((editor) => {
     editor.add({
       name: 'forge-detach',
@@ -571,48 +458,6 @@ export async function setupServer(
           urls.length ? { operation: 'remove', targets: urls } : { target: 'none' },
         );
         await rpc.events.emit('notice', { sessionID, variant: 'info', message });
-      },
-    });
-    const status = watcher;
-    if (!status) return;
-    editor.add({
-      name: STATUS_COMMAND,
-      description: 'Show the PR/MR status of this session in the conversation',
-      execute: async ({ sessionID }) =>
-        status.relay(sessionID, STATUS_TITLE, statusReport(await status.refresh(sessionID))),
-    });
-    editor.add({
-      name: FEEDBACK_COMMAND,
-      description: 'List, acknowledge, or summarize review updates in the conversation',
-      execute: async ({ sessionID, prompt }) => {
-        let report: string | undefined;
-        try {
-          report = await feedbackCommand(status, sessionID, prompt.text ?? '');
-        } catch (error) {
-          report = `Forgekeeper could not complete /${FEEDBACK_COMMAND}: ${error instanceof Error ? error.message : String(error)}`;
-        }
-        if (report) await status.relay(sessionID, FEEDBACK_TITLE, report);
-      },
-    });
-    editor.add({
-      name: CLEANUP_COMMAND,
-      description:
-        'List or archive idle sessions whose PRs/MRs have merged or tracked issues have closed',
-      execute: async ({ sessionID, prompt }) => {
-        try {
-          const outcome = await cleanupCommand(status, sessionID, prompt.text ?? '');
-          if (outcome.notice) {
-            await rpc.events.emit('notice', { variant: 'info', message: outcome.notice });
-          } else if (outcome.report) {
-            await status.relay(sessionID, CLEANUP_TITLE, outcome.report);
-          }
-        } catch (error) {
-          await status.relay(
-            sessionID,
-            CLEANUP_TITLE,
-            `Forgekeeper could not complete /${CLEANUP_COMMAND}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
       },
     });
   });
