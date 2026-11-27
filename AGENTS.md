@@ -12,7 +12,10 @@ All tasks are run via mise:
 - `mise run lint` — lint with ESLint
 - `mise run lint:fix` — lint and auto-fix
 - `mise run format` — format with Prettier
-- `mise run install-local [--local-plugins] <package>` — build a plugin into `~/.config/opencode/plugins/<package>/`, or into `~/.config/opencode/local-plugins/<package>/` when `opencode.json(c)` configures it with `options` (or `--local-plugins` is passed) so auto-discovery doesn't shadow its options
+- `mise run install-local [--local-plugins] <package>` — build a plugin into
+  `~/.config/opencode/plugins/<package>/`, or into `~/.config/opencode/local-plugins/<package>/`
+  when `opencode.json(c)` configures it with `options` (or `--local-plugins` is passed) so
+  auto-discovery doesn't shadow its options
 
 There are no npm scripts. Do not add a `"scripts"` key to any `package.json`.
 
@@ -38,8 +41,17 @@ standalone `--` followed by a space disables task-aware completion.
 - TypeScript strict mode, ESNext target
 - Single quotes, semicolons, 100-char line width, 2-space indent, trailing commas
 - No `console.log` — ESLint enforces `no-console: error`
-- No comments unless explicitly requested
+- Avoid redundant comments, but keep brief comments that explain non-obvious context (such as why a
+  `catch` block ignores an error)
 - Imports: use `import type` for type-only imports
+
+## Code rules
+
+- Avoid negated ternary conditions (`!cond ? a : b` or `x !== y ? a : b`); flip the condition and
+  swap the branches instead
+- Avoid nested ternary operators; extract a helper function or use `if`/`return` statements instead
+- Prefer `switch` statements over multiple `if`/`else if` branches when dispatching on a value or
+  discriminant
 
 ## Plugin API
 
@@ -82,8 +94,12 @@ Plugins target the OpenCode 2 plugin API (`@opencode/plugin`). See
 ## Adding a new plugin
 
 1. Copy `packages/_template/` to `packages/<name>/` and replace all `PLUGIN-NAME` placeholders
-2. Add the package to `release-please-config.json` and `.release-please-manifest.json`
+2. Add the package to `release-please-config.json` and `.release-please-manifest.json` (`"0.0.0"`)
 3. Add a publish job in `.github/workflows/release.yml`
+4. On the first release, npm Trusted Publishing (OIDC) cannot authenticate until the package exists
+   on npmjs.com. Stage the initial version locally (`npm stage publish --access public --tag latest`),
+   approve it with `npm stage approve <stage-id>`, and configure `pedropombeiro/opencode-plugins`
+   (`release.yml`) as a Trusted Publisher on `https://www.npmjs.com/package/<package-name>/access`.
 
 ## Testing
 
