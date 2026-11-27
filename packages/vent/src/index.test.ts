@@ -586,6 +586,9 @@ describe('resolve-vent skill registration', () => {
       '**github**: no `reopenLabels` are configured. Ask the user whether to reopen the closed item and add the new evidence (`vent` with `onClosedMatch: "reopen"` and `closedMatchUrl`, keeping its existing labels) or to file a new item that links the closed one (`onClosedMatch: "create"` and `closedMatchUrl`).',
     );
     expect(skill.content).toContain('`status::cannot-reproduce`');
+    expect(skill.content).toContain('**Assign the user.**');
+    expect(skill.content).toContain('glab issue update <issue-url> --assignee +<username>');
+    expect(skill.content).toContain('gh issue edit <issue-url> --add-assignee @me');
     expect(skill.content).toContain('glab api --hostname <host>');
     expect(skill.content).toContain('gh issue close <issue-url> --comment <text>');
     expect(skill.content).toContain('--reason duplicate --duplicate-of <primary>');
