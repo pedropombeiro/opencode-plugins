@@ -42,6 +42,7 @@ export interface StatusServiceOptions {
     ) => Promise<unknown>;
   };
   approvals?: { observe: (sessionID: string, requests: ReviewRequest[]) => Promise<unknown> };
+  onLookup?: (sessionID: string, lookup: Lookup) => Promise<unknown> | void;
   onWatchError?: (error: unknown) => void;
   interval?: number;
   activeInterval?: number;
@@ -168,6 +169,13 @@ export function createStatusService(options: StatusServiceOptions) {
   }
 
   function onLoad(key: string, previous: Lookup | undefined, next: Lookup) {
+    if (owns(key) && options.onLookup) {
+      track(
+        Promise.resolve()
+          .then(() => options.onLookup?.(key, next))
+          .catch(report),
+      );
+    }
     if (!feedbackPaused && owns(key) && options.automated) {
       track(
         options.automated

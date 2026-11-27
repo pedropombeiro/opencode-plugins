@@ -472,6 +472,19 @@ export class ForgeError extends Error {
   }
 }
 
+export interface RequestStateSnapshot {
+  iid: string;
+  title: string;
+  url: string;
+  state: string;
+  targetProject: string;
+}
+
+export interface IssueStateSnapshot {
+  iid: string;
+  open: boolean;
+}
+
 export interface Forge {
   readonly traits: ForgeTraits;
   // Looks up one PR/MR by number and returns the match from the first project
@@ -489,6 +502,16 @@ export interface Forge {
   sourceBranch(ref: ReviewRef): Promise<string | undefined>;
   // The issue's fields, or undefined when it doesn't exist or can't be seen.
   issue?(ref: ReviewRef): Promise<IssueSnapshot | undefined>;
+  // Lightweight batched PR/MR state lookup for session cleanup.
+  requestStates?(
+    project: RemoteProject,
+    numbers: readonly string[],
+  ): Promise<ReadonlyMap<string, RequestStateSnapshot>>;
+  // Lightweight batched issue state lookup for session cleanup.
+  issueStates?(
+    project: RemoteProject,
+    numbers: readonly string[],
+  ): Promise<ReadonlyMap<string, IssueStateSnapshot>>;
   // Marks a draft PR/MR ready for review.
   markReady?(
     ref: ReviewRef,

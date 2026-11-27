@@ -41,3 +41,22 @@ test('shows notices without a session and opens no tab', () => {
   expect(opened).toEqual([]);
   expect(toasts).toEqual([{ message: 'Could not check PR/MR review feedback', variant: 'error' }]);
 });
+
+test('does not reopen a tab for info notices when openTab is false', () => {
+  const { show, opened, toasts } = harness();
+  show({
+    sessionID: 'ses_review',
+    title: 'PR/MR merged — ready to archive',
+    message: 'Run /forge-cleanup to archive this session and close its tab.',
+    variant: 'info',
+    openTab: false,
+  });
+  expect(opened).toEqual([]);
+  expect(toasts).toEqual([
+    {
+      title: 'PR/MR merged — ready to archive',
+      message: 'Run /forge-cleanup to archive this session and close its tab.',
+      variant: 'info',
+    },
+  ]);
+});

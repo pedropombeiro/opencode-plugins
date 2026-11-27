@@ -424,6 +424,20 @@ export function createLocalEnvironment(input: {
           : []),
       ];
     },
+    async archive(record) {
+      const sessionID = localExecution(record).sessionID;
+      if (!sessionID) return undefined;
+      const updated = (await ctx.session.update({ sessionID, archived: true })) as
+        { time?: { archived?: number } } | undefined;
+      if (updated?.time?.archived !== undefined) {
+        return { sessionID };
+      }
+      const verified = await ctx.session.get({ sessionID }).catch(() => undefined);
+      if (verified?.time?.archived !== undefined) {
+        return { sessionID };
+      }
+      return { sessionID, needsClientArchive: true };
+    },
     async sweep() {
       if (input.closing() || !(ctx.location as { project?: { id?: string } }).project?.id)
         return [];

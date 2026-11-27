@@ -1,10 +1,15 @@
 import { ForgeError, type ErrorKind, type ReviewRequest } from './forge';
 import type { Repository } from './git';
 
+export interface CleanupReady {
+  kind: 'merged-requests' | 'closed-issues';
+  reason: string;
+}
+
 // `explicitTarget` on `none` marks explicit PR/MR targets that couldn't be
 // resolved, unlike targets that aren't PRs/MRs, such as issues.
 export type Lookup =
-  | { kind: 'none'; reason: string; explicitTarget?: boolean }
+  | { kind: 'none'; reason: string; explicitTarget?: boolean; cleanupReady?: CleanupReady }
   // `repository` is set for branch lookups. A session target lookup sets
   // `sessionTarget` instead, a display label for where the PR/MR came from,
   // because it ignores the checked-out branch.
@@ -18,6 +23,7 @@ export type Lookup =
       explicitTarget?: boolean;
       requests: ReviewRequest[];
       failed?: { url: string; reason: string }[];
+      cleanupReady?: CleanupReady;
     };
 
 // Thrown when no explicit PR/MR target could be looked up. The failure

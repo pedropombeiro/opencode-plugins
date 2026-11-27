@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { ForgeError } from '../../forge';
 import { checks, ghGraphQL, GitHubForge, type GraphQL } from './adapter';
 import { classifyTargets } from '../../target';
 import { detailsMessage, responsiveFooterSegments } from '../../format';
@@ -1060,4 +1061,94 @@ test('markReady runs beforeMutate after lookup and aborts before sending the mut
   releaseLookup();
   await expect(pending).rejects.toThrow('cancelled');
   expect(mutations).toEqual([]);
+});
+
+test('requestStates and issueStates batch GitHub PR and issue numbers', async () => {
+  const seenVariables: Array<Record<string, string | number>> = [];
+  const forge = new GitHubForge(async (_host, queryText, variables) => {
+    seenVariables.push(variables);
+    if (queryText.includes('pullRequest')) {
+      return {
+        repository: {
+          pr0: {
+            number: 1,
+            title: 'PR 1',
+            url: 'https://github.com/owner/repo/pull/1',
+            state: 'MERGED',
+            baseRepository: { nameWithOwner: 'owner/repo' },
+          },
+          pr1: null,
+          pr2: { number: 3, title: 'Missing state', url: 'https://github.com/owner/repo/pull/3' },
+        },
+      };
+    }
+    return {
+      repository: {
+        // Issue #10 was transferred to another repo with number 11 and closed; must NOT overwrite #11!
+        i0: { number: 11, state: 'CLOSED', url: 'https://github.com/owner/other/issues/11' },
+        i1: { number: 11, state: 'OPEN', url: 'https://github.com/owner/repo/issues/11' },
+      },
+    };
+  });
+  const prs = await forge.requestStates({ host: 'github.com', path: 'owner/repo' }, [
+    '1',
+    '2',
+    '3',
+  ]);
+  expect(prs.get('1')).toEqual({
+    iid: '1',
+    title: 'PR 1',
+    url: 'https://github.com/owner/repo/pull/1',
+    state: 'merged',
+    targetProject: 'owner/repo',
+  });
+  expect(prs.has('2')).toBe(false);
+  expect(prs.has('3')).toBe(false);
+
+  const issues = await forge.issueStates({ host: 'github.com', path: 'owner/repo' }, ['10', '11']);
+  expect(issues.has('10')).toBe(false);
+  expect(issues.get('11')).toEqual({ iid: '11', open: true });
+  expect(seenVariables[0]).toEqual({ owner: 'owner', repo: 'repo', n0: 1, n1: 2, n2: 3 });
+  expect(seenVariables[1]).toEqual({ owner: 'owner', repo: 'repo', n0: 10, n1: 11 });
+
+  // Splits chunks on request errors and preserves valid siblings when a single leaf fails,
+  // while auth/rate-limit errors reject without splitting:
+  const splitVars: Array<Record<string, string | number>> = [];
+  const splitForge = new GitHubForge(async (_host, _query, variables) => {
+    splitVars.push(variables);
+    if ('n1' in variables) throw new ForgeError('request', 'Forbidden on one item');
+    if (variables.n0 === 2) throw new ForgeError('request', 'Forbidden on PR 2');
+    const num = Number(variables.n0);
+    return {
+      repository: {
+        pr0: {
+          number: num,
+          title: `PR ${num}`,
+          url: `https://github.com/owner/repo/pull/${num}`,
+          state: 'MERGED',
+          baseRepository: { nameWithOwner: 'owner/repo' },
+        },
+      },
+    };
+  });
+  const splitPrs = await splitForge.requestStates({ host: 'github.com', path: 'owner/repo' }, [
+    '1',
+    '2',
+    '3',
+  ]);
+  expect(splitPrs.get('1')?.state).toBe('merged');
+  expect(splitPrs.has('2')).toBe(false);
+  expect(splitPrs.get('3')?.state).toBe('merged');
+
+  for (const kind of ['auth', 'rate-limit'] as const) {
+    let attempts = 0;
+    const failForge = new GitHubForge(async () => {
+      attempts++;
+      throw new ForgeError(kind, `${kind} failed`);
+    });
+    await expect(
+      failForge.issueStates({ host: 'github.com', path: 'owner/repo' }, ['1', '2']),
+    ).rejects.toMatchObject({ kind });
+    expect(attempts).toBe(1);
+  }
 });

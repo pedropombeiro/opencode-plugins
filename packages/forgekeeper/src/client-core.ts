@@ -17,7 +17,7 @@ export interface ForgeRpcClient {
   feedback: Call;
   events: {
     on: (
-      name: 'status' | 'notice' | 'feedbackChanged',
+      name: 'status' | 'notice' | 'feedbackChanged' | 'sessionsCleanedUp' | 'cleanupProgress',
       listener: (event: { data: unknown; location?: { directory?: string } }) => void,
     ) => () => void;
   };

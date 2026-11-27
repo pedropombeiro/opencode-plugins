@@ -800,10 +800,10 @@ describe('worktree automation', () => {
 
   function hostFixture(options: Options = {}) {
     status = options.status ?? '';
-    const sessions: Record<string, Record<string, unknown>> = {
+    const sessions: Record<string, Record<string, unknown>> = structuredClone({
       one: { id: 'one', agent: 'build', time: {}, location: { directory: '/repo' } },
       ...options.sessions,
-    };
+    });
     const storage: Record<string, unknown> = { ...options.storage };
     const request = {
       forge: 'gitlab',
@@ -835,6 +835,7 @@ describe('worktree automation', () => {
     const pages = options.pages ?? [[]];
     const listed: unknown[] = [];
     const synthetic: Array<Record<string, unknown>> = [];
+    const cleanedUp: string[][] = [];
     const ctx = {
       location: { directory: '/repo', project: { id: 'project' } },
       storage: {
@@ -850,6 +851,24 @@ describe('worktree automation', () => {
         get: async ({ sessionID }: { sessionID: string }) => {
           const session = sessions[sessionID];
           if (!session) throw new Error('Session not found');
+          return session;
+        },
+        update: async ({
+          sessionID,
+          archived,
+          metadata,
+        }: {
+          sessionID: string;
+          archived?: boolean;
+          metadata?: Record<string, unknown>;
+        }) => {
+          const session = sessions[sessionID] as
+            { time?: { archived?: number }; metadata?: Record<string, unknown> } | undefined;
+          if (!session) throw new Error('Session not found');
+          if (metadata !== undefined) session.metadata = metadata;
+          if (archived !== undefined) {
+            session.time = { ...session.time, ...(archived ? { archived: 1 } : {}) };
+          }
           return session;
         },
         context: async ({ sessionID }: { sessionID: string }) =>
@@ -897,6 +916,7 @@ describe('worktree automation', () => {
         missingSession: (error) => /not found/i.test(String(error)),
         redeliver: () => {},
         report: () => {},
+        sessionsCleanedUp: (ids) => cleanedUp.push(ids),
         signal: new AbortController().signal,
         ...(options.sleep ? { sleep: options.sleep } : {}),
       },
@@ -909,6 +929,7 @@ describe('worktree automation', () => {
       request,
       listed,
       synthetic,
+      cleanedUp,
       summaries,
       close: () => claims.close(),
     };
@@ -1568,7 +1589,11 @@ describe('worktree automation', () => {
     const completion = await deliver(1);
     expect(completion).toContain('Undercover flagged collect_stats at 0% coverage.');
     expect(completion).toContain('Uncommitted changes: M scripts/perf/gc/collect_gc_stats.rb');
+    // Completed linked session is automatically archived and broadcast via sessionsCleanedUp:
+    expect((f.sessions.linked as { time?: { archived?: number } })?.time?.archived).toBeDefined();
+    expect(f.cleanedUp).toEqual([['linked']]);
 
+    delete (f.sessions.linked as { time?: { archived?: number } }).time?.archived;
     await f.host.notify!(
       {
         ...linkedAttempt(jobItem),
@@ -1581,6 +1606,9 @@ describe('worktree automation', () => {
       description: 'Forgekeeper: failed-job investigation failed for !1',
       resume: true,
     });
+    // Failed linked session stays unarchived for inspection:
+    expect((f.sessions.linked as { time?: { archived?: number } })?.time?.archived).toBeUndefined();
+    expect(f.cleanedUp).toEqual([['linked']]);
 
     await f.host.notify!(
       {

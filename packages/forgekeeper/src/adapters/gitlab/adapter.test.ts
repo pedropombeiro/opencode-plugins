@@ -1077,4 +1077,78 @@ describe('glabGraphQL', () => {
       message: 'dial tcp: timeout',
     });
   });
+
+  test('requestStates and issueStates batch IIDs and split on request errors', async () => {
+    const mrQueries: Array<Record<string, string>> = [];
+    const mrForge = new GitLabForge(async (_host, _query, variables) => {
+      mrQueries.push(variables);
+      if ('i1' in variables) throw new ForgeError('request', 'Request timed out');
+      const iid = variables.i0;
+      if (iid === '3') throw new ForgeError('request', 'Single item failed');
+      return {
+        project: {
+          mergeRequests: {
+            nodes: [
+              {
+                iid,
+                title: `MR ${iid}`,
+                webUrl: `https://gitlab.com/g/p/-/merge_requests/${iid}`,
+                state: 'merged',
+                targetProject: { fullPath: 'g/p' },
+              },
+            ],
+          },
+        },
+      };
+    });
+    const mrStates = await mrForge.requestStates({ host: 'gitlab.com', path: 'g/p' }, [
+      '1',
+      '2',
+      '3',
+    ]);
+    expect(mrStates.get('1')).toEqual({
+      iid: '1',
+      title: 'MR 1',
+      url: 'https://gitlab.com/g/p/-/merge_requests/1',
+      state: 'merged',
+      targetProject: 'g/p',
+    });
+    expect(mrStates.get('2')?.state).toBe('merged');
+    // Leaf failure on '3' does not discard '1' or '2':
+    expect(mrStates.has('3')).toBe(false);
+
+    const issueForge = new GitLabForge(async () => ({
+      project: {
+        workItems: {
+          nodes: [
+            { iid: '10', state: 'CLOSED' },
+            { iid: '11', state: 'OPEN' },
+            { iid: '12', state: 'UNKNOWN' },
+            null,
+          ],
+        },
+      },
+    }));
+    const issueStates = await issueForge.issueStates({ host: 'gitlab.com', path: 'g/p' }, [
+      '10',
+      '11',
+      '12',
+    ]);
+    expect(issueStates.get('10')).toEqual({ iid: '10', open: false });
+    expect(issueStates.get('11')).toEqual({ iid: '11', open: true });
+    expect(issueStates.has('12')).toBe(false);
+
+    // Auth and rate-limit errors fail immediately without recursive splitting:
+    for (const kind of ['auth', 'rate-limit'] as const) {
+      let attempts = 0;
+      const failForge = new GitLabForge(async () => {
+        attempts++;
+        throw new ForgeError(kind, `${kind} failed`);
+      });
+      await expect(
+        failForge.requestStates({ host: 'gitlab.com', path: 'g/p' }, ['1', '2', '3']),
+      ).rejects.toMatchObject({ kind });
+      expect(attempts).toBe(1);
+    }
+  });
 });

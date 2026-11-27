@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import type { Plugin } from '@opencode/plugin';
-import { feedbackRef } from './commands';
 import type { FeedbackTarget } from './forge';
 import type {
   CommentDetail,
@@ -100,6 +99,7 @@ interface Options {
   // The instance's checkout. Defaults to /repo.
   directory?: string;
   activity?: number;
+  ignoreServerArchive?: boolean;
   permissionDecision?: (input: {
     sessionID: string;
     agent?: string;
@@ -420,12 +420,37 @@ async function harness(options: Options = {}) {
         nextRead = undefined;
         if (next instanceof Error) throw next;
         await next;
-        const session = sessions.get(sessionID);
-        return session ? { id: sessionID, ...session, model, time: {} } : undefined;
+        const session = sessions.get(sessionID) as
+          | {
+              title: string;
+              location: { directory: string };
+              parentID?: string;
+              fork?: { sessionID: string };
+              time?: { archived?: number; busy?: number; idle?: number; updated?: number };
+            }
+          | undefined;
+        return session ? { id: sessionID, time: {}, ...session, model } : undefined;
       },
-      update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
-        sessions.get(sessionID)!.title = title;
-        renames++;
+      update: async ({
+        sessionID,
+        title,
+        archived,
+      }: {
+        sessionID: string;
+        title?: string;
+        archived?: boolean;
+      }) => {
+        const session = sessions.get(sessionID)! as {
+          title: string;
+          time?: { archived?: number };
+        };
+        if (title !== undefined) {
+          session.title = title;
+          renames++;
+        }
+        if (archived !== undefined && !options.ignoreServerArchive) {
+          session.time = { ...session.time, archived: archived ? Date.now() : undefined };
+        }
       },
       hook: async (name: string, callback: Hook) => {
         if (name === 'prompt') promptHook = callback as unknown as typeof promptHook;
@@ -601,6 +626,15 @@ async function harness(options: Options = {}) {
     acknowledgeFeedback: (id: string) => handlers.acknowledgeFeedback!({ id }),
     summarizeFeedback: (id: string) => handlers.summarizeFeedback!({ id }),
     actOnFeedback: (id: string, retry = false) => handlers.actOnFeedback!({ id, retry }),
+    cleanupCandidates: () =>
+      handlers.cleanupCandidates!({}) as Promise<import('./session-cleanup').CleanupScanResult>,
+    cleanupSessions: (
+      sessionIDs: string[],
+      options?: { allowClientArchive?: boolean; finalizeArchived?: boolean; scanID?: string },
+    ) =>
+      handlers.cleanupSessions!({ sessionIDs, ...options }) as Promise<
+        import('./session-cleanup').CleanupResult
+      >,
     watch: (keys: string[], visible?: string) =>
       handlers.watch!({
         clientID: 'cli',
@@ -2156,7 +2190,7 @@ describe('PR/MR status lifecycle', () => {
     await app.cleanup();
   });
 
-  test('offers the status commands only with status on', async () => {
+  test('registers forge-detach and removes or clears session targets', async () => {
     const off = await harness();
     expect(off.commandNames()).toEqual(['forge-detach']);
     const first = 'https://gitlab.com/group/project/-/merge_requests/1';
@@ -2169,98 +2203,7 @@ describe('PR/MR status lifecycle', () => {
     expect(off.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     await off.cleanup();
     const { app } = await watchedFeedback();
-    expect(app.commandNames()).toEqual(['forge-detach', 'forge-report', 'forge-inbox']);
-    await app.cleanup();
-  });
-
-  test('shows the PR/MR status in a tool-free turn that keeps it out of the session', async () => {
-    const { app, forge } = await watchedFeedback();
-    forge.set('group/a', '1', {
-      title: 'Add the widget',
-      draft: false,
-      unresolvedThreads: 0,
-      threadsComplete: true,
-      awaitingReviewers: [],
-      reviewersComplete: true,
-    });
-    const [queued] = await app.runCommand('forge-report');
-    expect(queued).toMatchObject({
-      sessionID: 'one',
-      resume: true,
-      delivery: 'queue',
-      metadata: { forgekeeper: 'review-summary' },
-    });
-    expect(queued.id).toStartWith('msg_forgekeeper_summary_');
-    expect(queued.text).toStartWith('PR/MR status');
-    expect(queued.text).not.toContain(projectA);
-
-    const relay = await app.request();
-    expect(relay.tools).toEqual({});
-    expect(relay.system[0].text).toContain('report from Forgekeeper');
-    const text = relay.messages[0].content[0].text;
-    expect(text).toContain('<forgekeeper-report>');
-    expect(text).toContain(`- ${projectA}`);
-    expect(await app.toolCall()).toContain('Tools are disabled');
-
-    app.prompt();
-    expect(Object.keys((await app.request()).tools)).toEqual(['read', 'bash']);
-    await app.cleanup();
-  });
-
-  test('bounds oversized command reports and gives relay turns their own output budget', async () => {
-    const { app, forge } = await watchedFeedback();
-    forge.set('group/a', '1', { title: 'x'.repeat(10_000), awaitingReviewers: [] });
-    await app.runCommand('forge-report');
-    const relay = await app.request();
-    const text = relay.messages[0].content[0].text;
-    expect(text).toContain('Report shortened because of its size.');
-    expect(text.length).toBeLessThan(6_500);
-    expect(relay.options.maxTokens).toBeGreaterThanOrEqual(
-      new TextEncoder().encode(text).length + 512,
-    );
-    expect(relay.tools).toEqual({});
-    app.prompt();
-    forge.set('group/a', '1', { title: 'x'.repeat(3_000), awaitingReviewers: [] });
-    await app.runCommand('forge-report');
-    const complete = await app.request();
-    expect(complete.messages[0].content[0].text).toContain('x'.repeat(3_000));
-    expect(complete.options.maxTokens).toBeGreaterThan(3_000);
-    await app.cleanup();
-  });
-
-  test('lists, acknowledges, and summarizes review updates by stable ID', async () => {
-    const { app } = await watchedFeedback({
-      pluginOptions: { delivery: { reviews: 'inbox' } },
-    });
-    await app.refresh();
-    await settle();
-    const [item] = (await app.feedback()).items;
-    expect(item).toBeDefined();
-
-    const reportOf = async (args: string) => {
-      const before = app.passive.length;
-      await app.runCommand('forge-inbox', args);
-      if (app.passive.length === before) return undefined;
-      const relay = await app.request();
-      app.prompt();
-      return relay.messages[0].content[0].text as string;
-    };
-    const listed = await reportOf('');
-    expect(listed).toContain(`1. ${item.title}`);
-    expect(listed).toContain(`- ${projectA}#note_7`);
-    expect(await reportOf('summarize 0000000000000000')).toContain('No pending update with ID');
-    expect(await reportOf('frobnicate')).toContain('did not understand "frobnicate"');
-
-    // Summarizing starts the summary's own turn instead of a report.
-    await app.runCommand('forge-inbox', `summarize ${feedbackRef(item.id)}`);
-    expect(app.passive.at(-1)!.text).toContain('Forgekeeper summarizes this review feedback');
-    await app.request();
-    app.prompt();
-
-    const acknowledged = await reportOf(`ack ${feedbackRef(item.id)}`);
-    expect(acknowledged).toContain(`Acknowledged: ${item.title}`);
-    expect(acknowledged).toContain('No pending review updates for this session.');
-    expect((await app.feedback()).items).toEqual([]);
+    expect(app.commandNames()).toEqual(['forge-detach']);
     await app.cleanup();
   });
 
@@ -7881,6 +7824,246 @@ describe('reviewer approval notifications and automation', () => {
       expect(forge.lookups.length).toBe(lookupsBefore);
     } finally {
       await app.cleanup();
+    }
+  });
+
+  test('scans and cleans up merged PR/MR and closed issue-only sessions, pruning inbox items and emitting sessionsCleanedUp', async () => {
+    const forge = new StatusForge();
+    const mr1 = 'https://gitlab.com/group/a/-/merge_requests/1';
+    const issue10 = 'https://gitlab.com/group/a/-/issues/10';
+    forge.set('group/a', '1', { state: 'opened' });
+    forge.issues.set('group/a#10', {
+      forge: 'gitlab',
+      open: true,
+      assignees: ['pedro'],
+      labels: [],
+    });
+
+    const sessions = defaultSessions();
+    sessions.set('issue-session', {
+      title: 'Triage issue',
+      location: { directory: '/repo' },
+      parentID: undefined,
+    });
+
+    const app = await harness({
+      status: forge,
+      sessions,
+      pluginOptions: { inbox: true, delivery: { reviews: 'inbox', lifecycle: 'inbox' } },
+    });
+    try {
+      await app.set({ target: mr1 }, 'one');
+      await app.set({ target: issue10 }, 'issue-session');
+      await app.watch(['one', 'issue-session'], 'one');
+      await settle();
+
+      // Neither is eligible while open:
+      expect((await app.cleanupCandidates()).candidates).toEqual([]);
+
+      // Merge MR !1 and close issue #10:
+      forge.set('group/a', '1', { state: 'merged' });
+      forge.issues.set('group/a#10', {
+        forge: 'gitlab',
+        open: false,
+        assignees: ['pedro'],
+        labels: [],
+      });
+      const refreshedMr = await app.refresh('one');
+      const refreshedIssue = await app.refresh('issue-session');
+      await settle();
+
+      // Snapshot.lookup.cleanupReady is set for both, and transition notices fired once:
+      expect(refreshedMr.snapshot.lookup?.cleanupReady).toEqual({
+        kind: 'merged-requests',
+        reason: 'PR/MR merged',
+      });
+      expect(refreshedIssue.snapshot.lookup?.cleanupReady).toEqual({
+        kind: 'closed-issues',
+        reason: 'Tracked issue closed',
+      });
+      expect(app.notices()).toContainEqual({
+        sessionID: 'one',
+        title: 'PR/MR merged — ready to archive',
+        message: 'Run /forge-cleanup to archive this session and close its tab.',
+        variant: 'info',
+        openTab: false,
+      });
+      expect(app.notices()).toContainEqual({
+        sessionID: 'issue-session',
+        title: 'Tracked issue closed — ready to archive',
+        message: 'Run /forge-cleanup to archive this session and close its tab.',
+        variant: 'info',
+        openTab: false,
+      });
+      // Merge lifecycle item is in the inbox for session `one`:
+      expect((await app.feedback()).items.some((item) => item.sessionID === 'one')).toBe(true);
+
+      const scan = await app.cleanupCandidates();
+      expect(scan.enabled).toBe(true);
+      expect(scan.candidates.map((c) => c.sessionID).sort()).toEqual(['issue-session', 'one']);
+
+      const cleaned = await app.cleanupSessions(['one', 'issue-session']);
+      expect(cleaned).toEqual({
+        archived: ['one', 'issue-session'],
+        alreadyArchived: [],
+        failed: [],
+      });
+
+      // Sessions are archived, inbox items for `one` are pruned, and sessionsCleanedUp emitted:
+      expect(
+        (sessions.get('one') as { time?: { archived?: number } })?.time?.archived,
+      ).toBeDefined();
+      expect((await app.feedback()).items.filter((item) => item.sessionID === 'one')).toEqual([]);
+      expect(app.emitted).toContainEqual({
+        name: 'sessionsCleanedUp',
+        data: { sessionIDs: ['one', 'issue-session'] },
+      });
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('prunes inbox items when session.archived event fires', async () => {
+    const forge = new StatusForge();
+    const mr1 = 'https://gitlab.com/group/a/-/merge_requests/1';
+    forge.set('group/a', '1', { state: 'merged' });
+    const sessions = defaultSessions();
+    const app = await harness({
+      status: forge,
+      sessions,
+      storage: new Map<string, unknown>([
+        [
+          `feedback-inbox/${encodeURIComponent('/repo')}`,
+          {
+            items: [
+              {
+                id: 'merged-1',
+                kind: 'merged',
+                sessionID: 'two',
+                url: mr1,
+                title: '!1 merged into main',
+                links: [mr1],
+                at: 100,
+              },
+            ],
+            paused: false,
+          },
+        ],
+      ]),
+      pluginOptions: { inbox: true, delivery: { reviews: 'inbox' } },
+    });
+    try {
+      await app.set({ target: mr1 }, 'one');
+      await settle();
+
+      // Live session.archived event prunes session two's inbox items:
+      expect((await app.feedback()).items).toHaveLength(1);
+      app.emit({ type: 'session.archived', data: { sessionID: 'two' } });
+      await settle();
+      expect((await app.feedback()).items).toEqual([]);
+    } finally {
+      await app.cleanup();
+    }
+
+    // With status disabled, cleanupCandidates reports enabled: false and cleanupSessions rejects:
+    const disabled = await harness({ pluginOptions: { status: false } });
+    try {
+      expect(await disabled.cleanupCandidates()).toEqual({
+        enabled: false,
+        candidates: [],
+        skippedErrors: 0,
+      });
+      await expect(disabled.cleanupSessions(['one'])).rejects.toThrow('PR/MR status is disabled');
+    } finally {
+      await disabled.cleanup();
+    }
+
+    // Invalidated in-flight lookup (e.g. target detached mid-refresh) does not emit a stale cleanupWatch notice:
+    const raceForge = new StatusForge();
+    raceForge.set('group/a', '1', { state: 'opened' });
+    const raceApp = await harness({ status: raceForge });
+    try {
+      await raceApp.set({ target: mr1 }, 'one');
+      await raceApp.watch(['one'], 'one');
+      await settle();
+
+      raceForge.set('group/a', '1', { state: 'merged' });
+      raceForge.gated = true;
+      const pendingRefresh = raceApp.refresh('one');
+      await settle();
+      await raceApp.set({ target: 'none' }, 'one');
+      raceForge.open();
+      await pendingRefresh;
+      await settle();
+
+      expect(
+        raceApp
+          .notices()
+          .some((notice) =>
+            ((notice as { title?: string }).title ?? '').includes('ready to archive'),
+          ),
+      ).toBe(false);
+    } finally {
+      await raceApp.cleanup();
+    }
+
+    // When ctx.session.update ignores `archived`, allowClientArchive + finalizeArchived completes cleanup:
+    const fallbackForge = new StatusForge();
+    fallbackForge.set('group/a', '1', { state: 'merged' });
+    const fallbackSessions = defaultSessions();
+    const fallbackApp = await harness({
+      status: fallbackForge,
+      sessions: fallbackSessions,
+      ignoreServerArchive: true,
+      storage: new Map<string, unknown>([
+        [
+          `feedback-inbox/${encodeURIComponent('/repo')}`,
+          {
+            items: [
+              {
+                id: 'merged-1',
+                kind: 'merged',
+                sessionID: 'one',
+                url: mr1,
+                title: '!1 merged into main',
+                links: [mr1],
+                at: 100,
+              },
+            ],
+            paused: false,
+          },
+        ],
+      ]),
+      pluginOptions: { inbox: true, delivery: { reviews: 'inbox' } },
+    });
+    try {
+      await fallbackApp.set({ target: mr1 }, 'one');
+      await settle();
+
+      const firstPass = await fallbackApp.cleanupSessions(['one'], { allowClientArchive: true });
+      expect(firstPass).toEqual({
+        archived: [],
+        alreadyArchived: [],
+        failed: [],
+        needsClientArchive: ['one'],
+      });
+      // Simulate client archiving via HTTP API:
+      const sessionOne = fallbackSessions.get('one') as { time?: { archived?: number } };
+      sessionOne.time = { ...sessionOne.time, archived: 500 };
+
+      const finalized = await fallbackApp.cleanupSessions(['one'], { finalizeArchived: true });
+      expect(finalized).toEqual({
+        archived: ['one'],
+        alreadyArchived: [],
+        failed: [],
+      });
+      expect((await fallbackApp.feedback()).items).toEqual([]);
+      expect(fallbackApp.emitted).toContainEqual({
+        name: 'sessionsCleanedUp',
+        data: { sessionIDs: ['one'] },
+      });
+    } finally {
+      await fallbackApp.cleanup();
     }
   });
 });

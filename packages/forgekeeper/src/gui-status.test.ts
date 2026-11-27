@@ -211,4 +211,32 @@ describe('Desktop status pill', () => {
     expect(statusPill({ loading: false }, undefined, actions)).toBeUndefined();
     expect(statusPill({ loading: false }, '2 updates', actions)?.label).toBe('2 updates');
   });
+
+  test('includes a cleanup action row when all PRs/MRs are merged or tracked issues are closed', () => {
+    const { actions, calls } = harness();
+    const withCleanup = { ...actions, cleanup: () => calls.push('cleanup') };
+    const mergedPill = statusPill(snapshot([mr({ state: 'merged' })]), undefined, withCleanup);
+    const cleanupRow = mergedPill?.rows?.find((row) => row.id === 'cleanup');
+    expect(cleanupRow?.label).toBe('PR/MR merged · /forge-cleanup');
+    cleanupRow?.run?.();
+    expect(calls).toEqual(['cleanup']);
+
+    const issuePill = statusPill(
+      {
+        loading: false,
+        lookup: {
+          kind: 'none',
+          reason: 'The session target is not a PR/MR',
+          cleanupReady: { kind: 'closed-issues', reason: 'Tracked issue closed' },
+        },
+      },
+      undefined,
+      withCleanup,
+    );
+    expect(issuePill?.label).toBe('✓ Tracked issue closed');
+    expect(issuePill?.tone).toBe('success');
+    expect(issuePill?.rows?.find((row) => row.id === 'cleanup')?.label).toBe(
+      'Tracked issue closed · /forge-cleanup',
+    );
+  });
 });

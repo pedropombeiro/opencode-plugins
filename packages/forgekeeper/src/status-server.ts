@@ -7,6 +7,7 @@ import {
   createFeedbackInbox,
   isApproval,
   isLifecycle,
+  sessionItems,
   type FeedbackItem,
   type InboxState,
 } from './feedback-inbox';
@@ -38,18 +39,35 @@ import {
   approvalsComplete,
   approversOf,
   type FeedbackSnapshot,
+  type IssueSnapshot,
   type ReviewerApproval,
   type ReviewRequest,
   type ReviewRequestHistory,
 } from './forge';
-import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
+import { parseReference, parseUrl, traitsOf, type ForgeCatalog } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
 import { investigatesJobs, isJobFailure } from './job-investigation';
 import { REQUEST_INTERVAL } from './review-request-watch';
 import { locate } from './locate';
 import { matchesReviewBot, type StatusOptions } from './options';
-import type { Notice } from './rpc';
+import type { CleanupProgress, Notice } from './rpc';
 import type { MonitoringStatus } from './monitoring-status';
+import {
+  cleanupCandidates as scanCleanupCandidates,
+  cleanupSessions as runCleanupSessions,
+  cleanupWatchKey,
+  createCleanupWatch,
+  listProjectSessions,
+  pruneForeignInboxSession,
+  resolveLookupCleanupReady,
+  splitCleanupTargets,
+  type CleanupProgressEvent,
+  type CleanupResult,
+  type CleanupScanResult,
+  type CleanupWatchRecord,
+  type ListedSession,
+  type SessionPage,
+} from './session-cleanup';
 import { createStatusService, HOME } from './status-service';
 import type { Snapshot } from './store';
 import { classifyTargets, includesRequest, targetOutput, type Target } from './target';
@@ -96,7 +114,9 @@ export interface StatusHost {
   isTarget: (sessionID: string, url: string) => boolean;
   publish: (key: string, snapshot: Snapshot) => void;
   notice: (notice: Notice) => void;
-  feedbackChanged?: () => void;
+  feedbackChanged?: (directory?: string) => void;
+  sessionsCleanedUp?: (sessionIDs: string[], options?: { archive?: boolean }) => void;
+  cleanupProgress?: (progress: CleanupProgress) => void;
 }
 
 // Watches the PRs/MRs of the sessions that CLIs show, and tells sessions
@@ -108,6 +128,7 @@ export async function setupStatus(
   host: StatusHost,
 ) {
   const directory = ctx.location.directory;
+  const projectID = (ctx.location as { project?: { id?: string } }).project?.id;
   const requestKey = (ref: { forge: string; host: string; project: string; iid: string }) =>
     JSON.stringify([ref.forge, ref.host, ref.project.toLowerCase(), ref.iid]);
   const statusCache = createRequestCache<ReviewRequest | undefined>({
@@ -120,6 +141,11 @@ export async function setupStatus(
           ? REVIEW_POLL_SECONDS
           : settings.pollSeconds,
       ) * 1000,
+  });
+  const issueCache = createRequestCache<IssueSnapshot | undefined>({
+    now: deps.now,
+    classify: (issue) => (issue ? 'usable' : 'unavailable'),
+    ttl: () => settings.pollSeconds * 1000,
   });
   const feedbackCache = createRequestCache<FeedbackSnapshot | undefined>({
     now: deps.now,
@@ -484,6 +510,7 @@ export async function setupStatus(
     watchesApprover,
     watchesApprovalItem,
     markedReady: (ref) => statusCache.invalidate(requestKey(ref)),
+    sessionsCleanedUp: (sessionIDs, options) => host.sessionsCleanedUp?.(sessionIDs, options),
     signal: automationController.signal,
   });
   const automation = createReviewAutomation(automationHost.host);
@@ -715,6 +742,36 @@ export async function setupStatus(
         .catch(() => {}),
     );
 
+  const cleanupWatch = createCleanupWatch({
+    read: async (sessionID) =>
+      (await ctx.storage.get(cleanupWatchKey(sessionID))) as CleanupWatchRecord | undefined,
+    write: async (record) => {
+      if (closed) throw new Error('The plugin stopped');
+      await ctx.storage.set(cleanupWatchKey(record.sessionID), record as never);
+    },
+    remove: async (sessionID) => {
+      if (closed) return;
+      await ctx.storage.remove(cleanupWatchKey(sessionID));
+    },
+    scan: scanAll,
+    hasTargets: async (sessionID) => {
+      const raw = await host.storedTargets(sessionID);
+      const { mergeRequests, issues } = splitCleanupTargets(raw);
+      return mergeRequests.length > 0 || issues.length > 0;
+    },
+    onReady: (sessionID, ready) =>
+      notice({
+        sessionID,
+        title: `${ready.reason} — ready to archive`,
+        message: 'Run /forge-cleanup to archive this session and close its tab.',
+        variant: 'info',
+        openTab: false,
+      }),
+    now: deps.now,
+  });
+
+  const pendingCleanupMeta = new WeakMap<object, { targetKey?: string; complete: boolean }>();
+
   const service = createStatusService({
     async load(key, previous) {
       if (key === HOME) return { kind: 'none', reason: 'No session is open' };
@@ -731,18 +788,43 @@ export async function setupStatus(
       }
       foreign.delete(key);
       const state = await host.state(key);
-      return locate(deps.forges, {
+      const located = await locate(deps.forges, {
         directory,
         targets: classifyTargets(targetOutput(state.targets)),
         previous,
         request: (ref, load) => statusCache.get(requestKey(ref), load),
       });
+      const resolved = await resolveLookupCleanupReady(located, state.targets, (ref) => {
+        const forge =
+          deps.forges.kind(ref.host) === ref.forge
+            ? deps.forges.forHost(ref.host, directory)
+            : undefined;
+        if (!forge?.issue) return Promise.resolve(undefined);
+        return issueCache.get(requestKey(ref), () => forge.issue!(ref));
+      });
+      pendingCleanupMeta.set(resolved.lookup, {
+        targetKey: resolved.targetKey,
+        complete: resolved.complete,
+      });
+      return resolved.lookup;
     },
     isTarget,
     owns: (sessionID) => !foreign.has(sessionID),
     publish: (key, snapshot) => {
       host.publish(key, snapshot);
       clearStale(key, snapshot);
+    },
+    onLookup: (sessionID, lookup) => {
+      if (closing || foreign.has(sessionID)) return;
+      const meta = pendingCleanupMeta.get(lookup);
+      if (!meta) return;
+      return tracked(
+        cleanupWatch
+          .observe(sessionID, meta.targetKey, meta.complete, lookup.cleanupReady)
+          .catch((error) =>
+            reportOnce('cleanup-watch', 'Could not record session cleanup status', error),
+          ),
+      );
     },
     automated: reviews.automated,
     human: reviews.feedback,
@@ -856,6 +938,7 @@ export async function setupStatus(
     await reviews.prune();
     await summaries.prune();
     await lifecycle.prune();
+    await cleanupWatch.prune();
     const state = await inbox.list();
     if (state.items.length) {
       const { deleted } = await sessionOwnership([
@@ -880,6 +963,34 @@ export async function setupStatus(
     ...state,
     items: state.items.map((item) => ({ ...item, canAct: canActItem(item) })),
   });
+  const readSession = async (sessionID: string): Promise<ListedSession | undefined> => {
+    try {
+      return (await ctx.session.get({ sessionID })) as ListedSession | undefined;
+    } catch (error) {
+      if (missingSession(error)) return undefined;
+      throw error;
+    }
+  };
+  const buildStoredTargetsMap = (entries: Array<{ key: string; value: unknown }>) => {
+    const map = new Map<string, readonly Target[]>();
+    for (const { key, value } of entries) {
+      const sessionID = key.slice('sessions/'.length);
+      const record = value as { targets?: Target[] } | undefined;
+      map.set(sessionID, Array.isArray(record?.targets) ? record.targets : []);
+    }
+    return map;
+  };
+  const retireSessionState = (sessionID: string) => {
+    service.invalidate(sessionID);
+    reviews.forget(sessionID);
+    void tracked(
+      Promise.all([
+        reviews.retireApprovals(sessionID),
+        cleanupWatch.forget(sessionID),
+        inbox.prune((item) => item.sessionID === sessionID),
+      ]).catch(() => {}),
+    );
+  };
 
   return {
     service,
@@ -1064,13 +1175,139 @@ export async function setupStatus(
       if (lookup?.kind === 'found')
         for (const request of lookup.requests) reviews.invalidate(sessionID, request);
       for (const target of (await host.state(sessionID)).targets) {
-        const ref = parseUrl(target.url);
-        if (!ref) continue;
-        statusCache.invalidate(requestKey(ref));
-        feedbackCache.invalidate(requestKey(ref));
-        requestCache.invalidate(requestKey(ref));
+        const parsed = parseReference(target.url);
+        if (!parsed) continue;
+        if (parsed.issue) {
+          issueCache.invalidate(requestKey(parsed.ref));
+          continue;
+        }
+        statusCache.invalidate(requestKey(parsed.ref));
+        feedbackCache.invalidate(requestKey(parsed.ref));
+        requestCache.invalidate(requestKey(parsed.ref));
       }
       return service.refresh(sessionID);
+    },
+    async cleanupCandidates(options?: {
+      scanID?: string;
+      signal?: AbortSignal;
+    }): Promise<CleanupScanResult> {
+      const foreignInboxes = new Map<string, Promise<InboxState | undefined>>();
+      const listFn = (
+        ctx.session as { list?: (input: unknown) => Promise<SessionPage> }
+      ).list?.bind(ctx.session);
+      const emitProgress = (progress: CleanupProgressEvent) => {
+        host.cleanupProgress?.({
+          ...(options?.scanID ? { scanID: options.scanID } : {}),
+          ...progress,
+        });
+      };
+      let scannedSessionsPromise: Promise<Array<{ key: string; value: unknown }>> | undefined;
+      const getScannedSessions = () => (scannedSessionsPromise ??= scanAll('sessions/'));
+      return scanCleanupCandidates({
+        projectID,
+        directory,
+        forges: deps.forges,
+        signal: options?.signal,
+        onProgress: emitProgress,
+        listSessions: () =>
+          listProjectSessions({
+            projectID,
+            directory,
+            list: listFn ? (input) => listFn(input) : undefined,
+            scanTargets: async () =>
+              (await getScannedSessions()).map(({ key }) => key.slice('sessions/'.length)),
+            getSession: readSession,
+            signal: options?.signal,
+            onProgress: (checked) => emitProgress({ phase: 'sessions', checked, total: 0 }),
+          }),
+        storedTargets: host.storedTargets,
+        storedTargetsMap: async () => buildStoredTargetsMap(await getScannedSessions()),
+        pendingFeedbackCount: async (sessionDirectory, sessionID) => {
+          if (sessionDirectory === directory) {
+            return sessionItems(await inbox.list(), sessionID).length;
+          }
+          let loading = foreignInboxes.get(sessionDirectory);
+          if (!loading) {
+            loading = ctx.storage
+              .get(`feedback-inbox/${encodeURIComponent(sessionDirectory)}`)
+              .then(
+                (value) => value as InboxState | undefined,
+                () => undefined,
+              );
+            foreignInboxes.set(sessionDirectory, loading);
+          }
+          const state = await loading;
+          return state ? sessionItems(state, sessionID).length : 0;
+        },
+      });
+    },
+    async cleanupSessions(
+      sessionIDs: readonly string[],
+      options?: { scanID?: string; allowClientArchive?: boolean; finalizeArchived?: boolean },
+    ): Promise<CleanupResult> {
+      const emitProgress = (progress: CleanupProgressEvent) => {
+        host.cleanupProgress?.({
+          ...(options?.scanID ? { scanID: options.scanID } : {}),
+          ...progress,
+        });
+      };
+      const cleanedLocal = new Set<string>();
+      const cleanedForeign = new Map<string, Set<string>>();
+      const result = await runCleanupSessions(sessionIDs, {
+        projectID,
+        directory,
+        forges: deps.forges,
+        getSession: readSession,
+        archiveSession: async (sessionID) => {
+          const updated = (await ctx.session.update({ sessionID, archived: true })) as
+            ListedSession | undefined;
+          if (updated?.time?.archived !== undefined) return 'archived';
+          const verified = await readSession(sessionID);
+          if (verified?.time?.archived !== undefined) return 'archived';
+          return 'unsupported';
+        },
+        storedTargets: host.storedTargets,
+        storedTargetsMap: async () => buildStoredTargetsMap(await scanAll('sessions/')),
+        allowClientArchive: options?.allowClientArchive,
+        finalizeArchived: options?.finalizeArchived,
+        onProgress: emitProgress,
+        onSessionCleaned: async (sessionID, sessionDirectory) => {
+          service.invalidate(sessionID);
+          reviews.forget(sessionID);
+          cleanedLocal.add(sessionID);
+          if (sessionDirectory !== directory) {
+            let set = cleanedForeign.get(sessionDirectory);
+            if (!set) {
+              set = new Set();
+              cleanedForeign.set(sessionDirectory, set);
+            }
+            set.add(sessionID);
+          }
+          await Promise.all([
+            reviews.retireApprovals(sessionID).catch(() => {}),
+            cleanupWatch.forget(sessionID),
+          ]);
+        },
+      });
+      if (cleanedLocal.size > 0) {
+        await Promise.all([
+          inbox.prune((item) => cleanedLocal.has(item.sessionID)).catch(() => {}),
+          ...[...cleanedForeign.entries()].map(([foreignDirectory, ids]) =>
+            pruneForeignInboxSession({
+              storage: ctx.storage,
+              directory: foreignDirectory,
+              sessionIDs: ids,
+              now: deps.now,
+              changed: (dir) => host.feedbackChanged?.(dir),
+            }).catch(() => {}),
+          ),
+        ]);
+        for (const sessionID of cleanedLocal) {
+          void discovery.refresh(sessionID);
+        }
+      }
+      if (result.archived.length) host.sessionsCleanedUp?.(result.archived);
+      return result;
     },
     // Discards lookups of the old targets and looks the session up again.
     // Whether the new targets include a PR/MR is known now, so the footer
@@ -1081,6 +1318,7 @@ export async function setupStatus(
         sessionID,
         classified.some((target) => target.kind === 'merge-request'),
       );
+      if (targets.length === 0) void cleanupWatch.forget(sessionID);
       // Retire dropped targets and invalidate cached status BEFORE triggering a
       // fresh lookup so re-added targets always baseline from live forge state.
       void tracked(
@@ -1091,8 +1329,10 @@ export async function setupStatus(
           ),
       );
       for (const target of targets) {
-        const ref = parseUrl(target.url);
-        if (ref) statusCache.invalidate(requestKey(ref));
+        const parsed = parseReference(target.url);
+        if (!parsed) continue;
+        if (parsed.issue) issueCache.invalidate(requestKey(parsed.ref));
+        else statusCache.invalidate(requestKey(parsed.ref));
       }
       service.invalidate(sessionID);
       // Updates for dropped targets go now, even for a session that nothing
@@ -1102,20 +1342,17 @@ export async function setupStatus(
         .catch((error) => reportOnce('inbox', 'Could not clear stale review updates', error));
       void discovery.refresh(sessionID);
     },
-    // Confirmed session deletion retires approval watches and prunes inbox items.
+    // Confirmed session deletion or archiving retires approval watches and prunes inbox items.
     sessionDeleted(sessionID: string) {
-      service.invalidate(sessionID);
-      reviews.forget(sessionID);
-      void tracked(
-        Promise.all([
-          reviews.retireApprovals(sessionID),
-          inbox.prune((item) => item.sessionID === sessionID),
-        ]).catch(() => {}),
-      );
+      retireSessionState(sessionID);
+    },
+    sessionArchived(sessionID: string) {
+      retireSessionState(sessionID);
     },
     // A turn may have changed a targeted PR/MR.
     turnEnded(sessionID: string) {
       statusCache.clear();
+      issueCache.clear();
       feedbackCache.clear();
       requestCache.clear();
       for (const key of service.keys()) {
@@ -1164,6 +1401,7 @@ export async function setupStatus(
       for (const timer of feedbackEvents.values()) clearTimeout(timer);
       feedbackEvents.clear();
       statusCache.clear();
+      issueCache.clear();
       feedbackCache.clear();
       requestCache.clear();
       clearInterval(discoveryTimer);

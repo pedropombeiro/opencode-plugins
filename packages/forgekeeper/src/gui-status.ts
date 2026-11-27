@@ -1,20 +1,27 @@
 import type { ComposerPillTone, ComposerPillView } from '@opencode/plugin/gui';
 import { footerSegments, type Segment, type Tone } from './format';
+import { cleanupReadyOf } from './session-cleanup';
 import type { Snapshot } from './store';
 
 export function statusPill(
   snapshot: Snapshot,
   updates: string | undefined,
-  actions: { external(url: string): void; status(): void; feedback(): void },
+  actions: { external(url: string): void; status(): void; feedback(): void; cleanup?(): void },
 ): ComposerPillView | undefined {
   const segments = footerSegments(snapshot);
-  if (!segments.length && !updates) return undefined;
+  const ready = cleanupReadyOf(snapshot);
+  const issueClosed = !segments.length && ready?.kind === 'closed-issues';
+  if (!segments.length && !updates && !issueClosed) return undefined;
   const firstStatus = segments.findIndex((segment) => !segment.essential || !segment.url);
   const referenceCount = firstStatus < 0 ? segments.length : Math.max(1, firstStatus);
   const pending =
     snapshot.lookup?.kind === 'found' && snapshot.lookup.requests.length === 1
       ? snapshot.lookup.requests[0].awaitingReviewers
       : undefined;
+  const tones = [
+    ...segments.map((segment) => segment.tone),
+    ...(issueClosed ? (['success'] as const) : []),
+  ];
   return {
     icon: 'review',
     label: [
@@ -25,11 +32,12 @@ export function statusPill(
         }))
         .sort((a, b) => a.priority - b.priority)
         .map(({ segment }) => compactLabel(segment, pending)),
+      ...(issueClosed ? [`✓ ${ready.reason}`] : []),
       updates?.replace(/^(\d+) review updates?/, '↻ $1'),
     ]
       .filter(Boolean)
       .join(' · '),
-    tone: pillTone(segments.map((segment) => segment.tone)),
+    tone: pillTone(tones),
     title: 'PR/MR status',
     rows: [
       ...segments.map((segment, index) => ({
@@ -59,6 +67,17 @@ export function statusPill(
               label: updates,
               icon: 'comment' as const,
               run: actions.feedback,
+            },
+          ]
+        : []),
+      ...(ready && actions.cleanup
+        ? [
+            {
+              id: 'cleanup',
+              label: `${ready.reason} · /forge-cleanup`,
+              icon: 'archive' as const,
+              tone: 'success' as const,
+              run: actions.cleanup,
             },
           ]
         : []),
