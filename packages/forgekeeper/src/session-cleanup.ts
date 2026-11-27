@@ -61,6 +61,7 @@ export interface CleanupResult {
   archived: string[];
   alreadyArchived: string[];
   failed: CleanupFailure[];
+  needsClientArchive?: string[];
 }
 
 export interface ListedSession extends DirectorySession {
@@ -153,17 +154,28 @@ export function formatCleanupProgress(
       : 'Checking sessions for merged PRs/MRs and closed issues…';
   }
   const counts = progress.total > 0 ? ` (${progress.checked}/${progress.total})` : '';
-  if (progress.phase === 'sessions') {
-    const scanned = progress.checked > 0 ? ` (${progress.checked} found)` : '';
-    return `Scanning project sessions…${scanned}`;
+  switch (progress.phase) {
+    case 'sessions': {
+      const scanned = progress.checked > 0 ? ` (${progress.checked} found)` : '';
+      return `Scanning project sessions…${scanned}`;
+    }
+    case 'targets':
+      return `Checking PRs/MRs and tracked issues…${counts}`;
+    case 'verifying':
+      return `Verifying target status before archiving…${counts}`;
+    case 'archiving':
+      return `Archiving sessions…${counts}`;
   }
-  if (progress.phase === 'targets') {
-    return `Checking PRs/MRs and tracked issues…${counts}`;
+}
+
+export function formatCleanupFailures(failures: readonly CleanupFailure[]): string {
+  const counts = new Map<string, number>();
+  for (const failure of failures) {
+    counts.set(failure.reason, (counts.get(failure.reason) ?? 0) + 1);
   }
-  if (progress.phase === 'verifying') {
-    return `Verifying target status before archiving…${counts}`;
-  }
-  return `Archiving sessions…${counts}`;
+  return [...counts.entries()]
+    .map(([reason, count]) => (count === 1 ? reason : `${reason} (${count} sessions)`))
+    .join('; ');
 }
 
 const BATCH_SIZE = 25;
@@ -495,17 +507,21 @@ const inScope = (session: ListedSession, projectID: string | undefined, director
   return session.location.directory === directory;
 };
 
+export type ArchiveOutcome = 'archived' | 'unsupported';
+
 export interface CleanupDependencies {
   projectID?: string;
   directory: string;
   forges: ForgeCatalog;
   listSessions: () => Promise<ListedSession[]>;
   getSession: (sessionID: string) => Promise<ListedSession | undefined>;
-  archiveSession: (sessionID: string) => Promise<void>;
+  archiveSession: (sessionID: string) => Promise<ArchiveOutcome | void>;
   storedTargets: (sessionID: string) => Promise<Target[]>;
   storedTargetsMap?: () => Promise<ReadonlyMap<string, readonly Target[]>>;
   pendingFeedbackCount: (directory: string, sessionID: string) => Promise<number>;
   onSessionCleaned: (sessionID: string, sessionDirectory: string) => Promise<void>;
+  allowClientArchive?: boolean;
+  finalizeArchived?: boolean;
   signal?: AbortSignal;
   onProgress?: (progress: CleanupProgressEvent) => void;
 }
@@ -692,6 +708,60 @@ export async function cleanupSessions(
   const archived: string[] = [];
   const alreadyArchived: string[] = [];
   const failed: CleanupFailure[] = [];
+  const needsClientArchive: string[] = [];
+
+  if (deps.finalizeArchived) {
+    let archivedCount = 0;
+    if (uniqueIDs.length > 0) {
+      deps.onProgress?.({ phase: 'archiving', checked: 0, total: uniqueIDs.length });
+    }
+    const outcomes = await mapLimit(uniqueIDs, SESSION_CONCURRENCY, async (sessionID) => {
+      try {
+        const session = await deps.getSession(sessionID);
+        if (!session) {
+          return {
+            ok: false as const,
+            sessionID,
+            reason: 'Session was not found',
+          };
+        }
+        if (!inScope(session, deps.projectID, deps.directory)) {
+          return {
+            ok: false as const,
+            sessionID,
+            reason: 'Session belongs to another project',
+          };
+        }
+        if (session.time?.archived === undefined) {
+          return {
+            ok: false as const,
+            sessionID,
+            reason: 'OpenCode did not archive the session.',
+          };
+        }
+        await deps.onSessionCleaned(sessionID, session.location.directory);
+        return { ok: true as const, sessionID };
+      } catch (error) {
+        return {
+          ok: false as const,
+          sessionID,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      } finally {
+        archivedCount++;
+        deps.onProgress?.({
+          phase: 'archiving',
+          checked: archivedCount,
+          total: uniqueIDs.length,
+        });
+      }
+    });
+    for (const outcome of outcomes) {
+      if (outcome.ok) archived.push(outcome.sessionID);
+      else failed.push({ sessionID: outcome.sessionID, reason: outcome.reason });
+    }
+    return { archived, alreadyArchived, failed };
+  }
 
   const targetMap = deps.storedTargetsMap ? await deps.storedTargetsMap() : undefined;
   const loadedSessions = new Map<string, ListedSession>();
@@ -758,10 +828,17 @@ export async function cleanupSessions(
   }> = [];
 
   for (const item of inspected) {
-    if (item.kind === 'alreadyArchived') alreadyArchived.push(item.sessionID);
-    else if (item.kind === 'failed')
-      failed.push({ sessionID: item.sessionID, reason: item.reason });
-    else toVerify.push(item);
+    switch (item.kind) {
+      case 'alreadyArchived':
+        alreadyArchived.push(item.sessionID);
+        break;
+      case 'failed':
+        failed.push({ sessionID: item.sessionID, reason: item.reason });
+        break;
+      case 'verify':
+        toVerify.push(item);
+        break;
+    }
   }
 
   if (toVerify.length > 0) {
@@ -787,7 +864,18 @@ export async function cleanupSessions(
       deps.onProgress?.({ phase: 'archiving', checked: 0, total: eligibleEntries.length });
       const outcomes = await mapLimit(eligibleEntries, SESSION_CONCURRENCY, async (entry) => {
         try {
-          await deps.archiveSession(entry.sessionID);
+          const status = await deps.archiveSession(entry.sessionID);
+          if (status === 'unsupported') {
+            if (deps.allowClientArchive) {
+              return { kind: 'client' as const, sessionID: entry.sessionID };
+            }
+            return {
+              kind: 'failed' as const,
+              sessionID: entry.sessionID,
+              reason:
+                'OpenCode did not archive the session from the server plugin (use /forge-cleanup in the TUI or Desktop app).',
+            };
+          }
           await deps.onSessionCleaned(entry.sessionID, entry.directory);
           archivedCount++;
           deps.onProgress?.({
@@ -795,7 +883,7 @@ export async function cleanupSessions(
             checked: archivedCount,
             total: eligibleEntries.length,
           });
-          return { ok: true as const, sessionID: entry.sessionID };
+          return { kind: 'archived' as const, sessionID: entry.sessionID };
         } catch (error) {
           archivedCount++;
           deps.onProgress?.({
@@ -804,20 +892,34 @@ export async function cleanupSessions(
             total: eligibleEntries.length,
           });
           return {
-            ok: false as const,
+            kind: 'failed' as const,
             sessionID: entry.sessionID,
             reason: error instanceof Error ? error.message : String(error),
           };
         }
       });
       for (const outcome of outcomes) {
-        if (outcome.ok) archived.push(outcome.sessionID);
-        else failed.push({ sessionID: outcome.sessionID, reason: outcome.reason });
+        switch (outcome.kind) {
+          case 'archived':
+            archived.push(outcome.sessionID);
+            break;
+          case 'client':
+            needsClientArchive.push(outcome.sessionID);
+            break;
+          case 'failed':
+            failed.push({ sessionID: outcome.sessionID, reason: outcome.reason });
+            break;
+        }
       }
     }
   }
 
-  return { archived, alreadyArchived, failed };
+  return {
+    archived,
+    alreadyArchived,
+    failed,
+    ...(needsClientArchive.length > 0 ? { needsClientArchive } : {}),
+  };
 }
 
 export async function resolveLookupCleanupReady(

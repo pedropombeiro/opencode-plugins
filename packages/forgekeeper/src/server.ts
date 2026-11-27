@@ -257,9 +257,15 @@ export async function setupServer(
         watcher
           ? json(await watcher.cleanupCandidates({ scanID, signal: context?.signal }))
           : { enabled: false, candidates: [], skippedErrors: 0 },
-      cleanupSessions: async ({ sessionIDs, scanID }) => {
+      cleanupSessions: async ({ sessionIDs, scanID, allowClientArchive, finalizeArchived }) => {
         if (!watcher) throw new Error('PR/MR status is disabled');
-        return json(await watcher.cleanupSessions(sessionIDs, { scanID }));
+        return json(
+          await watcher.cleanupSessions(sessionIDs, {
+            scanID,
+            allowClientArchive,
+            finalizeArchived,
+          }),
+        );
       },
     }),
   );
@@ -284,8 +290,13 @@ export async function setupServer(
       notice: (notice) => void rpc.events.emit('notice', json(notice)).catch(() => {}),
       feedbackChanged: (directory = ctx.location.directory) =>
         void rpc.events.emit('feedbackChanged', { directory }).catch(() => {}),
-      sessionsCleanedUp: (sessionIDs) =>
-        void rpc.events.emit('sessionsCleanedUp', { sessionIDs }).catch(() => {}),
+      sessionsCleanedUp: (sessionIDs, options) =>
+        void rpc.events
+          .emit('sessionsCleanedUp', {
+            sessionIDs,
+            ...(options?.archive ? { archive: true } : {}),
+          })
+          .catch(() => {}),
       cleanupProgress: (progress) =>
         void rpc.events.emit('cleanupProgress', json(progress)).catch(() => {}),
     });

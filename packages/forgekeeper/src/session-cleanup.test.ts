@@ -17,6 +17,7 @@ import {
   cleanupReadyOf,
   cleanupSessions,
   createCleanupWatch,
+  formatCleanupFailures,
   formatCleanupProgress,
   formatCleanupSubtitle,
   listProjectSessions,
@@ -878,5 +879,108 @@ describe('cleanupCandidates & cleanupSessions', () => {
       pendingFeedbackCount: async () => 0,
     });
     expect(abortedScan.candidates).toEqual([]);
+  });
+
+  test('supports client-side archive fallback and deduplicates repeated failure reasons', async () => {
+    expect(
+      formatCleanupFailures([
+        { sessionID: 's1', reason: 'OpenCode did not archive the session.' },
+        { sessionID: 's2', reason: 'OpenCode did not archive the session.' },
+        { sessionID: 's3', reason: 'Session is currently running' },
+      ]),
+    ).toBe('OpenCode did not archive the session. (2 sessions); Session is currently running');
+
+    const { forges } = createFakeCatalog({
+      mrs: new Map([['group/app#1', makeMr('1', 'merged')]]),
+    });
+    const sessions = new Map<string, ListedSession>([
+      [
+        's1',
+        {
+          id: 's1',
+          projectID: 'proj',
+          time: { updated: 10 },
+          location: { directory: '/repo' },
+        },
+      ],
+      [
+        's2',
+        {
+          id: 's2',
+          projectID: 'proj',
+          time: { updated: 20 },
+          location: { directory: '/repo-wt' },
+        },
+      ],
+    ]);
+    const cleaned: Array<{ id: string; directory: string }> = [];
+
+    // Without allowClientArchive, an unsupported server archive fails with a helpful message:
+    const unsupportedFailure = await cleanupSessions(['s1'], {
+      projectID: 'proj',
+      directory: '/repo',
+      forges,
+      getSession: async (id) => sessions.get(id),
+      archiveSession: async () => 'unsupported',
+      storedTargets: async () => [{ url: mrUrl('1') }],
+      onSessionCleaned: async (id, directory) => void cleaned.push({ id, directory }),
+    });
+    expect(unsupportedFailure).toEqual({
+      archived: [],
+      alreadyArchived: [],
+      failed: [
+        {
+          sessionID: 's1',
+          reason:
+            'OpenCode did not archive the session from the server plugin (use /forge-cleanup in the TUI or Desktop app).',
+        },
+      ],
+    });
+    expect(cleaned).toEqual([]);
+
+    // With allowClientArchive, verified eligible sessions return needsClientArchive:
+    const delegated = await cleanupSessions(['s1', 's2'], {
+      projectID: 'proj',
+      directory: '/repo',
+      forges,
+      allowClientArchive: true,
+      getSession: async (id) => sessions.get(id),
+      archiveSession: async () => 'unsupported',
+      storedTargets: async () => [{ url: mrUrl('1') }],
+      onSessionCleaned: async (id, directory) => void cleaned.push({ id, directory }),
+    });
+    expect(delegated).toEqual({
+      archived: [],
+      alreadyArchived: [],
+      failed: [],
+      needsClientArchive: ['s1', 's2'],
+    });
+    expect(cleaned).toEqual([]);
+
+    // Client archives s1 via HTTP API, while s2 remains unarchived:
+    sessions.set('s1', {
+      ...sessions.get('s1')!,
+      time: { updated: 10, archived: 100 },
+    });
+
+    const finalized = await cleanupSessions(['s1', 's2', 'missing'], {
+      projectID: 'proj',
+      directory: '/repo',
+      forges,
+      finalizeArchived: true,
+      getSession: async (id) => sessions.get(id),
+      archiveSession: async () => 'unsupported',
+      storedTargets: async () => [{ url: mrUrl('1') }],
+      onSessionCleaned: async (id, directory) => void cleaned.push({ id, directory }),
+    });
+    expect(finalized).toEqual({
+      archived: ['s1'],
+      alreadyArchived: [],
+      failed: [
+        { sessionID: 's2', reason: 'OpenCode did not archive the session.' },
+        { sessionID: 'missing', reason: 'Session was not found' },
+      ],
+    });
+    expect(cleaned).toEqual([{ id: 's1', directory: '/repo' }]);
   });
 });

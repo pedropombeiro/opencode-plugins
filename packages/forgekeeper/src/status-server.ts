@@ -115,7 +115,7 @@ export interface StatusHost {
   publish: (key: string, snapshot: Snapshot) => void;
   notice: (notice: Notice) => void;
   feedbackChanged?: (directory?: string) => void;
-  sessionsCleanedUp?: (sessionIDs: string[]) => void;
+  sessionsCleanedUp?: (sessionIDs: string[], options?: { archive?: boolean }) => void;
   cleanupProgress?: (progress: CleanupProgress) => void;
 }
 
@@ -510,7 +510,7 @@ export async function setupStatus(
     watchesApprover,
     watchesApprovalItem,
     markedReady: (ref) => statusCache.invalidate(requestKey(ref)),
-    sessionsCleanedUp: (sessionIDs) => host.sessionsCleanedUp?.(sessionIDs),
+    sessionsCleanedUp: (sessionIDs, options) => host.sessionsCleanedUp?.(sessionIDs, options),
     signal: automationController.signal,
   });
   const automation = createReviewAutomation(automationHost.host);
@@ -1243,7 +1243,7 @@ export async function setupStatus(
     },
     async cleanupSessions(
       sessionIDs: readonly string[],
-      options?: { scanID?: string },
+      options?: { scanID?: string; allowClientArchive?: boolean; finalizeArchived?: boolean },
     ): Promise<CleanupResult> {
       const emitProgress = (progress: CleanupProgressEvent) => {
         host.cleanupProgress?.({
@@ -1261,14 +1261,15 @@ export async function setupStatus(
         archiveSession: async (sessionID) => {
           const updated = (await ctx.session.update({ sessionID, archived: true })) as
             ListedSession | undefined;
-          if (updated?.time?.archived !== undefined) return;
+          if (updated?.time?.archived !== undefined) return 'archived';
           const verified = await readSession(sessionID);
-          if (verified?.time?.archived === undefined) {
-            throw new Error('OpenCode did not archive the session.');
-          }
+          if (verified?.time?.archived !== undefined) return 'archived';
+          return 'unsupported';
         },
         storedTargets: host.storedTargets,
         storedTargetsMap: async () => buildStoredTargetsMap(await scanAll('sessions/')),
+        allowClientArchive: options?.allowClientArchive,
+        finalizeArchived: options?.finalizeArchived,
         onProgress: emitProgress,
         onSessionCleaned: async (sessionID, sessionDirectory) => {
           service.invalidate(sessionID);

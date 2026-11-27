@@ -106,7 +106,7 @@ interface AutomationEnvironment {
   // Called after an approval turn marks a PR/MR ready so status caches invalidate.
   markedReady?: (ref: ReviewRef) => void;
   // Called after linked sessions are archived so connected clients close their tabs.
-  sessionsCleanedUp?: (sessionIDs: string[]) => void;
+  sessionsCleanedUp?: (sessionIDs: string[], options?: { archive?: boolean }) => void;
   // Aborts when the plugin stops, which ends waits and sleeps.
   signal: AbortSignal;
   // Replaces the timer-based sleep, for tests.
@@ -890,8 +890,15 @@ export function createAutomationHost(
       await env.relay(record.item.sessionID, description, lines.join('\n\n'), true);
     }
     if (phase === 'ended' && record.state === 'completed' && provider.archive) {
-      const archivedID = await provider.archive(record).catch(() => undefined);
-      if (archivedID) env.sessionsCleanedUp?.([archivedID]);
+      const archived = await provider.archive(record).catch(() => undefined);
+      if (typeof archived === 'string') {
+        env.sessionsCleanedUp?.([archived]);
+      } else if (archived) {
+        env.sessionsCleanedUp?.(
+          [archived.sessionID],
+          archived.needsClientArchive ? { archive: true } : undefined,
+        );
+      }
     }
   }
 

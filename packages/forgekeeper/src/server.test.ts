@@ -100,6 +100,7 @@ interface Options {
   // The instance's checkout. Defaults to /repo.
   directory?: string;
   activity?: number;
+  ignoreServerArchive?: boolean;
   permissionDecision?: (input: {
     sessionID: string;
     agent?: string;
@@ -448,7 +449,7 @@ async function harness(options: Options = {}) {
           session.title = title;
           renames++;
         }
-        if (archived !== undefined) {
+        if (archived !== undefined && !options.ignoreServerArchive) {
           session.time = { ...session.time, archived: archived ? Date.now() : undefined };
         }
       },
@@ -628,8 +629,11 @@ async function harness(options: Options = {}) {
     actOnFeedback: (id: string, retry = false) => handlers.actOnFeedback!({ id, retry }),
     cleanupCandidates: () =>
       handlers.cleanupCandidates!({}) as Promise<import('./session-cleanup').CleanupScanResult>,
-    cleanupSessions: (sessionIDs: string[]) =>
-      handlers.cleanupSessions!({ sessionIDs }) as Promise<
+    cleanupSessions: (
+      sessionIDs: string[],
+      options?: { allowClientArchive?: boolean; finalizeArchived?: boolean; scanID?: string },
+    ) =>
+      handlers.cleanupSessions!({ sessionIDs, ...options }) as Promise<
         import('./session-cleanup').CleanupResult
       >,
     watch: (keys: string[], visible?: string) =>
@@ -8129,6 +8133,65 @@ describe('reviewer approval notifications and automation', () => {
       ).toBe(false);
     } finally {
       await raceApp.cleanup();
+    }
+
+    // When ctx.session.update ignores `archived`, allowClientArchive + finalizeArchived completes cleanup:
+    const fallbackForge = new StatusForge();
+    fallbackForge.set('group/a', '1', { state: 'merged' });
+    const fallbackSessions = defaultSessions();
+    const fallbackApp = await harness({
+      status: fallbackForge,
+      sessions: fallbackSessions,
+      ignoreServerArchive: true,
+      storage: new Map<string, unknown>([
+        [
+          `feedback-inbox/${encodeURIComponent('/repo')}`,
+          {
+            items: [
+              {
+                id: 'merged-1',
+                kind: 'merged',
+                sessionID: 'one',
+                url: mr1,
+                title: '!1 merged into main',
+                links: [mr1],
+                at: 100,
+              },
+            ],
+            paused: false,
+          },
+        ],
+      ]),
+      pluginOptions: { inbox: true, delivery: { reviews: 'inbox' } },
+    });
+    try {
+      await fallbackApp.set({ target: mr1 }, 'one');
+      await settle();
+
+      const firstPass = await fallbackApp.cleanupSessions(['one'], { allowClientArchive: true });
+      expect(firstPass).toEqual({
+        archived: [],
+        alreadyArchived: [],
+        failed: [],
+        needsClientArchive: ['one'],
+      });
+      // Simulate client archiving via HTTP API:
+      const sessionOne = fallbackSessions.get('one') as { time?: { archived?: number } };
+      sessionOne.time = { ...sessionOne.time, archived: 500 };
+
+      const finalized = await fallbackApp.cleanupSessions(['one'], { finalizeArchived: true });
+      expect(finalized).toEqual({
+        archived: ['one'],
+        alreadyArchived: [],
+        failed: [],
+      });
+      expect((await fallbackApp.feedback()).items).toEqual([]);
+      expect(fallbackApp.emitted).toContainEqual({
+        name: 'sessionsCleanedUp',
+        data: { sessionIDs: ['one'] },
+      });
+    } finally {
+      await fallbackApp.cleanup();
     }
   });
 });

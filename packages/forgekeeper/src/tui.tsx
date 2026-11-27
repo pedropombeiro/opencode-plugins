@@ -19,11 +19,13 @@ import {
 import { yesNo, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import { automatedReview } from './automated-review-watch';
+import { mapLimit } from './limit';
 import { showNotice } from './notice';
 import { clientID, connectStatus, loadFeedback as fetchFeedback } from './client-core';
 import { ForgeSessionRpc, HOME, type CleanupProgress, type EventData } from './rpc';
 import {
   cleanupReadyOf,
+  formatCleanupFailures,
   formatCleanupProgress,
   formatCleanupSubtitle,
   worktreeLabel,
@@ -54,9 +56,14 @@ function branchLabel(repository: Repository): string {
 }
 
 function statusActionLabel(action: StatusDialogAction, loading: boolean): string {
-  if (action === 'close') return 'Close';
-  if (action === 'cleanup') return 'Clean up session';
-  return loading ? 'Refreshing…' : 'Refresh';
+  switch (action) {
+    case 'close':
+      return 'Close';
+    case 'cleanup':
+      return 'Clean up session';
+    case 'refresh':
+      return loading ? 'Refreshing…' : 'Refresh';
+  }
 }
 
 function feedbackItemDescription(item: FeedbackItem): string {
@@ -144,10 +151,16 @@ export default {
 
     const color = (tone: Tone) => {
       const feedback = context.theme.text.feedback;
-      if (tone === 'success') return feedback.success.base;
-      if (tone === 'warning') return feedback.warning.base;
-      if (tone === 'error') return feedback.error.base;
-      return context.theme.text.muted;
+      switch (tone) {
+        case 'success':
+          return feedback.success.base;
+        case 'warning':
+          return feedback.warning.base;
+        case 'error':
+          return feedback.error.base;
+        default:
+          return context.theme.text.muted;
+      }
     };
 
     function Footer(props: { sessionID?: string }) {
@@ -498,12 +511,42 @@ export default {
         for (let i = 0; i < sessionIDs.length; i += 500) {
           const chunk = sessionIDs.slice(i, i + 500);
           const part = (await rpc.cleanupSessions(
-            { sessionIDs: chunk, scanID },
+            { sessionIDs: chunk, scanID, allowClientArchive: true },
             { location: { directory } },
           )) as CleanupResult;
           archived.push(...part.archived);
           alreadyArchived.push(...part.alreadyArchived);
           failed.push(...part.failed);
+          const pendingClientArchive = part.needsClientArchive ?? [];
+          if (pendingClientArchive.length > 0) {
+            let checked = 0;
+            const total = pendingClientArchive.length;
+            setProgress({ phase: 'archiving', checked: 0, total });
+            const clientArchived: string[] = [];
+            await mapLimit(pendingClientArchive, 8, async (sessionID) => {
+              try {
+                await context.client.session.update({ sessionID, archived: true });
+                clientArchived.push(sessionID);
+              } catch (error) {
+                failed.push({
+                  sessionID,
+                  reason: error instanceof Error ? error.message : String(error),
+                });
+              } finally {
+                checked++;
+                setProgress({ phase: 'archiving', checked, total });
+              }
+            });
+            if (clientArchived.length > 0) {
+              const finalized = (await rpc.cleanupSessions(
+                { sessionIDs: clientArchived, scanID, finalizeArchived: true },
+                { location: { directory } },
+              )) as CleanupResult;
+              archived.push(...finalized.archived);
+              alreadyArchived.push(...finalized.alreadyArchived);
+              failed.push(...finalized.failed);
+            }
+          }
         }
         const result: CleanupResult = { archived, alreadyArchived, failed };
         if (progressOpen) context.ui.dialog.clear();
@@ -529,7 +572,7 @@ export default {
         }
         if (result.failed.length > 0) {
           context.ui.toast.show({
-            message: result.failed.map((failure) => failure.reason).join('; '),
+            message: formatCleanupFailures(result.failed),
             variant: 'error',
           });
         }
@@ -588,9 +631,17 @@ export default {
         });
       const close = () => context.ui.dialog.clear();
       const runDialogAction = (action: StatusDialogAction) => {
-        if (action === 'refresh') reload();
-        else if (action === 'cleanup') cleanSession();
-        else close();
+        switch (action) {
+          case 'refresh':
+            reload();
+            break;
+          case 'cleanup':
+            cleanSession();
+            break;
+          case 'close':
+            close();
+            break;
+        }
       };
       const actionColor = (disabled: boolean, active: boolean) => {
         if (disabled) return context.theme.text.action.primary.disabled;
@@ -1099,8 +1150,13 @@ export default {
 
     const stops = [
       rpc.events.on('sessionsCleanedUp', (event) => {
-        const { sessionIDs } = event.data as EventData<'sessionsCleanedUp'>;
+        const { sessionIDs, archive } = event.data as EventData<'sessionsCleanedUp'>;
         closeCleanedSessions(sessionIDs);
+        if (archive) {
+          for (const sessionID of sessionIDs) {
+            void context.client.session.update({ sessionID, archived: true }).catch(() => {});
+          }
+        }
       }),
       rpc.events.on('feedbackChanged', (event) => {
         const { directory } = event.data as EventData<'feedbackChanged'>;

@@ -39,10 +39,12 @@ import { yesNo, type ReviewRequest } from './forge';
 import { reference, traitsOf } from './forges';
 import { detailsMessage, pipelineTone, type Tone } from './format';
 import { statusPill } from './gui-status';
+import { mapLimit } from './limit';
 import { showNotice } from './notice';
 import { ForgeSessionRpc, type CleanupProgress, type EventData } from './rpc';
 import {
   cleanupReadyOf,
+  formatCleanupFailures,
   formatCleanupProgress,
   formatCleanupSubtitle,
   worktreeLabel,
@@ -87,16 +89,20 @@ const EMPTY: InboxState = { items: [], paused: false };
 let nextGuiScanSeq = 0;
 const nextGuiScanID = () => `gui-cleanup-${Date.now()}-${++nextGuiScanSeq}`;
 
-const toneClass = (tone?: Tone) =>
-  tone === 'success'
-    ? 'fk-success'
-    : tone === 'warning'
-      ? 'fk-warning'
-      : tone === 'error'
-        ? 'fk-error'
-        : tone === 'muted'
-          ? 'fk-muted'
-          : undefined;
+function toneClass(tone?: Tone): string | undefined {
+  switch (tone) {
+    case 'success':
+      return 'fk-success';
+    case 'warning':
+      return 'fk-warning';
+    case 'error':
+      return 'fk-error';
+    case 'muted':
+      return 'fk-muted';
+    default:
+      return undefined;
+  }
+}
 
 export default Plugin.define({
   setup(ctx) {
@@ -200,6 +206,7 @@ export default Plugin.define({
       directory: string,
       sessionIDs: string[],
       scanID?: string,
+      onProgress?: (progress: CleanupProgressEvent) => void,
     ): Promise<CleanupResult | undefined> {
       try {
         const archived: string[] = [];
@@ -208,12 +215,46 @@ export default Plugin.define({
         for (let i = 0; i < sessionIDs.length; i += 500) {
           const chunk = sessionIDs.slice(i, i + 500);
           const part = (await rpc().cleanupSessions(
-            { sessionIDs: chunk, ...(scanID ? { scanID } : {}) },
+            { sessionIDs: chunk, ...(scanID ? { scanID } : {}), allowClientArchive: true },
             at(directory),
           )) as CleanupResult;
           archived.push(...part.archived);
           alreadyArchived.push(...part.alreadyArchived);
           failed.push(...part.failed);
+          const pendingClientArchive = part.needsClientArchive ?? [];
+          if (pendingClientArchive.length > 0) {
+            let checked = 0;
+            const total = pendingClientArchive.length;
+            onProgress?.({ phase: 'archiving', checked: 0, total });
+            const clientArchived: string[] = [];
+            await mapLimit(pendingClientArchive, 8, async (sessionID) => {
+              try {
+                await ctx.client.session.update({ sessionID, archived: true });
+                clientArchived.push(sessionID);
+              } catch (error) {
+                failed.push({
+                  sessionID,
+                  reason: error instanceof Error ? error.message : String(error),
+                });
+              } finally {
+                checked++;
+                onProgress?.({ phase: 'archiving', checked, total });
+              }
+            });
+            if (clientArchived.length > 0) {
+              const finalized = (await rpc().cleanupSessions(
+                {
+                  sessionIDs: clientArchived,
+                  ...(scanID ? { scanID } : {}),
+                  finalizeArchived: true,
+                },
+                at(directory),
+              )) as CleanupResult;
+              archived.push(...finalized.archived);
+              alreadyArchived.push(...finalized.alreadyArchived);
+              failed.push(...finalized.failed);
+            }
+          }
         }
         const result: CleanupResult = { archived, alreadyArchived, failed };
         closeCleanedTabs([...result.archived, ...result.alreadyArchived]);
@@ -236,7 +277,7 @@ export default Plugin.define({
         }
         if (result.failed.length > 0) {
           ctx.toast.show({
-            title: result.failed.map((failure) => failure.reason).join('; '),
+            title: formatCleanupFailures(result.failed),
             variant: 'error',
           });
         }
@@ -730,7 +771,7 @@ export default Plugin.define({
         setProgress(undefined);
         setCleaningID(key);
         try {
-          const result = await runSessionCleanup(props.directory, ids, scanID);
+          const result = await runSessionCleanup(props.directory, ids, scanID, setProgress);
           const doneIDs = [...(result?.archived ?? []), ...(result?.alreadyArchived ?? [])];
           if (doneIDs.length) {
             const archivedSet = new Set(doneIDs);
@@ -958,8 +999,13 @@ export default Plugin.define({
         void feedback.refresh();
         const stops = [
           currentRpc.events.on('sessionsCleanedUp', (event) => {
-            const { sessionIDs } = event.data as EventData<'sessionsCleanedUp'>;
+            const { sessionIDs, archive } = event.data as EventData<'sessionsCleanedUp'>;
             closeCleanedTabs(sessionIDs);
+            if (archive) {
+              for (const sessionID of sessionIDs) {
+                void ctx.client.session.update({ sessionID, archived: true }).catch(() => {});
+              }
+            }
           }),
           currentRpc.events.on('feedbackChanged', (event) => {
             const { directory } = event.data as EventData<'feedbackChanged'>;

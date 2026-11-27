@@ -176,6 +176,8 @@ export const ForgeSessionRpc = {
         type: 'object',
         properties: {
           scanID: { type: 'string' },
+          allowClientArchive: { type: 'boolean' },
+          finalizeArchived: { type: 'boolean' },
           sessionIDs: {
             type: 'array',
             items: { type: 'string' },
@@ -208,6 +210,7 @@ export const ForgeSessionRpc = {
         type: 'object',
         properties: {
           sessionIDs: { type: 'array', items: { type: 'string' } },
+          archive: { type: 'boolean' },
         },
         required: ['sessionIDs'],
         additionalProperties: false,
