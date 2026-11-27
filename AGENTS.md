@@ -108,14 +108,16 @@ Verify by running `mise run test`, `mise run build`, and `mise run typecheck` su
 ## Releasing
 
 Releases are fully automated via [release-please](https://github.com/googleapis/release-please)
-and GitHub Actions. **Do NOT manually bump versions.**
+and GitHub Actions. **Do NOT manually bump versions, and do NOT merge release-please PRs unless the
+user explicitly asks to cut a release.**
 
 1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/)
    (e.g. `fix:`, `feat:`, `chore:`).
-2. Release-please creates separate release PRs per package.
-3. Merge the release PR with `gh pr merge --admin --squash <number>`. Release-please opens it with
-   `GITHUB_TOKEN`, so CI never runs on it and the required check needs an admin bypass. The merge
-   creates a GitHub Release and stages the version on npm with `npm stage publish`.
+2. Release-please creates and updates separate release PRs per package as changes land on `main`.
+3. Only when the user explicitly asks to release, merge the release PR with
+   `gh pr merge --admin --squash <number>`. Release-please opens it with `GITHUB_TOKEN`, so CI never
+   runs on it and the required check needs an admin bypass. The merge creates a GitHub Release and
+   stages the version on npm with `npm stage publish`.
 4. Approve the staged version with two-factor authentication, on the **Staged Packages** tab on
    npmjs.com or with `npm stage list` and `npm stage approve <stage-id>`. Until then, the version
    isn't installable.
