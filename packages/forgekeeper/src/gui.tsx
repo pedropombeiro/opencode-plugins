@@ -35,8 +35,8 @@ import {
   type FeedbackItem,
   type InboxState,
 } from './feedback-inbox';
-import { yesNo, type ReviewRequest } from './forge';
-import { reference, traitsOf } from './forges';
+import { yesNo, type ForgeKind, type ReviewRequest } from './forge';
+import { forgeScope, reference, requestNoun, requestPlural, traitsOf } from './forges';
 import { detailsMessage, pipelineTone, type Tone } from './format';
 import { statusPill } from './gui-status';
 import { mapLimit } from './limit';
@@ -55,7 +55,7 @@ import {
 } from './session-cleanup';
 import type { Place } from './status-client';
 import type { Repository } from './git';
-import type { Lookup, Snapshot } from './store';
+import { snapshotForge, type Lookup, type Snapshot } from './store';
 
 const CSS = `
 .forgekeeper-panel { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; overflow-y: auto; height: 100%; font-size: 13px; line-height: 1.5; color: var(--v2-text-text-base); }
@@ -148,6 +148,12 @@ export default Plugin.define({
       version();
       return client()?.enabled(directory) ?? true;
     };
+    const forgeFor = (directory: string): ForgeKind | undefined => {
+      version();
+      return client()?.forge(directory);
+    };
+    const sessionForge = (place: Place): ForgeKind | undefined =>
+      snapshotForge(snapshotOf(place), forgeFor(place.directory));
     const inboxOf = (directory: string) => inboxes[directory] ?? EMPTY;
     const requestsOf = (place: Place): ReviewRequest[] => {
       const lookup = snapshotOf(place).lookup;
@@ -180,9 +186,11 @@ export default Plugin.define({
     };
 
     // Commands explain why nothing happens when the checkout has status off.
-    const statusOff = (directory: string) => {
+    const statusOff = (directory: string, forge = forgeFor(directory)) => {
       if (enabledFor(directory)) return false;
-      ctx.toast.show({ title: "PR/MR status is off in the plugin's options (status: false)" });
+      ctx.toast.show({
+        title: `${requestNoun(forge)} status is off in the plugin's options (status: false)`,
+      });
       return true;
     };
 
@@ -318,12 +326,17 @@ export default Plugin.define({
       const place = placeOf(session);
       if (!enabledFor(place.directory)) return undefined;
       const updates = feedbackFooter(inboxOf(place.directory), session.id);
-      return statusPill(snapshotOf(place), updates, {
-        external: (url) => ctx.system.openExternal(url),
-        status: () => open(STATUS_TAB, session),
-        feedback: () => open(FEEDBACK_TAB, session),
-        cleanup: () => openCleanup(place.directory),
-      });
+      return statusPill(
+        snapshotOf(place),
+        updates,
+        {
+          external: (url) => ctx.system.openExternal(url),
+          status: () => open(STATUS_TAB, session),
+          feedback: () => open(FEEDBACK_TAB, session),
+          cleanup: () => openCleanup(place.directory),
+        },
+        forgeFor(place.directory),
+      );
     }
 
     const ui = ctx.ui;
@@ -459,6 +472,8 @@ export default Plugin.define({
         equals: (a, b) => a.directory === b.directory && a.key === b.key,
       });
       const snapshot = createMemo(() => snapshotOf(place()));
+      const forge = createMemo(() => snapshotForge(snapshot(), forgeFor(place().directory)));
+      const noun = createMemo(() => requestNoun(forge()));
       const ready = createMemo(() => cleanupReadyOf(snapshot()));
       const [cleaning, setCleaning] = createSignal(false);
       const found = () => {
@@ -470,7 +485,7 @@ export default Plugin.define({
       return (
         <div class="forgekeeper-panel">
           <header>
-            <h2>PR/MR status</h2>
+            <h2>{noun()} status</h2>
             <div class="fk-actions">
               <Show when={ready()}>
                 <ui.Button
@@ -500,7 +515,7 @@ export default Plugin.define({
               </ui.Button>
             </div>
           </header>
-          <Show when={enabledFor(place().directory)} fallback={<div>PR/MR status is off.</div>}>
+          <Show when={enabledFor(place().directory)} fallback={<div>{noun()} status is off.</div>}>
             <Show when={ready()}>
               {(value: () => NonNullable<ReturnType<typeof ready>>) => (
                 <div class="fk-success">
@@ -512,7 +527,7 @@ export default Plugin.define({
               when={found()}
               fallback={
                 <div class={`fk-pre ${snapshot().error ? 'fk-error' : 'fk-muted'}`}>
-                  {detailsMessage(snapshot())}
+                  {detailsMessage(snapshot(), forgeFor(place().directory))}
                 </div>
               }
             >
@@ -545,7 +560,7 @@ export default Plugin.define({
                     )}
                   </For>
                   <Show when={lookup().requests.length === 0}>
-                    <div class="fk-muted">No PR/MR status available.</div>
+                    <div class="fk-muted">No {noun()} status available.</div>
                   </Show>
                   <For each={lookup().requests}>
                     {(request) => (
@@ -787,12 +802,16 @@ export default Plugin.define({
         }
       };
 
+      const forge = createMemo(() => forgeFor(props.directory));
+      const noun = createMemo(() => requestNoun(forge()));
+      const plural = createMemo(() => requestPlural(forge()));
+
       const fallbackMessage = () => {
-        if (loading()) return formatCleanupProgress(progress(), 'scan');
+        if (loading()) return formatCleanupProgress(progress(), 'scan', forge());
         if (scan().enabled) {
-          return 'No sessions with all PRs/MRs merged or tracked issues closed.';
+          return `No sessions with all ${plural()} merged or tracked issues closed.`;
         }
-        return 'PR/MR status is off. Enable options.status in opencode.json to use this command.';
+        return `${noun()} status is off. Enable options.status in opencode.json to use this command.`;
       };
 
       const renderRow = (candidate: CleanupCandidate) => {
@@ -833,7 +852,7 @@ export default Plugin.define({
       return (
         <ui.Dialog
           title="Clean up finished sessions"
-          description="Archive idle sessions whose PRs/MRs have merged or tracked issues have closed, and close their open tabs."
+          description={`Archive idle sessions whose ${plural()} have merged or tracked issues have closed, and close their open tabs.`}
           size="large"
           footer={
             <div class="fk-cleanup-footer">
@@ -876,7 +895,7 @@ export default Plugin.define({
               </div>
             </Show>
             <Show when={cleaningID() !== undefined && progress()}>
-              <div class="fk-muted">{formatCleanupProgress(progress(), 'cleanup')}</div>
+              <div class="fk-muted">{formatCleanupProgress(progress(), 'cleanup', forge())}</div>
             </Show>
             <Show
               when={!loading() && candidates().length > 0}
@@ -905,13 +924,22 @@ export default Plugin.define({
     }
 
     const tab = (id: string, title: string): PanelTab => ({ id, title, closable: 'hover' });
-    const statusTab = tab(STATUS_TAB, 'PR/MR status');
+    const statusTabs = {
+      github: tab(STATUS_TAB, 'PR status'),
+      gitlab: tab(STATUS_TAB, 'MR status'),
+      mixed: tab(STATUS_TAB, 'PR/MR status'),
+    };
+    const statusTabFor = (session: MountedSession): PanelTab => {
+      if (!ownServer(session)) return statusTabs.mixed;
+      const forge = sessionForge(placeOf(session));
+      return forge ? statusTabs[forge] : statusTabs.mixed;
+    };
     const feedbackTab = tab(FEEDBACK_TAB, 'Review updates');
     ctx.add(Panel, {
       id: STATUS_TAB,
       region: 'side',
       width: 420,
-      list: (input) => (input.open.includes(STATUS_TAB) ? [statusTab] : []),
+      list: (input) => (input.open.includes(STATUS_TAB) ? [statusTabFor(input.session)] : []),
       render: (props) => <StatusView session={props.session} />,
     });
     ctx.add(Panel, {
@@ -922,16 +950,24 @@ export default Plugin.define({
       render: (props) => <FeedbackView session={props.session} />,
     });
 
+    const currentForge = () => {
+      const session = current();
+      return session ? sessionForge(placeOf(session)) : undefined;
+    };
+
     ctx.add(Command, (): Command => ({
       id: 'status',
-      title: 'Show PR/MR status',
+      title: `Show ${requestNoun(currentForge())} status`,
+      keywords: 'PR MR pull request merge request',
       group: 'Forge',
       slash: { name: 'forge-status' },
       enabled: !!current(),
       run: () => {
         const session = current();
-        if (!session || statusOff(directoryOf(session))) return;
-        void client()?.refresh(placeOf(session));
+        if (!session) return;
+        const place = placeOf(session);
+        if (statusOff(place.directory, sessionForge(place))) return;
+        void client()?.refresh(place);
         open(STATUS_TAB, session);
       },
     }));
@@ -950,28 +986,31 @@ export default Plugin.define({
     }));
     ctx.add(Command, (): Command => ({
       id: 'open',
-      title: 'Open PR/MR in browser',
+      title: `Open ${requestNoun(currentForge())} in browser`,
+      keywords: 'PR MR pull request merge request',
       group: 'Forge',
       slash: { name: 'forge-open' },
       enabled: !!current(),
       run: async () => {
         const session = current();
-        if (!session || statusOff(directoryOf(session))) return;
+        if (!session) return;
         const place = placeOf(session);
+        if (statusOff(place.directory, sessionForge(place))) return;
         let requests = requestsOf(place);
         if (requests.length === 0) {
           await client()?.refresh(place);
           requests = requestsOf(place);
         }
         if (requests.length === 0) {
-          ctx.toast.show({ title: 'No PR/MR for this session' });
+          ctx.toast.show({ title: `No ${requestNoun(sessionForge(place))} for this session` });
           return;
         }
+        const forge = forgeScope(requests.map((request) => request.forge));
         const url =
           requests.length === 1
             ? requests[0].url
             : await ctx.dialogs.select({
-                title: 'Open PR/MR',
+                title: `Open ${requestNoun(forge)}`,
                 options: requests.map((request) => ({
                   title: `${reference(request)} ${request.title}`,
                   description: request.targetProject,

@@ -11,7 +11,7 @@ import {
   type InboxState,
 } from './feedback-inbox';
 import type { CommentDetail, FeedbackTarget, LinkedNote } from './forge';
-import { parseUrl, traitsOf } from './forges';
+import { parseReference, parseUrl, requestFullNoun, traitsOf } from './forges';
 import { createKeyedQueue } from './keyed-queue';
 import { REPLIES_UNAVAILABLE } from './review-request-watch';
 import {
@@ -49,6 +49,33 @@ import {
 } from './review-summary';
 
 const SUMMARY_STORE = 'status/summaries/';
+
+function deliveryFooter(options: {
+  summary: boolean;
+  event: boolean;
+  approved: boolean;
+  asked: boolean;
+  hasAllowedLinks: boolean;
+  fullNoun: string;
+}): string {
+  const { summary, event, approved, asked, hasAllowedLinks, fullNoun } = options;
+  if (summary) {
+    if (event) return `Forgekeeper summarizes this ${fullNoun} change without tools.`;
+    if (approved) return 'Forgekeeper summarizes this review approval without tools.';
+    if (asked) return 'Forgekeeper summarizes this review request without tools.';
+    if (hasAllowedLinks) {
+      return 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.';
+    }
+    return 'Forgekeeper summarizes this review feedback without tools.';
+  }
+  if (event) {
+    const capitalized = fullNoun.charAt(0).toUpperCase() + fullNoun.slice(1);
+    return `${capitalized} update only. No action requested.`;
+  }
+  if (approved) return 'Review approval only. No action requested.';
+  if (asked) return 'Review request only. No action requested.';
+  return 'Review update only. No action requested.';
+}
 const SUMMARY_RETENTION = 7 * 24 * 60 * 60_000;
 export const summaryPrefix = (sessionID: string) =>
   `${SUMMARY_STORE}${encodeURIComponent(sessionID)}/`;
@@ -245,6 +272,7 @@ export function createSummaryDelivery(
     await ctx.storage.set(summaryKey(item.sessionID, messageID), record as never);
     track(item.sessionID, messageID);
     if (host.closing()) throw new Error('The plugin stopped');
+    const fullNoun = requestFullNoun(parseReference(item.url)?.ref.forge);
     await ctx.session.synthetic({
       sessionID: item.sessionID,
       id: messageID,
@@ -253,23 +281,14 @@ export function createSummaryDelivery(
         feedbackTime(item),
         ...links,
         ...((event || asked || approved) && item.details?.length ? [item.details.join('\n')] : []),
-        summary
-          ? event
-            ? 'Forgekeeper summarizes this merge request change without tools.'
-            : approved
-              ? 'Forgekeeper summarizes this review approval without tools.'
-              : asked
-                ? 'Forgekeeper summarizes this review request without tools.'
-                : allowed.length
-                  ? 'Forgekeeper summarizes this review feedback. It can read only the notes these comments link to.'
-                  : 'Forgekeeper summarizes this review feedback without tools.'
-          : event
-            ? 'Merge request update only. No action requested.'
-            : approved
-              ? 'Review approval only. No action requested.'
-              : asked
-                ? 'Review request only. No action requested.'
-                : 'Review update only. No action requested.',
+        deliveryFooter({
+          summary,
+          event: !!event,
+          approved,
+          asked,
+          hasAllowedLinks: allowed.length > 0,
+          fullNoun,
+        }),
         messageTag(messageID),
       ].join('\n\n'),
       description: item.title,

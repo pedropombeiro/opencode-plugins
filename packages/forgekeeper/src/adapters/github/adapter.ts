@@ -267,6 +267,7 @@ function parseGitHubUrl(url: string, pattern: RegExp) {
 export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
   kind: 'github',
   noun: 'PR',
+  fullNoun: 'pull request',
   ci: 'checks',
   // GitHub hosts come only from the `githubHosts` option.
   recognizes: () => false,

@@ -11,7 +11,7 @@ import { isJobFailure } from './job-investigation';
 import { linkedMetadata, linkedPlaceholder, type DirectorySession } from './linked-session';
 import { isForgekeeperInput } from './review-summary';
 import { listWorktrees, shortStatus } from './git';
-import { parseUrl } from './forges';
+import { parseReference, parseUrl, requestNoun } from './forges';
 import { PLUGIN_ID } from './plugin-id';
 import {
   inCheckout,
@@ -233,12 +233,13 @@ export function createLocalEnvironment(input: {
     recover,
     async provision(record, update) {
       await recover(record);
+      const noun = requestNoun(parseReference(record.item.url)?.ref.forge);
       const request = await input.request(record.item.url);
       if (!request || request.state !== 'opened')
-        throw new Ineligible('The PR/MR is no longer open');
+        throw new Ineligible(`The ${noun} is no longer open`);
       if (!request.headSha || !request.sourceProject || !request.sourceBranch)
         throw new Ineligible(
-          "The forge didn't report the PR/MR's source branch and head commit, so no environment can be prepared.",
+          `The forge didn't report the ${noun}'s source branch and head commit, so no environment can be prepared.`,
         );
       const source = {
         head: request.headSha,
@@ -248,7 +249,7 @@ export function createLocalEnvironment(input: {
       const previous = localExecution(record);
       if (previous.head && previous.head !== source.head)
         throw new Error(
-          'The PR/MR head changed during environment provisioning. Retry feedback work.',
+          `The ${noun} head changed during environment provisioning. Retry feedback work.`,
         );
       const owner = await ctx.session.get({ sessionID: record.item.sessionID });
       const policy = await input.policy(owner);

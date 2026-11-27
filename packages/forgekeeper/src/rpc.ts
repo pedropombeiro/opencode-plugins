@@ -35,6 +35,7 @@ const target = {
 } as const;
 
 const key = { type: 'string' } as const;
+const forgeKind = { type: 'string', enum: ['gitlab', 'github'] } as const;
 // A `Snapshot` from src/store.ts. Its title lets `Deserialize` map it to that
 // type, so the schema doesn't repeat the lookup's shape.
 const snapshot = { type: 'object', title: 'Snapshot' } as const;
@@ -42,7 +43,7 @@ const inboxState = { type: 'object', title: 'InboxState' } as const;
 // `enabled` is false when the plugin's `status` option is off.
 const status = {
   type: 'object',
-  properties: { enabled: { type: 'boolean' }, snapshot },
+  properties: { enabled: { type: 'boolean' }, forge: forgeKind, snapshot },
   required: ['enabled', 'snapshot'],
   additionalProperties: false,
 } as const;
@@ -137,6 +138,7 @@ export const ForgeSessionRpc = {
         type: 'object',
         properties: {
           enabled: { type: 'boolean' },
+          forge: forgeKind,
           statuses: { type: 'object', additionalProperties: snapshot },
         },
         required: ['enabled', 'statuses'],

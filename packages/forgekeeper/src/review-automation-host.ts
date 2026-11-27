@@ -15,7 +15,7 @@ import {
   type ReviewRef,
   type ReviewRequest,
 } from './forge';
-import { parseUrl, traitsOf, type ForgeCatalog } from './forges';
+import { parseReference, parseUrl, requestNoun, traitsOf, type ForgeCatalog } from './forges';
 import {
   INVESTIGATION_INSTRUCTIONS,
   INVESTIGATION_QUIET_TIME,
@@ -360,7 +360,8 @@ export async function readVerifiedApprovals(
   const ref = parseUrl(item.url);
   if (!target || !ref) throw new Error('The review target is invalid');
   const request = await currentRequest(deps, directory, item.url);
-  if (!request || request.state !== 'opened') throw new Ineligible('The PR/MR is no longer open');
+  if (!request || request.state !== 'opened')
+    throw new Ineligible(`The ${requestNoun(ref.forge)} is no longer open`);
   if (!approvalsComplete(request))
     throw new Error('Current approvals are incomplete; no follow-up turn was started');
   const capability = traitsOf(target).feedback;
@@ -421,10 +422,20 @@ async function currentRequest(
 function pipelineMismatch(request: ReviewRequest, item: FeedbackItem): string | undefined {
   if (!request.pipeline?.id || request.pipeline.id !== item.pipeline)
     return `A newer ${traitsOf(request).ci} replaced the failing one, so the failure may already be fixed.`;
-  if (!request.headSha) return "The forge didn't report the PR/MR's head commit.";
+  if (!request.headSha)
+    return `The forge didn't report the ${traitsOf(request).noun}'s head commit.`;
 }
 
 // Resolves a rule author's username to their account ID, or undefined when
+function authorIneligibleMessage(noun: string, jobs: boolean, approval: boolean): string {
+  if (jobs) {
+    return `You neither wrote nor review this ${noun}, and no automation rule lists its author, so automatic investigation is skipped. Use Act on feedback to investigate anyway.`;
+  }
+  if (approval) {
+    return `You did not write this ${noun}, and no automation rule lists its author, so approval follow-up is not authorized.`;
+  }
+  return `You did not write this ${noun}, and no automation rule lists its author, so automatic action is skipped. Use Act on feedback to act anyway.`;
+}
 // it can't be resolved.
 type AuthorResolver = (
   ref: ReviewRef,
@@ -469,13 +480,7 @@ async function authorRules(
       : [],
   );
   if (!matched.size)
-    throw new Ineligible(
-      jobs
-        ? 'You neither wrote nor review this PR/MR, and no automation rule lists its author, so automatic investigation is skipped. Use Act on feedback to investigate anyway.'
-        : approval
-          ? 'You did not write this PR/MR, and no automation rule lists its author, so approval follow-up is not authorized.'
-          : 'You did not write this PR/MR, and no automation rule lists its author, so automatic action is skipped. Use Act on feedback to act anyway.',
-    );
+    throw new Ineligible(authorIneligibleMessage(traitsOf(request).noun, jobs, approval));
   return rules.filter(
     (rule) => !matching(rule) || !!rule.authors?.some((name) => matched.has(name)),
   );
@@ -504,7 +509,7 @@ async function resolvePolicy(
   const ref = parseUrl(item.url);
   const request = ref && (await currentRequest(deps, directory, item.url));
   if (!ref || !request || request.state !== 'opened')
-    throw new Ineligible('The PR/MR is no longer open');
+    throw new Ineligible(`The ${requestNoun(ref?.forge)} is no longer open`);
   const jobs = isJobFailure(item);
   const approval = isApproval(item);
   const applicable =
@@ -516,7 +521,9 @@ async function resolvePolicy(
     if (mismatch) throw new Ineligible(mismatch);
   }
   if (!approval && (!request.sourceProject || !request.sourceBranch))
-    throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+    throw new Ineligible(
+      `The checkout does not match the ${traitsOf(request).noun} source project and branch`,
+    );
   return { ref, request, rules: applicable };
 }
 
@@ -528,6 +535,7 @@ async function checkoutMismatch(
   { ref, request }: Policy,
   jobs: boolean,
 ): Promise<string | undefined> {
+  const noun = traitsOf(request).noun;
   const checkout = await deps.forges.repository(directory);
   if (
     checkout.kind !== 'repository' ||
@@ -535,11 +543,11 @@ async function checkoutMismatch(
     checkout.repository.source.path !== request.sourceProject ||
     checkout.repository.sourceBranch !== request.sourceBranch
   )
-    return 'The checkout does not match the PR/MR source project and branch';
+    return `The checkout does not match the ${noun} source project and branch`;
   if (request.headSha && checkout.repository.head !== request.headSha)
     return jobs
       ? `The checkout isn't at the head commit that the failing ${traitsOf(request).ci} tested, so the failure may already be fixed. To investigate anyway, check out ${request.headSha.slice(0, 12)}, then use Retry feedback work.`
-      : 'The checkout does not match the PR/MR source project and branch';
+      : `The checkout does not match the ${noun} source project and branch`;
   return undefined;
 }
 
@@ -551,7 +559,10 @@ async function readFailures(
   item: FeedbackItem,
 ): Promise<PipelineFailures> {
   const request = await currentRequest(deps, directory, item.url);
-  if (!request || request.state !== 'opened') throw new Ineligible('The PR/MR is no longer open');
+  if (!request || request.state !== 'opened')
+    throw new Ineligible(
+      `The ${requestNoun(parseReference(item.url)?.ref.forge)} is no longer open`,
+    );
   const mismatch = pipelineMismatch(request, item);
   if (mismatch) throw new Ineligible(mismatch);
   const pipeline = request.pipeline!;
@@ -701,7 +712,9 @@ export function createAutomationHost(
     configured: readonly AutomationRule[],
   ): Promise<Validation> {
     if (!(await env.deliverable(item)))
-      throw new Ineligible('The session no longer targets this PR/MR here');
+      throw new Ineligible(
+        `The session no longer targets this ${requestNoun(parseReference(item.url)?.ref.forge)} here`,
+      );
     const session = await ctx.session.get({ sessionID: item.sessionID });
     if (session.parentID) throw new Ineligible('Subagents cannot own review automation');
     const policy = await resolvePolicy(deps, directory, configured, resolveAuthor, item, automatic);
@@ -786,7 +799,9 @@ export function createAutomationHost(
         async check(item, automatic, configured) {
           const { placement, rules } = await validateWith(item, automatic, configured);
           if (placement !== 'session')
-            throw new Ineligible('The checkout does not match the PR/MR source project and branch');
+            throw new Ineligible(
+              `The checkout does not match the ${requestNoun(parseReference(item.url)?.ref.forge)} source project and branch`,
+            );
           return rules;
         },
         admit: async () => {},
@@ -828,7 +843,7 @@ export function createAutomationHost(
           throw new Error('The automation rules no longer let this turn run in an environment');
         if (request.headSha !== execution.head)
           throw new Error(
-            'The PR/MR has a newer head commit than the worktree. Retry feedback work.',
+            `The ${traitsOf(request).noun} has a newer head commit than the worktree. Retry feedback work.`,
           );
         return rules;
       },
@@ -858,8 +873,9 @@ export function createAutomationHost(
     details: readonly string[],
   ): string[] {
     if (phase === 'started') {
+      const noun = requestNoun(parseReference(url)?.ref.forge);
       return [
-        `Forgekeeper is ${task} ${url} in a linked session, because this checkout isn't at the PR/MR's head commit.`,
+        `Forgekeeper is ${task} ${url} in a linked session, because this checkout isn't at the ${noun}'s head commit.`,
         ...details,
       ];
     }

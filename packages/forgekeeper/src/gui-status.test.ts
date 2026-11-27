@@ -85,13 +85,13 @@ describe('Desktop status pill', () => {
     const { actions, calls } = harness();
     const pill = statusPill(snapshot([mr()]), '📥 2', actions)!;
     expect(pill.label).toBe('!4281 · 💬 2 · ✓ CI · ◷ @david · 📥 2');
-    expect(pill.title).toBe('PR/MR status');
+    expect(pill.title).toBe('MR status');
     expect(pill.rows?.map((row) => row.label)).toEqual([
       '!4281',
       'CI passed',
       '2 unresolved threads',
       'awaiting @david',
-      'Show PR/MR status',
+      'Show MR status',
       '📥 2',
     ]);
     pill.rows?.[0].run?.();
@@ -129,7 +129,7 @@ describe('Desktop status pill', () => {
       '!4281',
       '!4282',
       '2 open MRs, run /mr-status',
-      'Show PR/MR status',
+      'Show MR status',
     ]);
     pill?.rows?.[0].run?.();
     pill?.rows?.[1].run?.();
@@ -217,7 +217,7 @@ describe('Desktop status pill', () => {
     const withCleanup = { ...actions, cleanup: () => calls.push('cleanup') };
     const mergedPill = statusPill(snapshot([mr({ state: 'merged' })]), undefined, withCleanup);
     const cleanupRow = mergedPill?.rows?.find((row) => row.id === 'cleanup');
-    expect(cleanupRow?.label).toBe('PR/MR merged · /forge-cleanup');
+    expect(cleanupRow?.label).toBe('MR merged · /forge-cleanup');
     cleanupRow?.run?.();
     expect(calls).toEqual(['cleanup']);
 
@@ -238,5 +238,35 @@ describe('Desktop status pill', () => {
     expect(issuePill?.rows?.find((row) => row.id === 'cleanup')?.label).toBe(
       'Tracked issue closed · /forge-cleanup',
     );
+  });
+
+  test('adapts pill title and details row to GitHub, GitLab, mixed, and defaultForge', () => {
+    const { actions } = harness();
+    const pr = {
+      ...mr(),
+      forge: 'github' as const,
+      iid: '7',
+      url: 'https://github.com/o/r/pull/7',
+    };
+    const ghPill = statusPill(
+      { loading: false, lookup: { kind: 'found', explicitTarget: true, requests: [pr] } },
+      undefined,
+      actions,
+    )!;
+    expect(ghPill.title).toBe('PR status');
+    expect(ghPill.rows?.find((row) => row.id === 'details')?.label).toBe('Show PR status');
+
+    const mixedPill = statusPill(
+      { loading: false, lookup: { kind: 'found', explicitTarget: true, requests: [mr(), pr] } },
+      undefined,
+      actions,
+      'github',
+    )!;
+    expect(mixedPill.title).toBe('PR/MR status');
+    expect(mixedPill.rows?.find((row) => row.id === 'details')?.label).toBe('Show PR/MR status');
+
+    const fallbackPill = statusPill({ loading: false }, '📥 1', actions, 'github')!;
+    expect(fallbackPill.title).toBe('PR status');
+    expect(fallbackPill.rows?.find((row) => row.id === 'details')?.label).toBe('Show PR status');
   });
 });

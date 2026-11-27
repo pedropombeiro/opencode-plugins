@@ -130,6 +130,17 @@ describe('footerSegments', () => {
     ).toEqual([]);
     expect(text({ loading: false, error, targeted: true })).toBe('PR/MR status unavailable');
     expect(text({ loading: true, error, targeted: true })).toBe('PR/MR status unavailable');
+    expect(text({ loading: false, error, targeted: true, forge: 'github' })).toBe(
+      'PR status unavailable',
+    );
+    expect(
+      footerSegments({ loading: false, error, targeted: true }, 'gitlab').map((s) => s.text),
+    ).toEqual(['MR status unavailable']);
+    expect(
+      footerSegments({ loading: false, error, targeted: true, forge: 'mixed' }, 'gitlab').map(
+        (s) => s.text,
+      ),
+    ).toEqual(['PR/MR status unavailable']);
     const unresolved = { kind: 'none' as const, reason: 'Not found', explicitTarget: true };
     expect(text({ lookup: unresolved, loading: false, targeted: true })).toBe(
       'PR/MR status unavailable',
@@ -137,6 +148,9 @@ describe('footerSegments', () => {
     expect(text({ lookup: unresolved, loading: true, targeted: true })).toBe(
       'PR/MR status unavailable',
     );
+    expect(
+      text({ lookup: { ...unresolved, forge: 'gitlab' }, loading: false, targeted: true }),
+    ).toBe('MR status unavailable');
     expect(text(snapshot([mr()], { error }))).toBe(
       '!4281 · CI failed · 2 unresolved threads · stale',
     );
@@ -349,6 +363,26 @@ describe('responsiveFooterSegments', () => {
   test('restores the full format when space increases', () => {
     responsiveFooterSegments(value, 12);
     expect(responsiveFooterSegments(value, 100)).toEqual(footerSegments(value));
+  });
+
+  test('adapts detailsMessage to session and default forge', () => {
+    const error = { kind: 'request' as const, message: 'boom', at: 0 };
+    expect(detailsMessage({ loading: false, error }, 'github')).toContain(
+      'Could not look up the PR.',
+    );
+    expect(detailsMessage({ loading: false, error, forge: 'gitlab' }, 'github')).toContain(
+      'Could not look up the MR.',
+    );
+    expect(detailsMessage({ loading: false, error, forge: 'mixed' }, 'github')).toContain(
+      'Could not look up the PR/MR.',
+    );
+    expect(
+      detailsMessage(
+        { loading: false, lookup: { kind: 'none', reason: 'No session target is set' } },
+        'gitlab',
+      ),
+    ).toContain('No MR lookup: No session target is set.');
+    expect(detailsMessage(snapshot([]), 'github')).toContain('No open PR for this branch.');
   });
 });
 

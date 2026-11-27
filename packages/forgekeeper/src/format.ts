@@ -2,13 +2,14 @@ import { automatedReview } from './automated-review-watch';
 import {
   awaitingText,
   yesNo,
+  type ForgeKind,
   type Indicator,
   type Pipeline,
   type ReviewRequest,
   type Tone,
 } from './forge';
-import { reference, traitsOf } from './forges';
-import type { Snapshot } from './store';
+import { reference, requestNoun, requestPlural, sharedForge, traitsOf } from './forges';
+import { snapshotForge, type Snapshot } from './store';
 
 export type { Tone };
 export type Segment = Indicator;
@@ -66,12 +67,11 @@ function ci(request: ReviewRequest): Segment {
 // Counts the PRs/MRs in each state, for a session with several targets.
 // Clicking a segment without a link opens the status dialog with the details.
 function targetsSummary(requests: ReviewRequest[]): Segment[] {
-  const nouns = new Set(requests.map((request) => traitsOf(request).noun));
-  const noun = nouns.size === 1 ? [...nouns][0] : 'PR/MR';
+  const forge = sharedForge(requests.map((request) => request.forge));
   const count =
     requests.length === 1
-      ? `1 ${noun}`
-      : `${requests.length} ${noun === 'PR/MR' ? 'PRs/MRs' : `${noun}s`}`;
+      ? `1 ${requestNoun(forge)}`
+      : `${requests.length} ${requestPlural(forge)}`;
   const open = requests.filter((request) => request.state === 'opened');
   const segments: Segment[] = [{ text: count, tone: 'muted', essential: true }];
   const reviewing = open.filter((request) => automatedReview(request)?.state === 'running').length;
@@ -99,15 +99,16 @@ function targetsSummary(requests: ReviewRequest[]): Segment[] {
   return segments;
 }
 
-export function footerSegments(snapshot: Snapshot): Segment[] {
+export function footerSegments(snapshot: Snapshot, defaultForge?: ForgeKind): Segment[] {
   const { lookup, error } = snapshot;
   const stale: Segment[] = error ? [{ text: 'stale', tone: 'warning', essential: true }] : [];
   // Without a PR/MR to show, only explicit PR/MR targets warn. A failed
   // branch lookup, such as in a new session, may concern no PR/MR at all;
   // /forge-status still explains it.
   if (!lookup || lookup.kind === 'none' || lookup.requests.length === 0) {
+    const noun = requestNoun(snapshotForge(snapshot, defaultForge));
     return snapshot.targeted && (error || lookup?.explicitTarget)
-      ? [{ text: 'PR/MR status unavailable', tone: 'warning' }]
+      ? [{ text: `${noun} status unavailable`, tone: 'warning' }]
       : [];
   }
   if (lookup.failed?.length) {
@@ -166,8 +167,12 @@ export function footerSegments(snapshot: Snapshot): Segment[] {
 export const segmentsWidth = (segments: Segment[]) =>
   Bun.stringWidth(segments.map((segment) => segment.text).join(' · '));
 
-export function responsiveFooterSegments(snapshot: Snapshot, width: number): Segment[] {
-  const full = footerSegments(snapshot);
+export function responsiveFooterSegments(
+  snapshot: Snapshot,
+  width: number,
+  defaultForge?: ForgeKind,
+): Segment[] {
+  const full = footerSegments(snapshot, defaultForge);
   if (segmentsWidth(full) <= width) return full;
 
   const compact = full.map((segment): Segment => ({
@@ -218,14 +223,15 @@ function describe(request: ReviewRequest, head: string): string[] {
   return lines;
 }
 
-export function detailsMessage(snapshot: Snapshot): string {
+export function detailsMessage(snapshot: Snapshot, defaultForge?: ForgeKind): string {
   const { lookup, error, fetchedAt } = snapshot;
+  const noun = requestNoun(snapshotForge(snapshot, defaultForge));
   const lines: string[] = [];
 
   if (!lookup) {
-    lines.push(error ? 'Could not look up the PR/MR.' : 'No data yet.');
+    lines.push(error ? `Could not look up the ${noun}.` : 'No data yet.');
   } else if (lookup.kind === 'none') {
-    lines.push(`No PR/MR lookup: ${lookup.reason}.`);
+    lines.push(`No ${noun} lookup: ${lookup.reason}.`);
   } else {
     const { repository, sessionTarget, requests } = lookup;
     if (repository) {
@@ -234,7 +240,7 @@ export function detailsMessage(snapshot: Snapshot): string {
           ? repository.branch
           : `${repository.branch} (pushes to ${repository.sourceBranch})`;
       lines.push(`Branch: ${branch} in ${repository.source.path}`);
-      if (requests.length === 0) lines.push('', 'No open PR/MR for this branch.');
+      if (requests.length === 0) lines.push('', `No open ${noun} for this branch.`);
     } else if (sessionTarget) {
       lines.push(`Session target: ${sessionTarget}`);
     }

@@ -207,6 +207,8 @@ export interface ForgeTraits<
   readonly kind: Request['forge'];
   // "MR" or "PR".
   readonly noun: string;
+  // "merge request" or "pull request".
+  readonly fullNoun: string;
   // What the forge calls CI results, such as "pipeline".
   readonly ci: string;
   // Whether the forge serves a host that isn't configured, judging by its name.

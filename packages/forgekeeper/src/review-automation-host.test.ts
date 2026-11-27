@@ -456,7 +456,7 @@ describe('failed-job checks', () => {
     }
     const outsider = jobHost({ viewer: 'outsider' });
     await expect(outsider.host.validate(failure, true)).rejects.toThrow(
-      'You neither wrote nor review this PR/MR',
+      'You neither wrote nor review this MR',
     );
     // A manual run works on any PR/MR.
     await outsider.host.validate(failure, false);
@@ -501,7 +501,7 @@ describe('failed-job checks', () => {
       covered.close();
       const unlisted = serviceHost([reviewRule(['gitlabduo'])]);
       await expect(unlisted.host.validate(review, true)).rejects.toThrow(
-        'You did not write this PR/MR, and no automation rule lists its author',
+        'You did not write this MR, and no automation rule lists its author',
       );
       unlisted.close();
       // The username alone doesn't count: its account must be the author.
@@ -518,7 +518,7 @@ describe('failed-job checks', () => {
       covered.close();
       const unlisted = serviceHost([jobRule()]);
       await expect(unlisted.host.validate(failure, true)).rejects.toThrow(
-        'You neither wrote nor review this PR/MR, and no automation rule lists its author',
+        'You neither wrote nor review this MR, and no automation rule lists its author',
       );
       unlisted.close();
     });

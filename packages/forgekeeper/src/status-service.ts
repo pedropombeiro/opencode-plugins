@@ -4,7 +4,7 @@ import {
   type AutomatedReviewWatcher,
 } from './automated-review-watch';
 import type { ReviewRequest } from './forge';
-import { parseUrl, traitsOf } from './forges';
+import { parseUrl, traitsOf, type ForgeScope } from './forges';
 import { HOME, LEASE_TIME } from './rpc';
 import { createStatusStore, unresolved, type Lookup, type Snapshot } from './store';
 import { sameRef } from './target';
@@ -313,7 +313,8 @@ export function createStatusService(options: StatusServiceOptions) {
         void store.refresh(key);
       }
     },
-    setTargeted: (key: string, targeted: boolean) => store.setTargeted(key, targeted),
+    setTargeted: (key: string, targeted: boolean, forge?: ForgeScope) =>
+      store.setTargeted(key, targeted, forge),
     // After an event that may have changed the PRs/MRs, such as a turn ending.
     notify: (key: string) => store.notify(key),
     keys: () => store.keys(),

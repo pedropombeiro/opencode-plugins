@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { Repository } from './git';
 import { ForgeError, type ReviewRequest } from './forge';
-import { createStatusStore, TargetLookupError, type Lookup } from './store';
+import { createStatusStore, snapshotForge, TargetLookupError, type Lookup } from './store';
 import { flush } from './testing';
 
 const repository = {
@@ -224,6 +224,26 @@ describe('createStatusStore', () => {
     store.setTargeted('/a', false);
     expect(store.get('/a').targeted).toBeUndefined();
     expect(changes()).toBe(published + 2);
+    store.setTargeted('/a', true, 'github');
+    expect(snapshotForge(store.get('/a'), 'gitlab')).toBe('github');
+    store.setTargeted('/a', true, 'gitlab');
+    expect(snapshotForge(store.get('/a'), 'github')).toBe('gitlab');
+    store.setTargeted('/a', true, 'mixed');
+    expect(snapshotForge(store.get('/a'), 'github')).toBeUndefined();
+    store.dispose();
+  });
+
+  test('updates snapshot.forge when TargetLookupError changes or clears the forge scope', async () => {
+    let errorForge: 'github' | 'gitlab' | 'mixed' | undefined = 'github';
+    const { store } = harness(async () => {
+      throw new TargetLookupError(new Error('failed'), errorForge);
+    });
+    await store.refresh('/a');
+    expect(snapshotForge(store.get('/a'), 'gitlab')).toBe('github');
+    errorForge = undefined;
+    await store.refresh('/a');
+    expect(store.get('/a').forge).toBeUndefined();
+    expect(snapshotForge(store.get('/a'), 'gitlab')).toBe('gitlab');
     store.dispose();
   });
 

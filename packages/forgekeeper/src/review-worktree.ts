@@ -19,6 +19,7 @@ import {
   type WorktreeEntry,
 } from './git';
 import { isBusy, linkedOwner, type DirectorySession } from './linked-session';
+import { parseReference, requestNoun } from './forges';
 import { Ineligible } from './review-automation';
 import type {
   CheckoutLock,
@@ -285,7 +286,9 @@ async function createWorktree(
       'The configured OpenCode worktree strategy did not create a compatible Git checkout',
     );
   if (state?.head !== request.headSha)
-    throw new Error("The new worktree isn't at the PR/MR's head commit");
+    throw new Error(
+      `The new worktree isn't at the ${requestNoun(parseReference(request.url)?.ref.forge)}'s head commit`,
+    );
   const detached = !(await switchToBranch(deps, directory, request, entries, remote));
   return { directory, created: true, ...(remote ? { remote } : {}), detached };
 }
@@ -317,7 +320,9 @@ async function switchToBranch(
   // worktree stays detached, with the source project's remote to push to.
   if (!(await worktreeMismatch(exec, deps.repository, directory, request))) return true;
   if (!(await git(exec, directory, ['switch', '--detach', request.headSha])))
-    throw new Error("The new worktree's branch isn't the PR/MR's source branch");
+    throw new Error(
+      `The new worktree's branch isn't the ${requestNoun(parseReference(request.url)?.ref.forge)}'s source branch`,
+    );
   return false;
 }
 
@@ -330,9 +335,10 @@ export async function worktreeMismatch(
   directory: string,
   request: WorktreeRequest,
 ): Promise<string | undefined> {
+  const noun = requestNoun(parseReference(request.url)?.ref.forge);
   const state = await checkoutState(exec, directory);
   if (!state) return "The worktree isn't a Git checkout anymore";
-  if (state.head !== request.headSha) return "The worktree isn't at the PR/MR's head commit";
+  if (state.head !== request.headSha) return `The worktree isn't at the ${noun}'s head commit`;
   if (!state.branch) {
     const remote = await remoteFor(exec, directory, {
       host: request.host,
@@ -347,7 +353,7 @@ export async function worktreeMismatch(
     lookup.repository.source.path !== request.sourceProject ||
     lookup.repository.sourceBranch !== request.sourceBranch
   )
-    return "The worktree's branch isn't the PR/MR's source branch";
+    return `The worktree's branch isn't the ${noun}'s source branch`;
   return undefined;
 }
 
