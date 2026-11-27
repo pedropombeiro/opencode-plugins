@@ -5,10 +5,15 @@
 #USAGE flag "-t --test-name-pattern <pattern>" help="Run tests with matching names"
 #USAGE flag "--timeout <milliseconds>" help="Per-test timeout"
 #USAGE flag "--coverage" help="Collect test coverage"
+#USAGE flag "--coverage-reporter <reporter>" var=#true help="Coverage reporter" {
+#USAGE   choices "text" "lcov"
+#USAGE }
+#USAGE flag "--coverage-dir <dir>" help="Directory for coverage files"
 #USAGE flag "--watch" help="Rerun tests when files change"
 #USAGE flag "--only" help="Run tests marked with only"
 #USAGE flag "--update-snapshots" help="Update snapshot files"
 #USAGE flag "--bail" help="Stop after a test failure"
+#USAGE complete "coverage-dir" type="dir"
 #USAGE complete "args" type="file"
 set -euo pipefail
 bun test "$@"

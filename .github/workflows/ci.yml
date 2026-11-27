@@ -36,7 +36,27 @@ jobs:
         run: mise run typecheck
 
       - name: Test
-        run: mise run test
+        run: mise run test --coverage
+
+      - name: Collect base branch coverage
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          git worktree add --detach "$RUNNER_TEMP/base" "${{ github.event.pull_request.base.sha }}"
+          if [ ! -f "$RUNNER_TEMP/base/bunfig.toml" ]; then
+            cp bunfig.toml "$RUNNER_TEMP/base/bunfig.toml"
+          fi
+          cd "$RUNNER_TEMP/base"
+          mise run setup
+          bun test --coverage --coverage-reporter=lcov --coverage-dir="$RUNNER_TEMP/base-coverage"
+
+      - name: Check test coverage
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            bun .mise/coverage.ts coverage/lcov.info "$RUNNER_TEMP/base-coverage/lcov.info"
+          else
+            bun .mise/coverage.ts coverage/lcov.info
+          fi
 
       - name: Build
         run: mise run build
