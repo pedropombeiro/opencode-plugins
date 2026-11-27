@@ -1,11 +1,17 @@
 import type { Plugin } from '@opencode/plugin';
 import { CONCURRENCY, mapLimit } from './limit';
 import {
+  CLEANUP_COMMAND,
+  CLEANUP_TITLE,
+  cleanupRef,
+  cleanupReport,
   FEEDBACK_COMMAND,
   FEEDBACK_TITLE,
   feedbackReport,
   feedbackRef,
+  invalidCleanupReport,
   invalidFeedbackReport,
+  parseCleanupAction,
   parseFeedbackAction,
   STATUS_COMMAND,
   STATUS_TITLE,
@@ -247,6 +253,14 @@ export async function setupServer(
         await watcher.discovery.refresh();
         return watcher.decorateInbox(state);
       },
+      cleanupCandidates: async ({ scanID }, context) =>
+        watcher
+          ? json(await watcher.cleanupCandidates({ scanID, signal: context?.signal }))
+          : { enabled: false, candidates: [], skippedErrors: 0 },
+      cleanupSessions: async ({ sessionIDs, scanID }) => {
+        if (!watcher) throw new Error('PR/MR status is disabled');
+        return json(await watcher.cleanupSessions(sessionIDs, { scanID }));
+      },
     }),
   );
 
@@ -268,10 +282,12 @@ export async function setupServer(
           .emit('status', { directory: ctx.location.directory, key, snapshot: json(snapshot) })
           .catch(() => {}),
       notice: (notice) => void rpc.events.emit('notice', json(notice)).catch(() => {}),
-      feedbackChanged: () =>
-        void rpc.events
-          .emit('feedbackChanged', { directory: ctx.location.directory })
-          .catch(() => {}),
+      feedbackChanged: (directory = ctx.location.directory) =>
+        void rpc.events.emit('feedbackChanged', { directory }).catch(() => {}),
+      sessionsCleanedUp: (sessionIDs) =>
+        void rpc.events.emit('sessionsCleanedUp', { sessionIDs }).catch(() => {}),
+      cleanupProgress: (progress) =>
+        void rpc.events.emit('cleanupProgress', json(progress)).catch(() => {}),
     });
   }
 
@@ -475,6 +491,64 @@ export async function setupServer(
     return feedbackReport(next, sessionID, note);
   }
 
+  async function cleanupCommand(
+    status: Status,
+    sessionID: string,
+    input: string,
+  ): Promise<{ report?: string; notice?: string }> {
+    const action = parseCleanupAction(input);
+    if (action.kind === 'invalid') return { report: invalidCleanupReport(action.input) };
+    const scan = await status.cleanupCandidates();
+    if (action.kind === 'list') return { report: cleanupReport(scan) };
+    const chosen =
+      action.which === 'all'
+        ? scan.candidates
+        : scan.candidates.filter((candidate) => cleanupRef(candidate.sessionID) === action.which);
+    if (action.which !== 'all' && chosen.length > 1)
+      return { report: 'Ambiguous session ID. Use /forge-cleanup.' };
+    if (chosen.length === 0) {
+      return {
+        report: cleanupReport(
+          scan,
+          action.which === 'all' ? undefined : `No eligible session with ID ${action.which}.`,
+        ),
+      };
+    }
+    const result = await status.cleanupSessions(chosen.map((candidate) => candidate.sessionID));
+    const archivedSet = new Set(result.archived);
+    const alreadySet = new Set(result.alreadyArchived);
+    const doneSet = new Set([...result.archived, ...result.alreadyArchived]);
+    const archivedTitles = chosen
+      .filter((candidate) => archivedSet.has(candidate.sessionID))
+      .map((candidate) => candidate.title);
+    const alreadyTitles = chosen
+      .filter((candidate) => alreadySet.has(candidate.sessionID))
+      .map((candidate) => candidate.title);
+    const summaryParts: string[] = [];
+    if (archivedTitles.length === 1) summaryParts.push(`Archived: ${archivedTitles[0]}`);
+    else if (archivedTitles.length > 1)
+      summaryParts.push(`Archived ${archivedTitles.length} sessions.`);
+    if (alreadyTitles.length === 1) summaryParts.push(`Already archived: ${alreadyTitles[0]}`);
+    else if (alreadyTitles.length > 1)
+      summaryParts.push(`${alreadyTitles.length} sessions were already archived.`);
+    if (result.failed.length) {
+      summaryParts.push(
+        ...result.failed.map(
+          (failure) => `Could not archive ${failure.sessionID}: ${failure.reason}`,
+        ),
+      );
+    }
+    const note = summaryParts.join('\n') || 'No sessions were archived.';
+    if (doneSet.has(sessionID)) {
+      return { notice: note };
+    }
+    const remaining = {
+      ...scan,
+      candidates: scan.candidates.filter((candidate) => !doneSet.has(candidate.sessionID)),
+    };
+    return { report: cleanupReport(remaining, note) };
+  }
+
   const commands = await ctx.command.transform((editor) => {
     editor.add({
       name: 'forge-detach',
@@ -507,6 +581,27 @@ export async function setupServer(
           report = `Forgekeeper could not complete /${FEEDBACK_COMMAND}: ${error instanceof Error ? error.message : String(error)}`;
         }
         if (report) await status.relay(sessionID, FEEDBACK_TITLE, report);
+      },
+    });
+    editor.add({
+      name: CLEANUP_COMMAND,
+      description:
+        'List or archive idle sessions whose PRs/MRs have merged or tracked issues have closed',
+      execute: async ({ sessionID, prompt }) => {
+        try {
+          const outcome = await cleanupCommand(status, sessionID, prompt.text ?? '');
+          if (outcome.notice) {
+            await rpc.events.emit('notice', { variant: 'info', message: outcome.notice });
+          } else if (outcome.report) {
+            await status.relay(sessionID, CLEANUP_TITLE, outcome.report);
+          }
+        } catch (error) {
+          await status.relay(
+            sessionID,
+            CLEANUP_TITLE,
+            `Forgekeeper could not complete /${CLEANUP_COMMAND}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       },
     });
   });
@@ -725,6 +820,7 @@ export async function setupServer(
       }
       if (type === 'session.moved' && sessionID) watcher?.sessionMoved(sessionID);
       if (type === 'session.deleted' && sessionID) watcher?.sessionDeleted(sessionID);
+      if (type === 'session.archived' && sessionID) watcher?.sessionArchived(sessionID);
       if (
         sessionID &&
         (type === 'session.archived' ||

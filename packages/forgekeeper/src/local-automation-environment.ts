@@ -424,6 +424,12 @@ export function createLocalEnvironment(input: {
           : []),
       ];
     },
+    async archive(record) {
+      const sessionID = localExecution(record).sessionID;
+      if (!sessionID) return undefined;
+      await ctx.session.update({ sessionID, archived: true });
+      return sessionID;
+    },
     async sweep() {
       if (input.closing() || !(ctx.location as { project?: { id?: string } }).project?.id)
         return [];

@@ -13,6 +13,7 @@ import type { FromSchema, JSONSchema } from 'json-schema-to-ts';
 import type { Snapshot } from './store';
 import type { InboxState } from './feedback-inbox';
 import type { MonitoringStatus } from './monitoring-status';
+import type { CleanupResult, CleanupScanResult } from './session-cleanup';
 
 const urls = {
   url: { type: 'string' },
@@ -162,8 +163,56 @@ export const ForgeSessionRpc = {
       },
       output: status,
     },
+    cleanupCandidates: {
+      input: {
+        type: 'object',
+        properties: { scanID: { type: 'string' } },
+        additionalProperties: false,
+      },
+      output: { type: 'object', title: 'CleanupScanResult' },
+    },
+    cleanupSessions: {
+      input: {
+        type: 'object',
+        properties: {
+          scanID: { type: 'string' },
+          sessionIDs: {
+            type: 'array',
+            items: { type: 'string' },
+            minItems: 1,
+            maxItems: 500,
+          },
+        },
+        required: ['sessionIDs'],
+        additionalProperties: false,
+      },
+      output: { type: 'object', title: 'CleanupResult' },
+    },
   },
   events: {
+    cleanupProgress: {
+      schema: {
+        type: 'object',
+        properties: {
+          scanID: { type: 'string' },
+          phase: { type: 'string', enum: ['sessions', 'targets', 'verifying', 'archiving'] },
+          checked: { type: 'number' },
+          total: { type: 'number' },
+        },
+        required: ['phase', 'checked', 'total'],
+        additionalProperties: false,
+      },
+    },
+    sessionsCleanedUp: {
+      schema: {
+        type: 'object',
+        properties: {
+          sessionIDs: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['sessionIDs'],
+        additionalProperties: false,
+      },
+    },
     feedbackChanged: {
       schema: {
         type: 'object',
@@ -200,6 +249,7 @@ export const ForgeSessionRpc = {
           title: { type: 'string' },
           message: { type: 'string' },
           variant: { type: 'string', enum: ['info', 'error'] },
+          openTab: { type: 'boolean' },
         },
         required: ['message', 'variant'],
         additionalProperties: false,
@@ -224,6 +274,8 @@ type Typed<S extends JSONSchema> = FromSchema<
       { pattern: { type: 'object'; title: 'Snapshot' }; output: Snapshot },
       { pattern: { type: 'object'; title: 'InboxState' }; output: InboxState },
       { pattern: { type: 'object'; title: 'MonitoringStatus' }; output: MonitoringStatus },
+      { pattern: { type: 'object'; title: 'CleanupScanResult' }; output: CleanupScanResult },
+      { pattern: { type: 'object'; title: 'CleanupResult' }; output: CleanupResult },
     ];
   }
 >;
@@ -237,25 +289,42 @@ export type EventData<E extends EventName> = Typed<Events[E]['schema']>;
 export type TargetOutput = Output<'target'>;
 export type TargetUrls = NonNullable<TargetOutput['targets']>[number];
 export type Notice = EventData<'notice'>;
+export type CleanupProgress = EventData<'cleanupProgress'>;
 
-export type Handlers = { [M in MethodName]: (input: Input<M>) => Promise<Output<M>> };
+export interface HandlerContext {
+  readonly signal?: AbortSignal;
+}
+
+export type Handlers = {
+  [M in MethodName]: (input: Input<M>, context?: HandlerContext) => Promise<Output<M>>;
+};
 
 // OpenCode checks each call against the schemas before it reaches a handler,
 // and types the input as `unknown`. This is the one place that narrows it.
 export const implement = (handlers: Handlers) => ({
-  monitoringStatus: (input: unknown) =>
-    handlers.monitoringStatus(input as Input<'monitoringStatus'>),
-  feedback: () => handlers.feedback({}),
-  markFeedbackRead: (input: unknown) =>
-    handlers.markFeedbackRead(input as Input<'markFeedbackRead'>),
-  acknowledgeFeedback: (input: unknown) =>
-    handlers.acknowledgeFeedback(input as Input<'acknowledgeFeedback'>),
-  summarizeFeedback: (input: unknown) =>
-    handlers.summarizeFeedback(input as Input<'summarizeFeedback'>),
-  actOnFeedback: (input: unknown) => handlers.actOnFeedback(input as Input<'actOnFeedback'>),
-  pauseFeedback: (input: unknown) => handlers.pauseFeedback(input as Input<'pauseFeedback'>),
-  target: (input: unknown) => handlers.target(input as Input<'target'>),
-  watch: (input: unknown) => handlers.watch(input as Input<'watch'>),
-  release: (input: unknown) => handlers.release(input as Input<'release'>),
-  refresh: (input: unknown) => handlers.refresh(input as Input<'refresh'>),
+  monitoringStatus: (input: unknown, context?: HandlerContext) =>
+    handlers.monitoringStatus(input as Input<'monitoringStatus'>, context),
+  feedback: (_input?: unknown, context?: HandlerContext) => handlers.feedback({}, context),
+  markFeedbackRead: (input: unknown, context?: HandlerContext) =>
+    handlers.markFeedbackRead(input as Input<'markFeedbackRead'>, context),
+  acknowledgeFeedback: (input: unknown, context?: HandlerContext) =>
+    handlers.acknowledgeFeedback(input as Input<'acknowledgeFeedback'>, context),
+  summarizeFeedback: (input: unknown, context?: HandlerContext) =>
+    handlers.summarizeFeedback(input as Input<'summarizeFeedback'>, context),
+  actOnFeedback: (input: unknown, context?: HandlerContext) =>
+    handlers.actOnFeedback(input as Input<'actOnFeedback'>, context),
+  pauseFeedback: (input: unknown, context?: HandlerContext) =>
+    handlers.pauseFeedback(input as Input<'pauseFeedback'>, context),
+  target: (input: unknown, context?: HandlerContext) =>
+    handlers.target(input as Input<'target'>, context),
+  watch: (input: unknown, context?: HandlerContext) =>
+    handlers.watch(input as Input<'watch'>, context),
+  release: (input: unknown, context?: HandlerContext) =>
+    handlers.release(input as Input<'release'>, context),
+  refresh: (input: unknown, context?: HandlerContext) =>
+    handlers.refresh(input as Input<'refresh'>, context),
+  cleanupCandidates: (input: unknown, context?: HandlerContext) =>
+    handlers.cleanupCandidates((input ?? {}) as Input<'cleanupCandidates'>, context),
+  cleanupSessions: (input: unknown, context?: HandlerContext) =>
+    handlers.cleanupSessions(input as Input<'cleanupSessions'>, context),
 });

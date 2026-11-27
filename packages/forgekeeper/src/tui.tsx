@@ -21,7 +21,16 @@ import { reference, traitsOf } from './forges';
 import { automatedReview } from './automated-review-watch';
 import { showNotice } from './notice';
 import { clientID, connectStatus, loadFeedback as fetchFeedback } from './client-core';
-import { ForgeSessionRpc, HOME, type EventData } from './rpc';
+import { ForgeSessionRpc, HOME, type CleanupProgress, type EventData } from './rpc';
+import {
+  cleanupReadyOf,
+  formatCleanupProgress,
+  formatCleanupSubtitle,
+  worktreeLabel,
+  type CleanupProgressEvent,
+  type CleanupResult,
+  type CleanupScanResult,
+} from './session-cleanup';
 import { samePlace, type Place } from './status-client';
 import type { Snapshot } from './store';
 import {
@@ -31,10 +40,54 @@ import {
   linkOptions,
   listAllowsAct,
   sessionItems,
+  type FeedbackItem,
   type InboxState,
 } from './feedback-inbox';
 import type { Repository } from './git';
 import type { Lookup } from './store';
+
+type StatusDialogAction = 'close' | 'cleanup' | 'refresh';
+
+function branchLabel(repository: Repository): string {
+  if (repository.branch === repository.sourceBranch) return repository.branch;
+  return `${repository.branch} (pushes to ${repository.sourceBranch})`;
+}
+
+function statusActionLabel(action: StatusDialogAction, loading: boolean): string {
+  if (action === 'close') return 'Close';
+  if (action === 'cleanup') return 'Clean up session';
+  return loading ? 'Refreshing…' : 'Refresh';
+}
+
+function feedbackItemDescription(item: FeedbackItem): string {
+  const parts = [item.read ? 'Read' : 'Unread', feedbackTime(item)];
+  if (item.automation) {
+    const reason = item.automation.reason ? `: ${item.automation.reason}` : '';
+    parts.push(`${item.automation.state}${reason}`);
+  }
+  if (item.details?.length) {
+    const extra = item.details.length > 1 ? ` (+${item.details.length - 1})` : '';
+    parts.push(`${item.details[0]}${extra}`);
+  }
+  return parts.join(' · ');
+}
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
+
+let nextCleanupScanSeq = 0;
+const nextScanID = () => `cleanup-${Date.now()}-${++nextCleanupScanSeq}`;
+
+function emptyCleanupMessage(skippedErrors: number): string {
+  if (skippedErrors > 0) {
+    return `No eligible sessions found (${skippedErrors} skipped due to lookup errors).`;
+  }
+  return 'No sessions with all PRs/MRs merged or tracked issues closed.';
+}
+
+function cleanupDialogTitle(skippedErrors: number): string {
+  if (skippedErrors > 0) return `Clean up finished sessions (${skippedErrors} skipped)`;
+  return 'Clean up finished sessions';
+}
 
 export default {
   id: 'pedropombeiro.forgekeeper',
@@ -321,14 +374,7 @@ export default {
                   {(repository: () => Repository) => (
                     <box flexShrink={0}>
                       <DetailField label="Repository" value={repository().source.path} />
-                      <DetailField
-                        label="Branch"
-                        value={
-                          repository().branch === repository().sourceBranch
-                            ? repository().branch
-                            : `${repository().branch} (pushes to ${repository().sourceBranch})`
-                        }
-                      />
+                      <DetailField label="Branch" value={branchLabel(repository())} />
                     </box>
                   )}
                 </Show>
@@ -375,6 +421,131 @@ export default {
       );
     }
 
+    function closeCleanedSessions(sessionIDs: readonly string[]) {
+      if (!sessionIDs.length) return;
+      const ids = new Set(sessionIDs);
+      if (context.ui.tabs.enabled()) {
+        for (const id of ids) context.ui.tabs.close(id);
+      }
+      const route = context.ui.router.current();
+      if (route.type === 'session' && ids.has(route.sessionID)) {
+        context.ui.router.navigate({ type: 'home' });
+      }
+    }
+
+    function CleanupProgressDialog(props: {
+      title: string;
+      mode: 'scan' | 'cleanup';
+      progress: () => CleanupProgressEvent | undefined;
+    }) {
+      const [frame, setFrame] = createSignal(0);
+      const timer = setInterval(() => {
+        setFrame((index) => (index + 1) % SPINNER_FRAMES.length);
+      }, 80);
+      onCleanup(() => clearInterval(timer));
+
+      return (
+        <box height={5} paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+          <box height={1} flexShrink={0} flexDirection="row" justifyContent="space-between">
+            <text fg={context.theme.text.base}>
+              <b>{props.title}</b>
+            </text>
+            <text fg={context.theme.text.muted} onMouseUp={() => context.ui.dialog.clear()}>
+              esc
+            </text>
+          </box>
+          <box height={1} flexShrink={0}>
+            <text wrapMode="none" fg={context.theme.text.muted}>
+              {SPINNER_FRAMES[frame()]} {formatCleanupProgress(props.progress(), props.mode)}
+            </text>
+          </box>
+        </box>
+      );
+    }
+
+    async function runSessionCleanup(
+      directory: string,
+      sessionIDs: string[],
+      showProgressDialog = false,
+    ): Promise<CleanupResult | undefined> {
+      const scanID = nextScanID();
+      const [progress, setProgress] = createSignal<CleanupProgressEvent | undefined>();
+      const offProgress = rpc.events.on('cleanupProgress', (event) => {
+        const data = event.data as CleanupProgress;
+        if (data.scanID === scanID) setProgress(data);
+      });
+      let progressOpen = false;
+      if (showProgressDialog) {
+        progressOpen = true;
+        context.ui.dialog.set({ size: 'medium', centered: true });
+        context.ui.dialog.show(
+          () => (
+            <CleanupProgressDialog
+              title="Clean up finished sessions"
+              mode="cleanup"
+              progress={progress}
+            />
+          ),
+          () => {
+            progressOpen = false;
+          },
+        );
+      }
+      try {
+        const archived: string[] = [];
+        const alreadyArchived: string[] = [];
+        const failed: CleanupResult['failed'][number][] = [];
+        for (let i = 0; i < sessionIDs.length; i += 500) {
+          const chunk = sessionIDs.slice(i, i + 500);
+          const part = (await rpc.cleanupSessions(
+            { sessionIDs: chunk, scanID },
+            { location: { directory } },
+          )) as CleanupResult;
+          archived.push(...part.archived);
+          alreadyArchived.push(...part.alreadyArchived);
+          failed.push(...part.failed);
+        }
+        const result: CleanupResult = { archived, alreadyArchived, failed };
+        if (progressOpen) context.ui.dialog.clear();
+        closeCleanedSessions([...result.archived, ...result.alreadyArchived]);
+        if (result.archived.length > 0) {
+          const count = result.archived.length;
+          context.ui.toast.show({
+            message:
+              count === 1
+                ? 'Archived 1 session and closed its tab.'
+                : `Archived ${count} sessions and closed their tabs.`,
+            variant: 'info',
+          });
+        } else if (result.alreadyArchived.length > 0 && result.failed.length === 0) {
+          const count = result.alreadyArchived.length;
+          context.ui.toast.show({
+            message:
+              count === 1
+                ? 'Session was already archived.'
+                : `${count} sessions were already archived.`,
+            variant: 'info',
+          });
+        }
+        if (result.failed.length > 0) {
+          context.ui.toast.show({
+            message: result.failed.map((failure) => failure.reason).join('; '),
+            variant: 'error',
+          });
+        }
+        return result;
+      } catch (error) {
+        if (progressOpen) context.ui.dialog.clear();
+        context.ui.toast.show({
+          message: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+        return undefined;
+      } finally {
+        offProgress();
+      }
+    }
+
     function StatusDialog(props: { place: Place }) {
       const [terminalHeight, setTerminalHeight] = createSignal(context.renderer.height);
       const onResize = () => setTerminalHeight(context.renderer.height);
@@ -386,15 +557,46 @@ export default {
         Math.max(1, Math.min(24, Math.floor(terminalHeight() * 0.6) - 5)),
       );
       const snapshot = createMemo(() => snapshotOf(props.place));
+      const canCleanup = createMemo(() => props.place.key !== HOME && !!cleanupReadyOf(snapshot()));
+      const [cleaning, setCleaning] = createSignal(false);
       const reload = () => {
         if (!snapshot().loading) void refresh(props.place);
       };
-      const [activeAction, setActiveAction] = createSignal<'refresh' | 'close'>('refresh');
-      const moveAction = () =>
-        setActiveAction((action) =>
-          action === 'refresh' || snapshot().loading ? 'close' : 'refresh',
-        );
+      const cleanSession = () => {
+        if (!canCleanup() || cleaning()) return;
+        setCleaning(true);
+        context.ui.dialog.clear();
+        void runSessionCleanup(props.place.directory, [props.place.key]);
+      };
+      const availableActions = createMemo<readonly StatusDialogAction[]>(() =>
+        canCleanup() ? ['close', 'cleanup', 'refresh'] : ['close', 'refresh'],
+      );
+      const [activeAction, setActiveAction] = createSignal<StatusDialogAction>('refresh');
+      createEffect(() => {
+        if (!availableActions().includes(activeAction())) {
+          setActiveAction('refresh');
+        }
+      });
+      const stepAction = (delta: 1 | -1) =>
+        setActiveAction((current) => {
+          const actions = availableActions().filter(
+            (action) => !(action === 'refresh' && snapshot().loading),
+          );
+          const index = actions.indexOf(current);
+          const next = index < 0 ? 0 : (index + delta + actions.length) % actions.length;
+          return actions[next] ?? 'close';
+        });
       const close = () => context.ui.dialog.clear();
+      const runDialogAction = (action: StatusDialogAction) => {
+        if (action === 'refresh') reload();
+        else if (action === 'cleanup') cleanSession();
+        else close();
+      };
+      const actionColor = (disabled: boolean, active: boolean) => {
+        if (disabled) return context.theme.text.action.primary.disabled;
+        if (active) return context.theme.text.action.primary.focused;
+        return context.theme.text.muted;
+      };
 
       context.keymap.layer(() => ({
         mode: 'modal',
@@ -405,17 +607,20 @@ export default {
             enabled: () => !snapshot().loading,
             run: reload,
           },
-          { bind: 'tab', title: 'Next dialog action', run: moveAction },
-          { bind: 'shift+tab', title: 'Previous dialog action', run: moveAction },
-          { bind: 'left', title: 'Previous dialog action', run: moveAction },
-          { bind: 'right', title: 'Next dialog action', run: moveAction },
+          {
+            id: 'forge.review.status.cleanup',
+            bind: 'ctrl+d',
+            enabled: () => canCleanup() && !cleaning(),
+            run: cleanSession,
+          },
+          { bind: 'tab', title: 'Next dialog action', run: () => stepAction(1) },
+          { bind: 'shift+tab', title: 'Previous dialog action', run: () => stepAction(-1) },
+          { bind: 'left', title: 'Previous dialog action', run: () => stepAction(-1) },
+          { bind: 'right', title: 'Next dialog action', run: () => stepAction(1) },
           {
             bind: 'return',
             title: 'Activate dialog action',
-            run: () => {
-              if (activeAction() === 'refresh') reload();
-              else close();
-            },
+            run: () => runDialogAction(activeAction()),
           },
         ],
       }));
@@ -446,9 +651,11 @@ export default {
             <StatusDetails snapshot={snapshot()} />
           </scrollbox>
           <box height={1} flexShrink={0} flexDirection="row" justifyContent="flex-end">
-            <For each={['close', 'refresh'] as const}>
+            <For each={availableActions()}>
               {(action) => {
-                const disabled = () => action === 'refresh' && snapshot().loading;
+                const disabled = () =>
+                  (action === 'refresh' && snapshot().loading) ||
+                  (action === 'cleanup' && cleaning());
                 const active = () => activeAction() === action && !disabled();
                 return (
                   <box
@@ -464,25 +671,11 @@ export default {
                     onMouseUp={() => {
                       if (disabled()) return;
                       setActiveAction(action);
-                      if (action === 'refresh') reload();
-                      else close();
+                      runDialogAction(action);
                     }}
                   >
-                    <text
-                      wrapMode="none"
-                      fg={
-                        disabled()
-                          ? context.theme.text.action.primary.disabled
-                          : active()
-                            ? context.theme.text.action.primary.focused
-                            : context.theme.text.muted
-                      }
-                    >
-                      {action === 'close'
-                        ? 'Close'
-                        : snapshot().loading
-                          ? 'Refreshing…'
-                          : 'Refresh'}
+                    <text wrapMode="none" fg={actionColor(disabled(), active())}>
+                      {statusActionLabel(action, snapshot().loading)}
                     </text>
                   </box>
                 );
@@ -551,21 +744,7 @@ export default {
         title: `Review feedback and PR/MR updates${state.paused ? ' (monitoring paused)' : ''}`,
         options: items.map((item) => ({
           title: item.title,
-          // A lifecycle event's first fact, such as a proposed retarget, shows too.
-          description: [
-            item.read ? 'Read' : 'Unread',
-            feedbackTime(item),
-            ...(item.automation
-              ? [
-                  `${item.automation.state}${item.automation.reason ? `: ${item.automation.reason}` : ''}`,
-                ]
-              : []),
-            ...(item.details?.length
-              ? [
-                  `${item.details[0]}${item.details.length > 1 ? ` (+${item.details.length - 1})` : ''}`,
-                ]
-              : []),
-          ].join(' · '),
+          description: feedbackItemDescription(item),
           value: item.id,
         })),
         actions: [
@@ -690,6 +869,163 @@ export default {
       if (url) openUrl(url);
     }
 
+    let activeCleanupScan: AbortController | undefined;
+
+    async function showCleanup(prefetched?: CleanupScanResult) {
+      const place = currentPlace();
+      if (statusOff(place)) return;
+      const directory = place.directory;
+      activeCleanupScan?.abort();
+      let scan = prefetched;
+      if (!scan) {
+        const scanID = nextScanID();
+        const controller = new AbortController();
+        activeCleanupScan = controller;
+        const [progress, setProgress] = createSignal<CleanupProgressEvent | undefined>();
+        const offProgress = rpc.events.on('cleanupProgress', (event) => {
+          const data = event.data as CleanupProgress;
+          if (data.scanID === scanID) setProgress(data);
+        });
+        let transitioning = false;
+        let progressOpen = true;
+        context.ui.dialog.set({ size: 'medium', centered: true });
+        context.ui.dialog.show(
+          () => (
+            <CleanupProgressDialog
+              title="Clean up finished sessions"
+              mode="scan"
+              progress={progress}
+            />
+          ),
+          () => {
+            progressOpen = false;
+            if (!transitioning) controller.abort();
+          },
+        );
+        try {
+          scan = (await rpc.cleanupCandidates(
+            { scanID },
+            { location: { directory }, signal: controller.signal },
+          )) as CleanupScanResult;
+        } catch (error) {
+          offProgress();
+          if (activeCleanupScan === controller) activeCleanupScan = undefined;
+          if (controller.signal.aborted) return;
+          transitioning = true;
+          if (progressOpen) context.ui.dialog.clear();
+          context.ui.toast.show({
+            message: error instanceof Error ? error.message : String(error),
+            variant: 'error',
+          });
+          return;
+        }
+        offProgress();
+        if (activeCleanupScan === controller) activeCleanupScan = undefined;
+        if (controller.signal.aborted) return;
+        if (!scan.enabled) {
+          transitioning = true;
+          if (progressOpen) context.ui.dialog.clear();
+          context.ui.toast.show({
+            message:
+              'PR/MR status is off. Enable options.status in opencode.json to use this command.',
+            variant: 'info',
+          });
+          return;
+        }
+        if (!scan.candidates.length) {
+          transitioning = true;
+          if (progressOpen) context.ui.dialog.clear();
+          context.ui.toast.show({
+            message: emptyCleanupMessage(scan.skippedErrors),
+            variant: 'info',
+          });
+          return;
+        }
+        transitioning = true;
+      } else if (!scan.candidates.length) {
+        return;
+      }
+      const openTabIDs = new Set(
+        context.ui.tabs.enabled() ? context.ui.tabs.list().map((tab) => tab.sessionID) : [],
+      );
+      const directories = new Set(scan.candidates.map((candidate) => candidate.directory));
+      const multiWorktree = directories.size > 1;
+      context.ui.dialog.set({ size: 'large', centered: true });
+      queueMicrotask(() => context.ui.dialog.set({ size: 'large', centered: true }));
+      const selected = await context.ui.dialog.select({
+        title: cleanupDialogTitle(scan.skippedErrors),
+        options: scan.candidates.map((candidate) => ({
+          title: candidate.title,
+          description: formatCleanupSubtitle(candidate),
+          ...(openTabIDs.has(candidate.sessionID) ? { footer: 'open tab' } : {}),
+          ...(multiWorktree ? { category: worktreeLabel(candidate.directory) } : {}),
+          value: candidate.sessionID,
+        })),
+        actions: [
+          {
+            bind: 'ctrl+a',
+            title: `Clean up all (${scan.candidates.length})`,
+            selection: 'none',
+            onTrigger: async () => {
+              context.ui.dialog.clear();
+              await runSessionCleanup(
+                directory,
+                scan.candidates.map((candidate) => candidate.sessionID),
+                true,
+              );
+            },
+          },
+          {
+            bind: 'ctrl+o',
+            title: 'Open session',
+            onTrigger: (sessionID) => {
+              context.ui.dialog.clear();
+              if (context.ui.tabs.enabled() && context.ui.tabs.focus(sessionID)) return;
+              context.ui.router.navigate({ type: 'session', sessionID });
+            },
+          },
+          {
+            bind: 'ctrl+r',
+            title: 'Refresh',
+            selection: 'none',
+            onTrigger: () => {
+              context.ui.dialog.clear();
+              void showCleanup();
+            },
+          },
+        ],
+      });
+      if (!selected) return;
+      const result = await runSessionCleanup(directory, [selected]);
+      const doneIDs = new Set([...(result?.archived ?? []), ...(result?.alreadyArchived ?? [])]);
+      if (scan.candidates.length > 1 && doneIDs.size > 0) {
+        const remaining = scan.candidates.filter((candidate) => !doneIDs.has(candidate.sessionID));
+        if (remaining.length > 0) {
+          void showCleanup({ ...scan, candidates: remaining });
+        }
+      }
+    }
+
+    context.ui.slot({
+      append: 'session.composer.top',
+      render: (input) => {
+        const place = () => placeFor(input.sessionID);
+        const ready = () =>
+          enabledFor(place().directory) ? cleanupReadyOf(snapshotOf(place())) : undefined;
+        return (
+          <Show when={ready()}>
+            {(value: () => NonNullable<ReturnType<typeof ready>>) => (
+              <box paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
+                <text wrapMode="none" fg={color('success')} onMouseUp={() => void showCleanup()}>
+                  ✓ {value().reason} — run <b>/forge-cleanup</b> to archive this session
+                </text>
+              </box>
+            )}
+          </Show>
+        );
+      },
+    });
+
     context.ui.slot({
       append: 'prompt.footer.status',
       render: (input) => <Footer sessionID={input.sessionID} />,
@@ -730,6 +1066,14 @@ export default {
               slash: { name: 'forge-open', aliases: ['mr-open', 'pr-open'] },
               run: openRequest,
             },
+            {
+              id: 'forge.review.cleanup',
+              title: 'Clean up finished sessions',
+              group: 'Forge',
+              palette: true,
+              slash: { name: 'forge-cleanup', aliases: ['mr-cleanup', 'pr-cleanup'] },
+              run: () => showCleanup(),
+            },
           ],
         }));
         return null;
@@ -751,6 +1095,10 @@ export default {
     });
 
     const stops = [
+      rpc.events.on('sessionsCleanedUp', (event) => {
+        const { sessionIDs } = event.data as EventData<'sessionsCleanedUp'>;
+        closeCleanedSessions(sessionIDs);
+      }),
       rpc.events.on('feedbackChanged', (event) => {
         const { directory } = event.data as EventData<'feedbackChanged'>;
         if (directory === feedbackDirectory()) void loadFeedback(directory).catch(() => {});

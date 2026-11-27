@@ -11,7 +11,9 @@ import {
   type ForgeTraits,
   type GitHubIssueSnapshot,
   type GitHubPullRequest,
+  type IssueStateSnapshot,
   type Pipeline,
+  type RequestStateSnapshot,
   type ReviewerApproval,
   type ReviewRef,
 } from '../../forge';
@@ -548,6 +550,127 @@ export class GitHubForge implements Forge {
     const node = data.repository?.issue;
     if (!node || !node.url || (node.state !== 'OPEN' && node.state !== 'CLOSED')) return undefined;
     return { forge: 'github', open: node.state === 'OPEN', url: node.url };
+  }
+
+  async requestStates(
+    project: RemoteProject,
+    numbers: readonly string[],
+  ): Promise<ReadonlyMap<string, RequestStateSnapshot>> {
+    const [owner, repo] = project.path.split('/');
+    const valid = [
+      ...new Set(
+        numbers.filter((num) => {
+          const parsed = Number(num);
+          return Number.isInteger(parsed) && parsed >= 1;
+        }),
+      ),
+    ];
+    if (!owner || !repo || valid.length === 0) return new Map();
+    const found = new Map<string, RequestStateSnapshot>();
+    const fetchChunk = async (chunk: readonly string[]): Promise<void> => {
+      if (chunk.length === 0) return;
+      const vars = chunk.map((_, index) => `$n${index}:Int!`).join(',');
+      const selections = chunk
+        .map(
+          (_, index) =>
+            `pr${index}:pullRequest(number:$n${index}){number title url state baseRepository{nameWithOwner}}`,
+        )
+        .join(' ');
+      const variables: Variables = { owner, repo };
+      chunk.forEach((num, index) => (variables[`n${index}`] = Number(num)));
+      type PullStateNode = {
+        number: number;
+        title: string;
+        url: string;
+        state: string;
+        baseRepository?: { nameWithOwner: string } | null;
+      };
+      try {
+        const data = await this.graphql(
+          project.host,
+          query<RepositoryData<Record<`pr${number}`, PullStateNode | null | undefined>>>(
+            `query($owner:String!,$repo:String!,${vars}){repository(owner:$owner,name:$repo){${selections}}}`,
+          ),
+          variables,
+        );
+        const repository = data.repository;
+        if (!repository) return;
+        chunk.forEach((iid, index) => {
+          const node = repository[`pr${index}`];
+          if (!node || String(node.number ?? iid) !== iid) return;
+          found.set(iid, {
+            iid,
+            title: node.title,
+            url: node.url,
+            state: node.state === 'OPEN' ? 'opened' : node.state.toLowerCase(),
+            targetProject: node.baseRepository?.nameWithOwner ?? project.path,
+          });
+        });
+      } catch (error) {
+        if (!(error instanceof ForgeError) || error.kind !== 'request') throw error;
+        if (chunk.length === 1) return;
+        const mid = Math.ceil(chunk.length / 2);
+        await fetchChunk(chunk.slice(0, mid));
+        await fetchChunk(chunk.slice(mid));
+      }
+    };
+    await fetchChunk(valid);
+    return found;
+  }
+
+  async issueStates(
+    project: RemoteProject,
+    numbers: readonly string[],
+  ): Promise<ReadonlyMap<string, IssueStateSnapshot>> {
+    const [owner, repo] = project.path.split('/');
+    const valid = [
+      ...new Set(
+        numbers.filter((num) => {
+          const parsed = Number(num);
+          return Number.isInteger(parsed) && parsed >= 1;
+        }),
+      ),
+    ];
+    if (!owner || !repo || valid.length === 0) return new Map();
+    const found = new Map<string, IssueStateSnapshot>();
+    const fetchChunk = async (chunk: readonly string[]): Promise<void> => {
+      if (chunk.length === 0) return;
+      const vars = chunk.map((_, index) => `$n${index}:Int!`).join(',');
+      const selections = chunk
+        .map((_, index) => `i${index}:issue(number:$n${index}){number state url}`)
+        .join(' ');
+      const variables: Variables = { owner, repo };
+      chunk.forEach((num, index) => (variables[`n${index}`] = Number(num)));
+      type IssueNode = { number: number; state?: string; url?: string };
+      try {
+        const data = await this.graphql(
+          project.host,
+          query<RepositoryData<Record<`i${number}`, IssueNode | null | undefined>>>(
+            `query($owner:String!,$repo:String!,${vars}){repository(owner:$owner,name:$repo){${selections}}}`,
+          ),
+          variables,
+        );
+        const repository = data.repository;
+        if (!repository) return;
+        chunk.forEach((iid, index) => {
+          const node = repository[`i${index}`];
+          if (!node || !node.url || (node.state !== 'OPEN' && node.state !== 'CLOSED')) return;
+          if (String(node.number ?? iid) !== iid) return;
+          found.set(iid, {
+            iid,
+            open: node.state === 'OPEN',
+          });
+        });
+      } catch (error) {
+        if (!(error instanceof ForgeError) || error.kind !== 'request') throw error;
+        if (chunk.length === 1) return;
+        const mid = Math.ceil(chunk.length / 2);
+        await fetchChunk(chunk.slice(0, mid));
+        await fetchChunk(chunk.slice(mid));
+      }
+    };
+    await fetchChunk(valid);
+    return found;
   }
 
   async markReady(

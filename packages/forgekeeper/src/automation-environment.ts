@@ -41,6 +41,7 @@ export interface AutomationEnvironmentProvider {
   matchesSession: (record: AutomationRecord, sessionID: string) => boolean;
   startContext: (record: LinkedRecord) => StartContext;
   describe: (record: AutomationRecord, phase: 'started' | 'ended') => Promise<string[]>;
+  archive?: (record: AutomationRecord) => Promise<string | undefined>;
   sweep: () => Promise<string[]>;
 }
 

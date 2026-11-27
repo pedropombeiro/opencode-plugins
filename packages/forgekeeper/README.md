@@ -13,8 +13,9 @@ Notification wording has changed since this capture.
 
 ## Installation
 
-Requires OpenCode 2.2 or later, plus an authenticated [`gh`](https://cli.github.com/) for GitHub
-or [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab. The CLI must be available on the
+Requires OpenCode 2.3 or later (2.4 or later to archive sessions with `/forge-cleanup` and
+`/forge-prune`), plus an authenticated [`gh`](https://cli.github.com/) for GitHub or
+[`glab`](https://gitlab.com/gitlab-org/cli) for GitLab. The CLI must be available on the
 OpenCode server's `PATH`; only the CLI for your forge is required.
 
 ```sh
@@ -58,11 +59,17 @@ For example, this footer tracks four MRs, with one conflict and two already merg
 
 ![Forgekeeper status dialog within an OpenCode session, showing pipeline results, unresolved threads, conflicts, and review requirements.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/review-and-ci-status.png)
 
-| Command           | Action                                                                    |
-| ----------------- | ------------------------------------------------------------------------- |
-| `/forge-status`   | Show detailed status and refresh it. Aliases: `/mr-status`, `/pr-status`. |
-| `/forge-open`     | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`.          |
-| `/forge-feedback` | Browse pending review feedback and PR/MR updates.                         |
+| Command           | Action                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------- |
+| `/forge-status`   | Show detailed status and refresh it. Aliases: `/mr-status`, `/pr-status`.                                 |
+| `/forge-open`     | Open the PR/MR in your browser. Aliases: `/mr-open`, `/pr-open`.                                          |
+| `/forge-feedback` | Browse pending review feedback and PR/MR updates.                                                         |
+| `/forge-cleanup`  | Archive idle sessions whose PRs/MRs have merged or tracked issues have closed, and close their open tabs. |
+
+When all PRs/MRs for a session merge, or all tracked issues for an issue-only session close,
+Forgekeeper shows an inline reminder in the session and offers **Clean up session** in the
+status dialog and panel. Issue-only sessions check their issue status when opened, after a turn
+ends, when targets change, or on manual refresh.
 
 In OpenCode Desktop, a pill above the composer shows the same status, and the commands
 above open side panels for the status and the inbox. Server notices appear as toasts and
@@ -74,13 +81,14 @@ Conflicts appear in both the composer pill and the status panel:
 
 ![OpenCode Desktop showing a PR with merge conflicts in the composer pill and Forgekeeper status panel.](https://raw.githubusercontent.com/pedropombeiro/opencode-plugins/main/packages/forgekeeper/images/desktop-conflicts.png)
 
-The OpenCode web app loads neither the terminal nor the desktop part, but it offers two
+The OpenCode web app loads neither the terminal nor the desktop part, but it offers three
 commands that answer in the conversation:
 
 | Command         | Action                                                                                                              |
 | --------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `/forge-report` | Show the PR/MR status of the session.                                                                               |
 | `/forge-inbox`  | List the session's pending updates. `ack <id>` or `ack all` acknowledges them, and `summarize <id>` summarizes one. |
+| `/forge-prune`  | List or archive (`<id>` or `all`) idle sessions whose PRs/MRs have merged or tracked issues have closed.            |
 
 Each answer is a short tool-free model turn that shows a report written from forge data.
 Those apps don't display the text of messages that plugins add, so the model shows it.

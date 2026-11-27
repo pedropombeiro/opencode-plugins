@@ -9,6 +9,7 @@ import {
   createKeyed,
   Panel,
   Plugin,
+  Slot,
   Style,
   type ComposerPillView,
   type MountedSession,
@@ -39,7 +40,17 @@ import { reference, traitsOf } from './forges';
 import { detailsMessage, pipelineTone, type Tone } from './format';
 import { statusPill } from './gui-status';
 import { showNotice } from './notice';
-import { ForgeSessionRpc, type EventData } from './rpc';
+import { ForgeSessionRpc, type CleanupProgress, type EventData } from './rpc';
+import {
+  cleanupReadyOf,
+  formatCleanupProgress,
+  formatCleanupSubtitle,
+  worktreeLabel,
+  type CleanupCandidate,
+  type CleanupProgressEvent,
+  type CleanupResult,
+  type CleanupScanResult,
+} from './session-cleanup';
 import type { Place } from './status-client';
 import type { Repository } from './git';
 import type { Lookup, Snapshot } from './store';
@@ -51,18 +62,30 @@ const CSS = `
 .forgekeeper-panel section { display: flex; flex-direction: column; gap: 2px; }
 .forgekeeper-panel .fk-card { border: 1px solid var(--v2-border-border-muted); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .forgekeeper-panel .fk-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.forgekeeper-panel .fk-muted { color: var(--v2-text-text-muted); }
-.forgekeeper-panel .fk-label { color: var(--v2-text-text-muted); }
-.forgekeeper-panel .fk-success { color: var(--v2-state-fg-success); }
-.forgekeeper-panel .fk-warning { color: var(--v2-state-fg-warning); }
-.forgekeeper-panel .fk-error { color: var(--v2-state-fg-danger); }
+.forgekeeper-panel .fk-muted, .fk-cleanup-dialog .fk-muted { color: var(--v2-text-text-muted); }
+.forgekeeper-panel .fk-label, .fk-cleanup-dialog .fk-label { color: var(--v2-text-text-muted); }
+.forgekeeper-panel .fk-success, .fk-cleanup-dialog .fk-success { color: var(--v2-state-fg-success); }
+.forgekeeper-panel .fk-warning, .fk-cleanup-dialog .fk-warning { color: var(--v2-state-fg-warning); }
+.forgekeeper-panel .fk-error, .fk-cleanup-dialog .fk-error { color: var(--v2-state-fg-danger); }
 .forgekeeper-panel a { color: var(--v2-text-text-accent); cursor: pointer; text-decoration: underline; }
 .forgekeeper-panel .fk-pre { white-space: pre-wrap; }
+.fk-cleanup-dialog { display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: var(--v2-text-text-base); }
+.fk-cleanup-list { display: flex; flex-direction: column; gap: 2px; max-height: 360px; overflow-y: auto; }
+.fk-cleanup-group { font-size: 11px; font-weight: 600; color: var(--v2-text-text-muted); padding: 6px 4px 2px; }
+.fk-cleanup-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 4px; border-top: 1px solid var(--v2-border-border-muted); }
+.fk-cleanup-row:first-child { border-top: none; }
+.fk-cleanup-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.fk-cleanup-title { cursor: pointer; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fk-cleanup-title:hover { text-decoration: underline; }
+.fk-cleanup-meta { font-size: 12px; color: var(--v2-text-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fk-cleanup-footer { display: flex; align-items: center; gap: 8px; }
 `;
 
 const STATUS_TAB = 'status';
 const FEEDBACK_TAB = 'feedback';
 const EMPTY: InboxState = { items: [], paused: false };
+let nextGuiScanSeq = 0;
+const nextGuiScanID = () => `gui-cleanup-${Date.now()}-${++nextGuiScanSeq}`;
 
 const toneClass = (tone?: Tone) =>
   tone === 'success'
@@ -157,6 +180,94 @@ export default Plugin.define({
       return true;
     };
 
+    const builtinServer = () =>
+      ctx.servers
+        .list()
+        .map((id) => ctx.servers.get(id))
+        .find((server) => server?.builtin);
+
+    function closeCleanedTabs(sessionIDs: readonly string[]) {
+      if (!sessionIDs.length) return;
+      const ids = new Set(sessionIDs);
+      for (const tab of ctx.tabs.list()) {
+        if (tab.session && ownServer(tab.session) && ids.has(tab.session.id)) {
+          ctx.tabs.close(tab.key);
+        }
+      }
+    }
+
+    async function runSessionCleanup(
+      directory: string,
+      sessionIDs: string[],
+      scanID?: string,
+    ): Promise<CleanupResult | undefined> {
+      try {
+        const archived: string[] = [];
+        const alreadyArchived: string[] = [];
+        const failed: CleanupResult['failed'][number][] = [];
+        for (let i = 0; i < sessionIDs.length; i += 500) {
+          const chunk = sessionIDs.slice(i, i + 500);
+          const part = (await rpc().cleanupSessions(
+            { sessionIDs: chunk, ...(scanID ? { scanID } : {}) },
+            at(directory),
+          )) as CleanupResult;
+          archived.push(...part.archived);
+          alreadyArchived.push(...part.alreadyArchived);
+          failed.push(...part.failed);
+        }
+        const result: CleanupResult = { archived, alreadyArchived, failed };
+        closeCleanedTabs([...result.archived, ...result.alreadyArchived]);
+        if (result.archived.length > 0) {
+          const count = result.archived.length;
+          ctx.toast.show({
+            title:
+              count === 1
+                ? 'Archived 1 session and closed its tab.'
+                : `Archived ${count} sessions and closed their tabs.`,
+          });
+        } else if (result.alreadyArchived.length > 0 && result.failed.length === 0) {
+          const count = result.alreadyArchived.length;
+          ctx.toast.show({
+            title:
+              count === 1
+                ? 'Session was already archived.'
+                : `${count} sessions were already archived.`,
+          });
+        }
+        if (result.failed.length > 0) {
+          ctx.toast.show({
+            title: result.failed.map((failure) => failure.reason).join('; '),
+            variant: 'error',
+          });
+        }
+        return result;
+      } catch (error) {
+        ctx.toast.show({
+          title: error instanceof Error ? error.message : String(error),
+          variant: 'error',
+        });
+        return undefined;
+      }
+    }
+
+    const resolveCleanupDirectory = (directory?: string) =>
+      directory ??
+      (current() ? directoryOf(current()!) : undefined) ??
+      ctx.tabs
+        .list()
+        .find((tab) => tab.session && ownServer(tab.session) && tab.session.location?.directory)
+        ?.session?.location?.directory;
+
+    function openCleanup(directory?: string) {
+      const targetDir = resolveCleanupDirectory(directory);
+      if (!targetDir) {
+        ctx.toast.show({ title: 'Open a project session to run /forge-cleanup.' });
+        return;
+      }
+      if (statusOff(targetDir)) return;
+      ctx.dialogs.open((dialog) => <CleanupDialog directory={targetDir} close={dialog.close} />);
+    }
+
     ctx.add(ComposerPill, {
       id: 'status',
       show: (input) => pill(input.session),
@@ -170,10 +281,37 @@ export default Plugin.define({
         external: (url) => ctx.system.openExternal(url),
         status: () => open(STATUS_TAB, session),
         feedback: () => open(FEEDBACK_TAB, session),
+        cleanup: () => openCleanup(place.directory),
       });
     }
 
     const ui = ctx.ui;
+
+    ctx.add(Slot, {
+      at: 'session.header',
+      render: (input) => {
+        const ready = () => {
+          if (!ownServer(input.session)) return undefined;
+          const place = placeOf(input.session);
+          if (!enabledFor(place.directory)) return undefined;
+          return cleanupReadyOf(snapshotOf(place));
+        };
+        return (
+          <Show when={ready()}>
+            {(value: () => NonNullable<ReturnType<typeof ready>>) => (
+              <ui.Button
+                size="small"
+                variant="ghost"
+                icon="archive"
+                onClick={() => openCleanup(directoryOf(input.session))}
+              >
+                {input.compact ? 'Clean up' : `${value().reason} · /forge-cleanup`}
+              </ui.Button>
+            )}
+          </Show>
+        );
+      },
+    });
 
     function Field(props: { label: string; value: string; tone?: Tone; url?: string }) {
       return (
@@ -280,6 +418,8 @@ export default Plugin.define({
         equals: (a, b) => a.directory === b.directory && a.key === b.key,
       });
       const snapshot = createMemo(() => snapshotOf(place()));
+      const ready = createMemo(() => cleanupReadyOf(snapshot()));
+      const [cleaning, setCleaning] = createSignal(false);
       const found = () => {
         const lookup = snapshot().lookup;
         return lookup?.kind === 'found'
@@ -290,16 +430,43 @@ export default Plugin.define({
         <div class="forgekeeper-panel">
           <header>
             <h2>PR/MR status</h2>
-            <ui.Button
-              size="small"
-              icon="refresh"
-              busy={snapshot().loading}
-              onClick={() => void client()?.refresh(place())}
-            >
-              Refresh
-            </ui.Button>
+            <div class="fk-actions">
+              <Show when={ready()}>
+                <ui.Button
+                  size="small"
+                  icon="archive"
+                  busy={cleaning()}
+                  onClick={async () => {
+                    if (cleaning()) return;
+                    setCleaning(true);
+                    try {
+                      await runSessionCleanup(place().directory, [props.session.id]);
+                    } finally {
+                      setCleaning(false);
+                    }
+                  }}
+                >
+                  Clean up session
+                </ui.Button>
+              </Show>
+              <ui.Button
+                size="small"
+                icon="refresh"
+                busy={snapshot().loading}
+                onClick={() => void client()?.refresh(place())}
+              >
+                Refresh
+              </ui.Button>
+            </div>
           </header>
           <Show when={enabledFor(place().directory)} fallback={<div>PR/MR status is off.</div>}>
+            <Show when={ready()}>
+              {(value: () => NonNullable<ReturnType<typeof ready>>) => (
+                <div class="fk-success">
+                  <b>✓ {value().reason}</b> — ready to archive with /forge-cleanup.
+                </div>
+              )}
+            </Show>
             <Show
               when={found()}
               fallback={
@@ -489,6 +656,213 @@ export default Plugin.define({
       );
     }
 
+    function CleanupDialog(props: { directory: string; close: () => void }) {
+      const [loading, setLoading] = createSignal(true);
+      const [cleaningID, setCleaningID] = createSignal<string | undefined>();
+      const [error, setError] = createSignal<string | undefined>();
+      const [progress, setProgress] = createSignal<CleanupProgressEvent | undefined>();
+      const [scan, setScan] = createSignal<CleanupScanResult>({
+        enabled: true,
+        candidates: [],
+        skippedErrors: 0,
+      });
+
+      let activeScanID = '';
+      let loadController: AbortController | undefined;
+      const offProgress = rpc().events.on('cleanupProgress', (event) => {
+        const data = event.data as CleanupProgress;
+        if (data.scanID === activeScanID) setProgress(data);
+      });
+      onCleanup(() => {
+        loadController?.abort();
+        offProgress();
+      });
+
+      const load = async () => {
+        loadController?.abort();
+        const controller = new AbortController();
+        loadController = controller;
+        const scanID = nextGuiScanID();
+        activeScanID = scanID;
+        setProgress(undefined);
+        setLoading(true);
+        setError(undefined);
+        try {
+          const result = (await rpc().cleanupCandidates(
+            { scanID },
+            { ...at(props.directory), signal: controller.signal },
+          )) as CleanupScanResult;
+          if (!controller.signal.aborted) setScan(result);
+        } catch (err) {
+          if (!controller.signal.aborted) {
+            setError(err instanceof Error ? err.message : String(err));
+          }
+        } finally {
+          if (loadController === controller) setLoading(false);
+        }
+      };
+      void load();
+
+      const candidates = () => scan().candidates;
+      const openTabIDs = createMemo(
+        () =>
+          new Set(
+            ctx.tabs
+              .list()
+              .flatMap((tab) => (tab.session && ownServer(tab.session) ? [tab.session.id] : [])),
+          ),
+      );
+      const groups = createMemo(() => {
+        const list = candidates();
+        const dirs = [...new Set(list.map((candidate) => candidate.directory))];
+        const multi = dirs.length > 1;
+        return dirs.map((directory) => ({
+          directory,
+          label: multi ? worktreeLabel(directory) : undefined,
+          items: list.filter((candidate) => candidate.directory === directory),
+        }));
+      });
+
+      const clean = async (ids: string[], key: string) => {
+        if (cleaningID()) return;
+        const scanID = nextGuiScanID();
+        activeScanID = scanID;
+        setProgress(undefined);
+        setCleaningID(key);
+        try {
+          const result = await runSessionCleanup(props.directory, ids, scanID);
+          const doneIDs = [...(result?.archived ?? []), ...(result?.alreadyArchived ?? [])];
+          if (doneIDs.length) {
+            const archivedSet = new Set(doneIDs);
+            const remaining = candidates().filter(
+              (candidate) => !archivedSet.has(candidate.sessionID),
+            );
+            setScan((prev) => ({ ...prev, candidates: remaining }));
+            if (remaining.length === 0) props.close();
+          }
+        } finally {
+          setCleaningID(undefined);
+          setProgress(undefined);
+        }
+      };
+
+      const fallbackMessage = () => {
+        if (loading()) return formatCleanupProgress(progress(), 'scan');
+        if (scan().enabled) {
+          return 'No sessions with all PRs/MRs merged or tracked issues closed.';
+        }
+        return 'PR/MR status is off. Enable options.status in opencode.json to use this command.';
+      };
+
+      const renderRow = (candidate: CleanupCandidate) => {
+        const meta = () => {
+          const parts = [formatCleanupSubtitle(candidate)];
+          if (openTabIDs().has(candidate.sessionID)) parts.push('open tab');
+          return parts.join(' · ');
+        };
+        return (
+          <div class="fk-cleanup-row">
+            <div class="fk-cleanup-main">
+              <div
+                class="fk-cleanup-title"
+                onClick={() => {
+                  const server = builtinServer()?.id;
+                  if (!server) return;
+                  props.close();
+                  ctx.tabs.open({ server, id: candidate.sessionID }, { focus: true });
+                }}
+              >
+                {candidate.title}
+              </div>
+              <div class="fk-cleanup-meta">{meta()}</div>
+            </div>
+            <ui.Button
+              size="small"
+              icon="archive"
+              busy={cleaningID() === candidate.sessionID}
+              disabled={loading() || cleaningID() !== undefined}
+              onClick={() => void clean([candidate.sessionID], candidate.sessionID)}
+            >
+              Clean up
+            </ui.Button>
+          </div>
+        );
+      };
+
+      return (
+        <ui.Dialog
+          title="Clean up finished sessions"
+          description="Archive idle sessions whose PRs/MRs have merged or tracked issues have closed, and close their open tabs."
+          size="large"
+          footer={
+            <div class="fk-cleanup-footer">
+              <ui.Button
+                size="small"
+                icon="refresh"
+                busy={loading()}
+                disabled={cleaningID() !== undefined}
+                onClick={() => void load()}
+              >
+                Refresh
+              </ui.Button>
+              <Show when={candidates().length > 0}>
+                <ui.Button
+                  size="small"
+                  variant="contrast"
+                  icon="archive"
+                  busy={cleaningID() === 'all'}
+                  disabled={loading() || cleaningID() !== undefined}
+                  onClick={() =>
+                    void clean(
+                      candidates().map((candidate) => candidate.sessionID),
+                      'all',
+                    )
+                  }
+                >
+                  {`Clean up all (${candidates().length})`}
+                </ui.Button>
+              </Show>
+            </div>
+          }
+        >
+          <div class="fk-cleanup-dialog">
+            <Show when={error()}>
+              {(message: () => string) => <div class="fk-error">{message()}</div>}
+            </Show>
+            <Show when={scan().skippedErrors > 0}>
+              <div class="fk-warning">
+                {`Skipped ${scan().skippedErrors} session${scan().skippedErrors === 1 ? '' : 's'} whose target status could not be verified.`}
+              </div>
+            </Show>
+            <Show when={cleaningID() !== undefined && progress()}>
+              <div class="fk-muted">{formatCleanupProgress(progress(), 'cleanup')}</div>
+            </Show>
+            <Show
+              when={!loading() && candidates().length > 0}
+              fallback={
+                <Show when={!error()}>
+                  <div class="fk-muted">{fallbackMessage()}</div>
+                </Show>
+              }
+            >
+              <div class="fk-cleanup-list">
+                <For each={groups()}>
+                  {(group) => (
+                    <>
+                      <Show when={group.label}>
+                        {(label: () => string) => <div class="fk-cleanup-group">{label()}</div>}
+                      </Show>
+                      <For each={group.items}>{(candidate) => renderRow(candidate)}</For>
+                    </>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </div>
+        </ui.Dialog>
+      );
+    }
+
     const tab = (id: string, title: string): PanelTab => ({ id, title, closable: 'hover' });
     const statusTab = tab(STATUS_TAB, 'PR/MR status');
     const feedbackTab = tab(FEEDBACK_TAB, 'Review updates');
@@ -566,12 +940,15 @@ export default Plugin.define({
         if (url) ctx.system.openExternal(url);
       },
     }));
+    ctx.add(Command, (): Command => ({
+      id: 'cleanup',
+      title: 'Clean up finished sessions',
+      group: 'Forge',
+      slash: { name: 'forge-cleanup' },
+      enabled: !!builtinServer() && !!resolveCleanupDirectory(),
+      run: () => openCleanup(),
+    }));
 
-    const builtinServer = () =>
-      ctx.servers
-        .list()
-        .map((id) => ctx.servers.get(id))
-        .find((server) => server?.builtin);
     createKeyed(
       () => ctx.client,
       () => {
@@ -580,6 +957,10 @@ export default Plugin.define({
         connection.connect(currentRpc);
         void feedback.refresh();
         const stops = [
+          currentRpc.events.on('sessionsCleanedUp', (event) => {
+            const { sessionIDs } = event.data as EventData<'sessionsCleanedUp'>;
+            closeCleanedTabs(sessionIDs);
+          }),
           currentRpc.events.on('feedbackChanged', (event) => {
             const { directory } = event.data as EventData<'feedbackChanged'>;
             if (feedback.has(directory)) void reload(directory);

@@ -12,6 +12,8 @@ import {
   type ForgeTraits,
   type GitLabIssueSnapshot,
   type GitLabMergeRequest,
+  type IssueStateSnapshot,
+  type RequestStateSnapshot,
   type ReviewerApproval,
   type ReviewRef,
 } from '../../forge';
@@ -248,6 +250,51 @@ export const ISSUE_QUERY = query<{
     }
   }
 }`);
+
+interface MergeRequestStateNode {
+  iid: string;
+  title: string;
+  webUrl: string;
+  state: string;
+  targetProject: { fullPath: string };
+}
+
+interface WorkItemStateNode {
+  iid: string;
+  state: string;
+}
+
+export function mergeRequestStatesQuery(count: number): Query<{
+  project?: { mergeRequests?: { nodes: MergeRequestStateNode[] } | null } | null;
+}> {
+  const vars = Array.from({ length: count }, (_, index) => `$i${index}: String!`).join(', ');
+  const iids = Array.from({ length: count }, (_, index) => `$i${index}`).join(', ');
+  return query(
+    `query($project: ID!, ${vars}) {
+      project(fullPath: $project) {
+        mergeRequests(iids: [${iids}], first: ${count}) {
+          nodes { iid title webUrl state targetProject { fullPath } }
+        }
+      }
+    }`,
+  );
+}
+
+export function workItemStatesQuery(count: number): Query<{
+  project?: { workItems?: { nodes: WorkItemStateNode[] } | null } | null;
+}> {
+  const vars = Array.from({ length: count }, (_, index) => `$i${index}: String!`).join(', ');
+  const iids = Array.from({ length: count }, (_, index) => `$i${index}`).join(', ');
+  return query(
+    `query($project: ID!, ${vars}) {
+      project(fullPath: $project) {
+        workItems(iids: [${iids}], first: ${count}) {
+          nodes { iid state }
+        }
+      }
+    }`,
+  );
+}
 
 export const DISCUSSIONS_QUERY = query<{
   project?: { mergeRequest?: { discussions?: DiscussionPage | null } | null } | null;
@@ -717,6 +764,76 @@ export class GitLabForge implements Forge {
       labels: widgets.flatMap((widget) => widget.labels?.nodes ?? []).map((l) => l.title),
       ...(milestone ? { milestone } : {}),
     };
+  }
+
+  async requestStates(
+    project: RemoteProject,
+    numbers: readonly string[],
+  ): Promise<ReadonlyMap<string, RequestStateSnapshot>> {
+    const unique = [...new Set(numbers.filter(Boolean))];
+    const found = new Map<string, RequestStateSnapshot>();
+    const fetchChunk = async (chunk: readonly string[]): Promise<void> => {
+      if (chunk.length === 0) return;
+      const variables: Record<string, string> = { project: project.path };
+      chunk.forEach((iid, index) => (variables[`i${index}`] = iid));
+      try {
+        const data = await this.graphql(
+          project.host,
+          mergeRequestStatesQuery(chunk.length),
+          variables,
+        );
+        for (const node of data.project?.mergeRequests?.nodes ?? []) {
+          if (!node || !node.iid || !node.state || !node.webUrl || !node.targetProject?.fullPath)
+            continue;
+          found.set(node.iid, {
+            iid: node.iid,
+            title: node.title ?? '',
+            url: node.webUrl,
+            state: node.state.toLowerCase(),
+            targetProject: node.targetProject.fullPath,
+          });
+        }
+      } catch (error) {
+        if (!(error instanceof ForgeError) || error.kind !== 'request') throw error;
+        if (chunk.length === 1) return;
+        const mid = Math.ceil(chunk.length / 2);
+        await fetchChunk(chunk.slice(0, mid));
+        await fetchChunk(chunk.slice(mid));
+      }
+    };
+    await fetchChunk(unique);
+    return found;
+  }
+
+  async issueStates(
+    project: RemoteProject,
+    numbers: readonly string[],
+  ): Promise<ReadonlyMap<string, IssueStateSnapshot>> {
+    const unique = [...new Set(numbers.filter(Boolean))];
+    const found = new Map<string, IssueStateSnapshot>();
+    const fetchChunk = async (chunk: readonly string[]): Promise<void> => {
+      if (chunk.length === 0) return;
+      const variables: Record<string, string> = { project: project.path };
+      chunk.forEach((iid, index) => (variables[`i${index}`] = iid));
+      try {
+        const data = await this.graphql(project.host, workItemStatesQuery(chunk.length), variables);
+        for (const node of data.project?.workItems?.nodes ?? []) {
+          if (!node || !node.iid || (node.state !== 'OPEN' && node.state !== 'CLOSED')) continue;
+          found.set(node.iid, {
+            iid: node.iid,
+            open: node.state === 'OPEN',
+          });
+        }
+      } catch (error) {
+        if (!(error instanceof ForgeError) || error.kind !== 'request') throw error;
+        if (chunk.length === 1) return;
+        const mid = Math.ceil(chunk.length / 2);
+        await fetchChunk(chunk.slice(0, mid));
+        await fetchChunk(chunk.slice(mid));
+      }
+    };
+    await fetchChunk(unique);
+    return found;
   }
 
   async markReady(

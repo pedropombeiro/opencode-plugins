@@ -12,7 +12,7 @@ export interface NoticeHost {
 export function showNotice(notice: Notice, host: NoticeHost) {
   const { sessionID } = notice;
   if (sessionID && !host.hasShown(sessionID)) return;
-  if (sessionID && notice.variant === 'info') host.openTab(sessionID);
+  if (sessionID && notice.variant === 'info' && notice.openTab !== false) host.openTab(sessionID);
   host.toast({
     ...(notice.title ? { title: notice.title } : {}),
     message: notice.message,

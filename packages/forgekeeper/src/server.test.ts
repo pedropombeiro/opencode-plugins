@@ -420,12 +420,37 @@ async function harness(options: Options = {}) {
         nextRead = undefined;
         if (next instanceof Error) throw next;
         await next;
-        const session = sessions.get(sessionID);
-        return session ? { id: sessionID, ...session, model, time: {} } : undefined;
+        const session = sessions.get(sessionID) as
+          | {
+              title: string;
+              location: { directory: string };
+              parentID?: string;
+              fork?: { sessionID: string };
+              time?: { archived?: number; busy?: number; idle?: number; updated?: number };
+            }
+          | undefined;
+        return session ? { id: sessionID, time: {}, ...session, model } : undefined;
       },
-      update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
-        sessions.get(sessionID)!.title = title;
-        renames++;
+      update: async ({
+        sessionID,
+        title,
+        archived,
+      }: {
+        sessionID: string;
+        title?: string;
+        archived?: boolean;
+      }) => {
+        const session = sessions.get(sessionID)! as {
+          title: string;
+          time?: { archived?: number };
+        };
+        if (title !== undefined) {
+          session.title = title;
+          renames++;
+        }
+        if (archived !== undefined) {
+          session.time = { ...session.time, archived: archived ? Date.now() : undefined };
+        }
       },
       hook: async (name: string, callback: Hook) => {
         if (name === 'prompt') promptHook = callback as unknown as typeof promptHook;
@@ -601,6 +626,12 @@ async function harness(options: Options = {}) {
     acknowledgeFeedback: (id: string) => handlers.acknowledgeFeedback!({ id }),
     summarizeFeedback: (id: string) => handlers.summarizeFeedback!({ id }),
     actOnFeedback: (id: string, retry = false) => handlers.actOnFeedback!({ id, retry }),
+    cleanupCandidates: () =>
+      handlers.cleanupCandidates!({}) as Promise<import('./session-cleanup').CleanupScanResult>,
+    cleanupSessions: (sessionIDs: string[]) =>
+      handlers.cleanupSessions!({ sessionIDs }) as Promise<
+        import('./session-cleanup').CleanupResult
+      >,
     watch: (keys: string[], visible?: string) =>
       handlers.watch!({
         clientID: 'cli',
@@ -2169,7 +2200,12 @@ describe('PR/MR status lifecycle', () => {
     expect(off.entries()['forgekeeper-session-target']).toBe('Current session target: none.');
     await off.cleanup();
     const { app } = await watchedFeedback();
-    expect(app.commandNames()).toEqual(['forge-detach', 'forge-report', 'forge-inbox']);
+    expect(app.commandNames()).toEqual([
+      'forge-detach',
+      'forge-report',
+      'forge-inbox',
+      'forge-prune',
+    ]);
     await app.cleanup();
   });
 
@@ -7881,6 +7917,218 @@ describe('reviewer approval notifications and automation', () => {
       expect(forge.lookups.length).toBe(lookupsBefore);
     } finally {
       await app.cleanup();
+    }
+  });
+
+  test('scans and cleans up merged PR/MR and closed issue-only sessions, pruning inbox items and emitting sessionsCleanedUp', async () => {
+    const forge = new StatusForge();
+    const mr1 = 'https://gitlab.com/group/a/-/merge_requests/1';
+    const issue10 = 'https://gitlab.com/group/a/-/issues/10';
+    forge.set('group/a', '1', { state: 'opened' });
+    forge.issues.set('group/a#10', {
+      forge: 'gitlab',
+      open: true,
+      assignees: ['pedro'],
+      labels: [],
+    });
+
+    const sessions = defaultSessions();
+    sessions.set('issue-session', {
+      title: 'Triage issue',
+      location: { directory: '/repo' },
+      parentID: undefined,
+    });
+
+    const app = await harness({
+      status: forge,
+      sessions,
+      pluginOptions: { inbox: true, delivery: { reviews: 'inbox', lifecycle: 'inbox' } },
+    });
+    try {
+      await app.set({ target: mr1 }, 'one');
+      await app.set({ target: issue10 }, 'issue-session');
+      await app.watch(['one', 'issue-session'], 'one');
+      await settle();
+
+      // Neither is eligible while open:
+      expect((await app.cleanupCandidates()).candidates).toEqual([]);
+
+      // Merge MR !1 and close issue #10:
+      forge.set('group/a', '1', { state: 'merged' });
+      forge.issues.set('group/a#10', {
+        forge: 'gitlab',
+        open: false,
+        assignees: ['pedro'],
+        labels: [],
+      });
+      const refreshedMr = await app.refresh('one');
+      const refreshedIssue = await app.refresh('issue-session');
+      await settle();
+
+      // Snapshot.lookup.cleanupReady is set for both, and transition notices fired once:
+      expect(refreshedMr.snapshot.lookup?.cleanupReady).toEqual({
+        kind: 'merged-requests',
+        reason: 'PR/MR merged',
+      });
+      expect(refreshedIssue.snapshot.lookup?.cleanupReady).toEqual({
+        kind: 'closed-issues',
+        reason: 'Tracked issue closed',
+      });
+      expect(app.notices()).toContainEqual({
+        sessionID: 'one',
+        title: 'PR/MR merged — ready to archive',
+        message: 'Run /forge-cleanup to archive this session and close its tab.',
+        variant: 'info',
+        openTab: false,
+      });
+      expect(app.notices()).toContainEqual({
+        sessionID: 'issue-session',
+        title: 'Tracked issue closed — ready to archive',
+        message: 'Run /forge-cleanup to archive this session and close its tab.',
+        variant: 'info',
+        openTab: false,
+      });
+      // Merge lifecycle item is in the inbox for session `one`:
+      expect((await app.feedback()).items.some((item) => item.sessionID === 'one')).toBe(true);
+
+      const scan = await app.cleanupCandidates();
+      expect(scan.enabled).toBe(true);
+      expect(scan.candidates.map((c) => c.sessionID).sort()).toEqual(['issue-session', 'one']);
+
+      const cleaned = await app.cleanupSessions(['one', 'issue-session']);
+      expect(cleaned).toEqual({
+        archived: ['one', 'issue-session'],
+        alreadyArchived: [],
+        failed: [],
+      });
+
+      // Sessions are archived, inbox items for `one` are pruned, and sessionsCleanedUp emitted:
+      expect(
+        (sessions.get('one') as { time?: { archived?: number } })?.time?.archived,
+      ).toBeDefined();
+      expect((await app.feedback()).items.filter((item) => item.sessionID === 'one')).toEqual([]);
+      expect(app.emitted).toContainEqual({
+        name: 'sessionsCleanedUp',
+        data: { sessionIDs: ['one', 'issue-session'] },
+      });
+    } finally {
+      await app.cleanup();
+    }
+  });
+
+  test('prunes inbox items when session.archived event fires and supports /forge-prune command', async () => {
+    const forge = new StatusForge();
+    const mr1 = 'https://gitlab.com/group/a/-/merge_requests/1';
+    forge.set('group/a', '1', { state: 'merged' });
+    const sessions = defaultSessions();
+    const app = await harness({
+      status: forge,
+      sessions,
+      storage: new Map<string, unknown>([
+        [
+          `feedback-inbox/${encodeURIComponent('/repo')}`,
+          {
+            items: [
+              {
+                id: 'merged-1',
+                kind: 'merged',
+                sessionID: 'two',
+                url: mr1,
+                title: '!1 merged into main',
+                links: [mr1],
+                at: 100,
+              },
+            ],
+            paused: false,
+          },
+        ],
+      ]),
+      pluginOptions: { inbox: true, delivery: { reviews: 'inbox' } },
+    });
+    try {
+      await app.set({ target: mr1 }, 'one');
+      await settle();
+
+      // Live session.archived event prunes session two's inbox items:
+      expect((await app.feedback()).items).toHaveLength(1);
+      app.emit({ type: 'session.archived', data: { sessionID: 'two' } });
+      await settle();
+      expect((await app.feedback()).items).toEqual([]);
+
+      // `/forge-prune` lists eligible session `one` in a relay turn:
+      await app.runCommand('forge-prune', '', 'two');
+      const listRelay = await app.request('two');
+      const listText = listRelay.messages[0].content[0].text;
+      expect(listText).toContain('[!1] Review changes');
+      expect(listText).toContain('!1 merged');
+
+      // `/forge-prune all` archives `one` and relays the summary to `two`:
+      app.prompt('two');
+      await app.runCommand('forge-prune', 'all', 'two');
+      const cleanRelay = await app.request('two');
+      expect(cleanRelay.messages[0].content[0].text).toContain('Archived: [!1] Review changes');
+      expect(
+        (sessions.get('one') as { time?: { archived?: number } })?.time?.archived,
+      ).toBeDefined();
+
+      // Self-archiving with `/forge-prune all` emits a notice instead of relaying into the archived session:
+      await app.set({ target: mr1 }, 'two');
+      await settle();
+      const syntheticBefore = app.synthetic.length;
+      await app.runCommand('forge-prune', 'all', 'two');
+      await settle();
+      expect(
+        (sessions.get('two') as { time?: { archived?: number } })?.time?.archived,
+      ).toBeDefined();
+      expect(app.synthetic.length).toBe(syntheticBefore);
+      expect(app.notices()).toContainEqual({
+        message: 'Archived: [!1] Other session',
+        variant: 'info',
+      });
+    } finally {
+      await app.cleanup();
+    }
+
+    // With status disabled, cleanupCandidates reports enabled: false and cleanupSessions rejects:
+    const disabled = await harness({ pluginOptions: { status: false } });
+    try {
+      expect(await disabled.cleanupCandidates()).toEqual({
+        enabled: false,
+        candidates: [],
+        skippedErrors: 0,
+      });
+      await expect(disabled.cleanupSessions(['one'])).rejects.toThrow('PR/MR status is disabled');
+    } finally {
+      await disabled.cleanup();
+    }
+
+    // Invalidated in-flight lookup (e.g. target detached mid-refresh) does not emit a stale cleanupWatch notice:
+    const raceForge = new StatusForge();
+    raceForge.set('group/a', '1', { state: 'opened' });
+    const raceApp = await harness({ status: raceForge });
+    try {
+      await raceApp.set({ target: mr1 }, 'one');
+      await raceApp.watch(['one'], 'one');
+      await settle();
+
+      raceForge.set('group/a', '1', { state: 'merged' });
+      raceForge.gated = true;
+      const pendingRefresh = raceApp.refresh('one');
+      await settle();
+      await raceApp.set({ target: 'none' }, 'one');
+      raceForge.open();
+      await pendingRefresh;
+      await settle();
+
+      expect(
+        raceApp
+          .notices()
+          .some((notice) =>
+            ((notice as { title?: string }).title ?? '').includes('ready to archive'),
+          ),
+      ).toBe(false);
+    } finally {
+      await raceApp.cleanup();
     }
   });
 });
