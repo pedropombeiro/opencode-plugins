@@ -49,7 +49,7 @@ describe('feedback inbox', () => {
       ['new', false],
       ['seen', true],
     ]);
-    expect(feedbackFooter(state, 'one')).toBe('1 review update');
+    expect(feedbackFooter(state, 'one')).toBe('📥 1');
   });
   test("a session's footer counts only its own updates", () => {
     const item = (id: string, sessionID: string): FeedbackItem => ({
@@ -64,13 +64,13 @@ describe('feedback inbox', () => {
       items: [item('a', 'one'), item('b', 'one'), item('c', 'two')],
       paused: false,
     };
-    expect(feedbackFooter(state, 'one')).toBe('2 review updates');
-    expect(feedbackFooter(state, 'two')).toBe('1 review update');
+    expect(feedbackFooter(state, 'one')).toBe('📥 2');
+    expect(feedbackFooter(state, 'two')).toBe('📥 1');
     expect(feedbackFooter(state, 'other')).toBeUndefined();
     // A new session has no ID until its first message.
     expect(feedbackFooter(state, undefined)).toBeUndefined();
     const paused = { ...state, paused: true };
-    expect(feedbackFooter(paused, 'one')).toBe('2 review updates (paused)');
+    expect(feedbackFooter(paused, 'one')).toBe('📥 2 (paused)');
     expect(feedbackFooter(paused, 'other')).toBeUndefined();
     expect(sessionItems(state, 'one').map((entry) => entry.id)).toEqual(['a', 'b']);
     expect(sessionItems(state, 'two').map((entry) => entry.id)).toEqual(['c']);

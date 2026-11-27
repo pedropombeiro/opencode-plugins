@@ -126,7 +126,7 @@ export function feedbackFooter(
 ): string | undefined {
   const count = sessionItems(state, sessionID).filter((item) => !item.read).length;
   if (count === 0) return undefined;
-  return `${count} review update${count === 1 ? '' : 's'}${state.paused ? ' (paused)' : ''}`;
+  return `📥 ${count}${state.paused ? ' (paused)' : ''}`;
 }
 
 export function feedbackLinks(item: Pick<FeedbackItem, 'url' | 'links'>): string[] {
