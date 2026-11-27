@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-vent-0.1.0...opencode-vent-0.1.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **vent:** harden routing, file locks, and closed-match handling ([4340b48](https://github.com/pedropombeiro/opencode-plugins/commit/4340b4885bf1fd343fd99a54a03e13e26615c78b))
+
 ## 0.1.0 (2026-11-26)
 
 
