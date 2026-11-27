@@ -95,8 +95,11 @@ export async function ventToGitHub(
       paginate: true,
     },
   );
+  if (!Array.isArray(issues)) {
+    throw new Error('GitHub open issue lookup did not return a list.');
+  }
 
-  const openCandidates = (Array.isArray(issues) ? issues : [])
+  const openCandidates = issues
     .filter((issue) => !issue.pull_request)
     .map((issue) => ({
       id: `#${issue.number}`,
@@ -145,7 +148,10 @@ export async function ventToGitHub(
       paginate: true,
     },
   );
-  const closedCandidates = (Array.isArray(closed) ? closed : [])
+  if (!Array.isArray(closed)) {
+    throw new Error('GitHub closed issue lookup did not return a list.');
+  }
+  const closedCandidates = closed
     .filter((issue) => !issue.pull_request)
     .map((issue) => ({
       id: `#${issue.number}`,
@@ -153,7 +159,26 @@ export async function ventToGitHub(
       body: issue.body ?? '',
       issue,
     }));
-  const closedMatch = findBestMatch(buildMatchQuery(input), closedCandidates, deps.threshold);
+  const bestClosedMatch = findBestMatch(buildMatchQuery(input), closedCandidates, deps.threshold);
+  const pinnedCandidate = input.closedMatchUrl
+    ? closedCandidates.find((candidate) => candidate.issue.html_url === input.closedMatchUrl)
+    : undefined;
+  if (input.closedMatchUrl && !pinnedCandidate) {
+    if (bestClosedMatch) {
+      throw new Error(
+        `Matched closed GitHub issue "${bestClosedMatch.item.issue.html_url}" does not match approved closedMatchUrl "${input.closedMatchUrl}".`,
+      );
+    }
+    throw new Error(
+      `Approved closedMatchUrl "${input.closedMatchUrl}" was not found among closed GitHub issues.`,
+    );
+  }
+  const closedMatch = pinnedCandidate
+    ? {
+        item: pinnedCandidate,
+        score: bestClosedMatch?.item === pinnedCandidate ? bestClosedMatch.score : 1,
+      }
+    : bestClosedMatch;
 
   if (input.onClosedMatch && !closedMatch) {
     throw new Error(
@@ -163,11 +188,6 @@ export async function ventToGitHub(
 
   if (closedMatch) {
     const closedIssue = closedMatch.item.issue;
-    if (input.closedMatchUrl && closedIssue.html_url !== input.closedMatchUrl) {
-      throw new Error(
-        `Matched closed GitHub issue "${closedIssue.html_url}" does not match approved closedMatchUrl "${input.closedMatchUrl}".`,
-      );
-    }
     const closedLabels = (closedIssue.labels ?? [])
       .map((label) => (typeof label === 'string' ? label : label.name))
       .filter((label): label is string => Boolean(label));
@@ -189,17 +209,26 @@ export async function ventToGitHub(
           signal: deps.signal,
         },
       );
-      const comment = await ghApi<GitHubComment>(
-        deps.exec,
-        destination.host,
-        `repos/${destination.repo}/issues/${closedIssue.number}/comments`,
-        {
-          method: 'POST',
-          body: { body: formatCommentBody(input, metadata) },
-          cwd,
-          signal: deps.signal,
-        },
-      );
+      let comment: GitHubComment;
+      try {
+        comment = await ghApi<GitHubComment>(
+          deps.exec,
+          destination.host,
+          `repos/${destination.repo}/issues/${closedIssue.number}/comments`,
+          {
+            method: 'POST',
+            body: { body: formatCommentBody(input, metadata) },
+            cwd,
+            signal: deps.signal,
+          },
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Reopened ${closedIssue.html_url}, but adding the occurrence comment failed: ${detail}`,
+          { cause: error },
+        );
+      }
       return {
         action: 'reopened',
         destination: destinationName,

@@ -48,7 +48,8 @@ export default {
           let branch: string | undefined;
           try {
             const vcs = await ctx.vcs.get({ location: session.location });
-            branch = vcs.data?.branch?.current || undefined;
+            const current = vcs.data?.branch?.current;
+            branch = current && current !== 'HEAD' ? current : undefined;
           } catch {
             branch = undefined;
           }

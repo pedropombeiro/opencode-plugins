@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { formatFileOccurrence, formatFileSection } from '../format.ts';
 import { buildMatchQuery, findBestMatch } from '../match.ts';
@@ -37,29 +38,33 @@ function withFileLock<T>(filePath: string, task: () => Promise<T>): Promise<T> {
 async function withCrossProcessLock<T>(
   filePath: string,
   signal: AbortSignal | undefined,
-  task: () => Promise<T>,
+  task: (canonicalTarget: string) => Promise<T>,
 ): Promise<T> {
   const canonical = canonicalizePath(filePath);
   const lockPath = `${canonical}.lock`;
+  const lockToken = randomUUID();
   await mkdir(dirname(canonical), { recursive: true });
 
   while (true) {
     signal?.throwIfAborted();
     try {
       const handle = await open(lockPath, 'wx');
-      await handle.close();
+      try {
+        await handle.writeFile(lockToken, 'utf8');
+      } finally {
+        await handle.close();
+      }
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') throw error;
       try {
-        const lockStat = await stat(lockPath);
+        const lockStat = await lstat(lockPath);
         if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS) {
           await unlink(lockPath).catch(() => {});
-          continue;
         }
       } catch {
-        continue;
+        // Wait before retrying if the lock was concurrently removed or unreadable.
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -67,9 +72,16 @@ async function withCrossProcessLock<T>(
 
   try {
     signal?.throwIfAborted();
-    return await task();
+    return await task(canonical);
   } finally {
-    await unlink(lockPath).catch(() => {});
+    try {
+      const currentOwner = await readFile(lockPath, 'utf8');
+      if (currentOwner === lockToken) {
+        await unlink(lockPath).catch(() => {});
+      }
+    } catch {
+      // Lock was already removed.
+    }
   }
 }
 
@@ -77,12 +89,17 @@ async function writeAtomicFile(
   filePath: string,
   content: string,
   signal: AbortSignal | undefined,
+  mode?: number,
 ): Promise<void> {
   signal?.throwIfAborted();
   await mkdir(dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await writeFile(tempPath, content, 'utf8');
+    await writeFile(tempPath, content, {
+      encoding: 'utf8',
+      flag: 'wx',
+      ...(mode !== undefined ? { mode } : {}),
+    });
     signal?.throwIfAborted();
     await rename(tempPath, filePath);
   } catch (error) {
@@ -157,10 +174,13 @@ export async function ventToFile(
   const resolvedPath = expandHome(destination.path, deps.home);
 
   return withFileLock(resolvedPath, () =>
-    withCrossProcessLock(resolvedPath, deps.signal, async () => {
+    withCrossProcessLock(resolvedPath, deps.signal, async (targetPath) => {
       let existing: string;
+      let existingMode: number | undefined;
       try {
-        existing = (await readFile(resolvedPath, 'utf8')).replace(/\r\n/g, '\n');
+        const existingStat = await stat(targetPath);
+        existingMode = existingStat.mode & 0o777;
+        existing = (await readFile(targetPath, 'utf8')).replace(/\r\n?/g, '\n');
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'ENOENT') throw error;
@@ -192,7 +212,7 @@ export async function ventToFile(
         ];
         updated = `${nextLines.join('\n').replace(/\n+$/, '')}\n`;
 
-        await writeAtomicFile(resolvedPath, updated, deps.signal);
+        await writeAtomicFile(targetPath, updated, deps.signal, existingMode);
 
         return {
           action: 'commented',
@@ -209,7 +229,7 @@ export async function ventToFile(
       const prefix = base ? `${base}\n\n` : `${DEFAULT_HEADER}\n`;
       updated = `${prefix}${formatFileSection(input, metadata)}\n`;
 
-      await writeAtomicFile(resolvedPath, updated, deps.signal);
+      await writeAtomicFile(targetPath, updated, deps.signal, existingMode);
 
       return {
         action: 'created',

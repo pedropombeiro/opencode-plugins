@@ -23,8 +23,7 @@
       "component": "opencode-cache-coach"
     },
     "packages/vent": {
-      "component": "opencode-vent",
-      "initial-version": "0.1.0"
+      "component": "opencode-vent"
     }
   },
   "include-v-in-tag": false,

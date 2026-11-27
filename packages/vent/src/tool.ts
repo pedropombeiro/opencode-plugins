@@ -159,9 +159,15 @@ export function parseVentInput(raw: unknown): VentInput {
     optionalString(record.unrelatedReason) ?? optionalString(record.localReason);
   const onClosedMatch = optionalClosedMatchAction(record.onClosedMatch);
   const closedMatchUrl = optionalString(record.closedMatchUrl);
+  if (closedMatchUrl && !onClosedMatch) {
+    throw new Error('`closedMatchUrl` requires `onClosedMatch`.');
+  }
+  const title = requiredString(record.title, 'title')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
 
   return {
-    title: requiredString(record.title, 'title'),
+    title,
     friction: requiredString(record.friction, 'friction'),
     context: requiredString(record.context, 'context'),
     ...(evidence ? { evidence } : {}),
@@ -179,6 +185,7 @@ export async function collectGitContext(
   run: Exec,
   directory: string,
   signal?: AbortSignal,
+  options?: { needBranch?: boolean },
 ): Promise<{
   remote?: string;
   fetchRemotes: string[];
@@ -186,13 +193,17 @@ export async function collectGitContext(
   remoteLookupError?: string;
   branch?: string;
 }> {
+  const gitEnv = { LC_ALL: 'C' };
   const [remoteResult, branchResult] = await Promise.all([
-    run('git', ['remote', '-v'], { cwd: directory, timeout: 5_000, signal }),
-    run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      cwd: directory,
-      timeout: 5_000,
-      signal,
-    }),
+    run('git', ['remote', '-v'], { cwd: directory, env: gitEnv, timeout: 5_000, signal }),
+    options?.needBranch !== false
+      ? run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+          cwd: directory,
+          env: gitEnv,
+          timeout: 5_000,
+          signal,
+        })
+      : Promise.resolve({ stdout: '', stderr: '', code: 1 }),
   ]);
 
   const fetchEntries =
@@ -276,8 +287,11 @@ export async function executeVent(
     branch?: string;
   } =
     runtime.remote === undefined || runtime.branch === undefined
-      ? await collectGitContext(runtime.exec, runtime.directory, runtime.signal)
+      ? await collectGitContext(runtime.exec, runtime.directory, runtime.signal, {
+          needBranch: runtime.branch === undefined,
+        })
       : {};
+  runtime.signal?.throwIfAborted();
 
   const rawRemote = runtime.remote ?? git.remote;
   const remote = rawRemote ? sanitizeRemote(rawRemote) : undefined;

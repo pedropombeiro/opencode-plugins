@@ -44,9 +44,11 @@ function matchesDestinationScope(
     return false;
   }
   if (epicRef) {
+    if (!URL.canParse(issue.web_url)) return false;
+    const url = new URL(issue.web_url);
     return (
-      URL.canParse(issue.web_url) &&
-      new URL(issue.web_url).pathname.toLowerCase().startsWith(projectPath)
+      url.host.toLowerCase() === destination.host.toLowerCase() &&
+      url.pathname.toLowerCase().startsWith(projectPath)
     );
   }
   return true;
@@ -56,17 +58,18 @@ export function parseGitLabEpicRef(epic: string, defaultHost: string): GitLabEpi
   const trimmed = epic.trim();
 
   const urlMatch = trimmed.match(
-    /^https?:\/\/([^/]+)\/groups\/(.+?)\/-\/(?:epics|work_items)\/(\d+)(?:[/?#].*)?$/,
+    /^(https?:\/\/)([^/]+)\/groups\/(.+?)\/-\/(?:epics|work_items)\/(\d+)(?:[/?#].*)?$/,
   );
   if (urlMatch) {
-    const host = urlMatch[1]!;
-    const groupPath = urlMatch[2]!;
-    const iid = urlMatch[3]!;
+    const protocol = urlMatch[1]!;
+    const host = urlMatch[2]!;
+    const groupPath = urlMatch[3]!;
+    const iid = urlMatch[4]!;
     return {
       host,
       groupPath,
       iid,
-      url: `https://${host}/groups/${groupPath}/-/epics/${iid}`,
+      url: `${protocol}${host}/groups/${groupPath}/-/epics/${iid}`,
     };
   }
 
@@ -171,8 +174,11 @@ export async function ventToGitLab(
     signal: deps.signal,
     paginate: true,
   });
+  if (!Array.isArray(issues)) {
+    throw new Error('GitLab open issue lookup did not return a list.');
+  }
 
-  const openCandidates = (Array.isArray(issues) ? issues : [])
+  const openCandidates = issues
     .filter(
       (issue) =>
         (!issue.state || issue.state === 'opened') &&
@@ -243,7 +249,26 @@ export async function ventToGitLab(
       body: issue.description ?? '',
       issue,
     }));
-  const closedMatch = findBestMatch(buildMatchQuery(input), closedCandidates, deps.threshold);
+  const bestClosedMatch = findBestMatch(buildMatchQuery(input), closedCandidates, deps.threshold);
+  const pinnedCandidate = input.closedMatchUrl
+    ? closedCandidates.find((candidate) => candidate.issue.web_url === input.closedMatchUrl)
+    : undefined;
+  if (input.closedMatchUrl && !pinnedCandidate) {
+    if (bestClosedMatch) {
+      throw new Error(
+        `Matched closed GitLab issue "${bestClosedMatch.item.issue.web_url}" does not match approved closedMatchUrl "${input.closedMatchUrl}".`,
+      );
+    }
+    throw new Error(
+      `Approved closedMatchUrl "${input.closedMatchUrl}" was not found among closed GitLab issues.`,
+    );
+  }
+  const closedMatch = pinnedCandidate
+    ? {
+        item: pinnedCandidate,
+        score: bestClosedMatch?.item === pinnedCandidate ? bestClosedMatch.score : 1,
+      }
+    : bestClosedMatch;
 
   if (input.onClosedMatch && !closedMatch) {
     throw new Error(
@@ -254,11 +279,6 @@ export async function ventToGitLab(
   let linkedClosedUrl: string | undefined;
   if (closedMatch) {
     const closedIssue = closedMatch.item.issue;
-    if (input.closedMatchUrl && closedIssue.web_url !== input.closedMatchUrl) {
-      throw new Error(
-        `Matched closed GitLab issue "${closedIssue.web_url}" does not match approved closedMatchUrl "${input.closedMatchUrl}".`,
-      );
-    }
     const closedLabels = closedIssue.labels ?? [];
 
     if (input.onClosedMatch === 'reopen') {
@@ -278,17 +298,26 @@ export async function ventToGitLab(
           signal: deps.signal,
         },
       );
-      const note = await glabApi<GitLabNote>(
-        deps.exec,
-        host,
-        `projects/${closedIssue.project_id}/issues/${closedIssue.iid}/notes`,
-        {
-          method: 'POST',
-          body: { body: formatCommentBody(input, metadata) },
-          cwd,
-          signal: deps.signal,
-        },
-      );
+      let note: GitLabNote;
+      try {
+        note = await glabApi<GitLabNote>(
+          deps.exec,
+          host,
+          `projects/${closedIssue.project_id}/issues/${closedIssue.iid}/notes`,
+          {
+            method: 'POST',
+            body: { body: formatCommentBody(input, metadata) },
+            cwd,
+            signal: deps.signal,
+          },
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Reopened ${closedIssue.web_url}, but adding the occurrence comment failed: ${detail}`,
+          { cause: error },
+        );
+      }
       return {
         action: 'reopened',
         destination: destinationName,
@@ -358,7 +387,8 @@ export async function ventToGitLab(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes('409') && !message.toLowerCase().includes('already')) {
+      const detail = message.replace(/^glab api POST \S+ failed:\s*/, '');
+      if (!/\b409\b/.test(detail) && !detail.toLowerCase().includes('already')) {
         note = `${note ? `${note} ` : ''}Issue created, but fallback epic link failed: ${message}`;
       }
     }
