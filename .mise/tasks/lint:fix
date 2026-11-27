@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 #MISE description="Lint and auto-fix"
+#MISE alias="lint:fix"
 eslint . --fix

@@ -68,12 +68,21 @@ function describeTargets(targets: readonly Target[]): string {
 }
 
 function toolResult(targets: readonly Target[], missing: readonly string[]): string {
-  const lines =
-    targets.length === 0
-      ? ['Session target: none.']
-      : targets.length === 1
-        ? [`Session target: ${targets[0].url}`]
-        : [`Session targets (${targets.length}):`, ...targets.map((target) => `- ${target.url}`)];
+  let lines: string[];
+  switch (targets.length) {
+    case 0:
+      lines = ['Session target: none.'];
+      break;
+    case 1:
+      lines = [`Session target: ${targets[0].url}`];
+      break;
+    default:
+      lines = [
+        `Session targets (${targets.length}):`,
+        ...targets.map((target) => `- ${target.url}`),
+      ];
+      break;
+  }
   if (missing.length) lines.push(`Not session targets, so not removed: ${missing.join(', ')}`);
   return lines.join('\n');
 }

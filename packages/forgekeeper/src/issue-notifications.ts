@@ -94,13 +94,14 @@ export function createIssueNotifications(
     const finalMergeOnly = ref.forge === 'github';
     const { merge, ...next } = state;
     const allMerged = requests.every((request) => request.state === 'merged');
-    const anchor = allMerged
-      ? merge
+    let anchor: ReviewRequest | undefined;
+    if (allMerged) {
+      anchor = merge
         ? requests.find((request) => sameRequestUrl(request.url, merge.url))
-        : undefined
-      : finalMergeOnly
-        ? undefined
-        : requests.find((request) => request.state === 'opened');
+        : undefined;
+    } else if (!finalMergeOnly) {
+      anchor = requests.find((request) => request.state === 'opened');
+    }
     if (!anchor) {
       if (merge) await write(key, next);
       return;
@@ -139,7 +140,7 @@ export function createIssueNotifications(
           ),
           'Tell the user what you would change in the issue, and wait for their approval before editing it.',
         ],
-        ...(mode !== 'inbox' ? { delivery: mode } : {}),
+        ...(mode === 'inbox' ? {} : { delivery: mode }),
         at: allMerged && merge ? merge.at : now(),
       };
     }

@@ -103,7 +103,8 @@ Plugins target the OpenCode 2 plugin API (`@opencode/plugin`). See
 
 ## Testing
 
-Verify by running `mise run test`, `mise run build`, and `mise run typecheck` successfully.
+Verify by running `mise run lint`, `mise run typecheck`, `mise run build`, and `mise run test`
+successfully.
 
 ## Releasing
 

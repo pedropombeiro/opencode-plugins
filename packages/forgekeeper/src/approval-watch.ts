@@ -37,8 +37,10 @@ export interface ApprovalRecord {
   at: number;
 }
 
-export const approverKind = (approver: ReviewerApproval): 'automated' | 'bot' | 'human' =>
-  approver.automated ? 'automated' : approver.bot ? 'bot' : 'human';
+export const approverKind = (approver: ReviewerApproval): 'automated' | 'bot' | 'human' => {
+  if (approver.automated) return 'automated';
+  return approver.bot ? 'bot' : 'human';
+};
 
 export const approverKey = (
   approver: Pick<ReviewerApproval, 'id' | 'username' | 'bot' | 'automated'>,
@@ -197,7 +199,7 @@ export function observeApprovals(
         const legacy = legacyApproverKey(approver);
         const wasApproving = previousSet.has(key) || (!structured && previousSet.has(legacy));
         const previousToken =
-          previous.tokens?.[key] ?? (!structured ? previous.tokens?.[legacy] : undefined);
+          previous.tokens?.[key] ?? (structured ? undefined : previous.tokens?.[legacy]);
         const sameToken =
           !!approver.reviewID && !!previousToken && approver.reviewID === previousToken;
         const reapproved =
@@ -208,7 +210,7 @@ export function observeApprovals(
         if (sameToken || (wasApproving && !reapproved)) continue;
         if (approver.id && request.authorID && approver.id === request.authorID) continue;
         if (!watches(request, approver)) continue;
-        const priorCycle = cycles[key] ?? (!structured ? cycles[legacy] : undefined) ?? 0;
+        const priorCycle = cycles[key] ?? (structured ? undefined : cycles[legacy]) ?? 0;
         const cycle = priorCycle + 1;
         cycles[key] = cycle;
         if (!structured && legacy !== key) delete cycles[legacy];
@@ -225,7 +227,7 @@ export function observeApprovals(
           approver,
           title: approvalTitle(request, approver, reference(request)),
           ...(details.length ? { details } : {}),
-          ...(mode !== 'inbox' ? { delivery: mode } : {}),
+          ...(mode === 'inbox' ? {} : { delivery: mode }),
         });
       }
     }

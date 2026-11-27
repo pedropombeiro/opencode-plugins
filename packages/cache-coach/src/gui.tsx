@@ -275,7 +275,8 @@ export default Plugin.define({
       };
       const tone = () => {
         const current = value().indicator;
-        return current?.tone === 'success' ? 'cc-success' : current ? 'cc-warning' : 'cc-muted';
+        if (current?.tone === 'success') return 'cc-success';
+        return current ? 'cc-warning' : 'cc-muted';
       };
       return (
         <div class="cache-coach-panel">

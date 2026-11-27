@@ -23,7 +23,7 @@ function harness() {
       watches.push({
         directory,
         keys: input.keys,
-        ...(input.visible !== undefined ? { visible: input.visible } : {}),
+        ...(input.visible === undefined ? {} : { visible: input.visible }),
       });
       return { enabled: enabled.get(directory) ?? true, statuses: statuses.get(directory) ?? {} };
     },

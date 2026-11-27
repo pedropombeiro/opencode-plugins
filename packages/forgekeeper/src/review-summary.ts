@@ -291,11 +291,14 @@ export function addLinked(
     (note.body.length > MAX_LINKED_BODY
       ? `${note.body.slice(0, MAX_LINKED_BODY - marker.length)}${marker}`
       : note.body);
-  const result: LinkedResult = !note
-    ? { url, status: 'unavailable' }
-    : used + body!.length > MAX_LINKED_TOTAL
-      ? { url, status: 'omitted' }
-      : { url, status: 'fetched', username: note.username, body: body! };
+  let result: LinkedResult;
+  if (!note) {
+    result = { url, status: 'unavailable' };
+  } else if (used + body!.length > MAX_LINKED_TOTAL) {
+    result = { url, status: 'omitted' };
+  } else {
+    result = { url, status: 'fetched', username: note.username, body: body! };
+  }
   return { ...state, notes: [...state.notes.filter((entry) => entry.url !== url), result] };
 }
 
@@ -323,18 +326,19 @@ export function requestText(
 ): string {
   const { blocks, omitted } = commentBlocks(url, details, true);
   const unread = Math.max(0, expected - details.length);
+  let emptyNotice: string;
+  if (unavailable) {
+    emptyNotice =
+      "The author's replies could not be read. Say so, without guessing whether there are any.";
+  } else if (expected) {
+    emptyNotice = 'No reply text could be read. Mention that the author replied.';
+  } else {
+    emptyNotice = 'The author wrote no replies since the previous request.';
+  }
   return [
     `Tell the developer about this review request: ${escape(title)}`,
     `PR/MR: ${url}`,
-    ...(blocks.length
-      ? blocks
-      : [
-          unavailable
-            ? "The author's replies could not be read. Say so, without guessing whether there are any."
-            : expected
-              ? 'No reply text could be read. Mention that the author replied.'
-              : 'The author wrote no replies since the previous request.',
-        ]),
+    ...(blocks.length ? blocks : [emptyNotice]),
     ...(omitted + unread
       ? [`${omitted + unread} more replies were left out or could not be read.`]
       : []),

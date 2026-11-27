@@ -1013,16 +1013,15 @@ export function createAutomationHost(
     claim: claims,
     notify,
     async submit(record, text) {
+      let forgekeeper: 'job-investigate' | 'review-approval' | 'review-prepare' = 'review-prepare';
+      if (isJobFailure(record.item)) forgekeeper = 'job-investigate';
+      else if (isApproval(record.item)) forgekeeper = 'review-approval';
       await ctx.session.prompt({
         sessionID: record.item.sessionID,
         id: record.messageID,
         text,
         metadata: {
-          forgekeeper: isJobFailure(record.item)
-            ? 'job-investigate'
-            : isApproval(record.item)
-              ? 'review-approval'
-              : 'review-prepare',
+          forgekeeper,
           batch: record.batch,
         },
         delivery: 'queue',
@@ -1048,11 +1047,9 @@ export function createAutomationHost(
 
     // The task instructions for the attempt's turn.
     instructions: (record: AutomationRecord) => {
-      const base = isJobFailure(record.item)
-        ? INVESTIGATION_INSTRUCTIONS
-        : isApproval(record.item)
-          ? APPROVAL_INSTRUCTIONS
-          : PREPARATION_INSTRUCTIONS;
+      let base = PREPARATION_INSTRUCTIONS;
+      if (isJobFailure(record.item)) base = INVESTIGATION_INSTRUCTIONS;
+      else if (isApproval(record.item)) base = APPROVAL_INSTRUCTIONS;
       return record.execution ? `${base}\n${LINKED_INSTRUCTIONS}` : base;
     },
 

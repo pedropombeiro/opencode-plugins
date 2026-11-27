@@ -48,14 +48,14 @@ function createOsc(): Osc | undefined {
       try {
         writeSync(fd, esc);
       } catch {
-        return;
+        // Ignore TTY write errors if the terminal closed
       }
     },
     close() {
       try {
         closeSync(fd);
       } catch {
-        return;
+        // Ignore close errors if the descriptor is already closed
       }
     },
   };

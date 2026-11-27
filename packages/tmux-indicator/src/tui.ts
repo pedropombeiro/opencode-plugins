@@ -69,7 +69,7 @@ export default {
       try {
         writeFileSync(tty, '\x07');
       } catch {
-        return;
+        // Ignore errors when the pane TTY is no longer writable
       }
     };
 

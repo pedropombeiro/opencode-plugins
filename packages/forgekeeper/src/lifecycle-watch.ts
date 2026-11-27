@@ -206,7 +206,7 @@ export function observe(
         id,
         detectedAt: now,
         ...(rule ? { policy: rule } : {}),
-        ...(mode !== 'inbox' ? { delivery: mode } : {}),
+        ...(mode === 'inbox' ? {} : { delivery: mode }),
         ...extra,
       });
     };
@@ -250,9 +250,9 @@ export function observe(
       url: request.url,
       reference: reference(request),
       state: request.state,
-      ...(conflicts !== undefined ? { conflicts } : {}),
+      ...(conflicts === undefined ? {} : { conflicts }),
       cycles,
-      ...(requested !== undefined ? { changesRequested: requested } : {}),
+      ...(requested === undefined ? {} : { changesRequested: requested }),
       requestCycles,
       ...(seen.size ? { seenChangeReviewIDs: [...seen] } : {}),
       ci,

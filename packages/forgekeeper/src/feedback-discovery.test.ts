@@ -107,10 +107,18 @@ describe('feedback discovery', () => {
         location: { directory: id === 'foreign' ? '/elsewhere' : '/repo' },
         ...(id === 'linked' ? { metadata: linkedMetadata('recent', 'batch', 'linked') } : {}),
       }),
-      activity: async (id) =>
-        id === 'empty'
-          ? undefined
-          : at - (id === 'old' ? RECENT_ACTIVITY + 1 : id === 'boundary' ? RECENT_ACTIVITY : 1),
+      activity: async (id) => {
+        switch (id) {
+          case 'empty':
+            return undefined;
+          case 'old':
+            return at - (RECENT_ACTIVITY + 1);
+          case 'boundary':
+            return at - RECENT_ACTIVITY;
+          default:
+            return at - 1;
+        }
+      },
       paused: async () => paused,
       watch: (ids) => watched.push(ids.sort()),
       error: (error) => {

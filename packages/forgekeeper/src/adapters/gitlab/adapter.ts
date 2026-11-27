@@ -439,11 +439,14 @@ export const gitlabTraits: ForgeTraits<GitLabMergeRequest, GitLabForge> = {
       request.approvalRequirementsSatisfied === true ? [] : (request.missingRules ?? []);
     for (const rule of missing.slice(0, 2)) {
       const others = (rule.eligibleCount ?? rule.eligible.length) - rule.eligible.length;
-      const who = rule.eligibleReviewers.length
-        ? `, @${rule.eligibleReviewers[0]} can approve`
-        : rule.eligible.length
-          ? `, ${request.awaitingReviewers.length ? 'ask an eligible approver: ' : 'ask '}@${rule.eligible.join(', @')}${others > 0 ? ` or ${others} ${others === 1 ? 'other' : 'others'}` : ''}`
-          : '';
+      let who = '';
+      if (rule.eligibleReviewers.length) {
+        who = `, @${rule.eligibleReviewers[0]} can approve`;
+      } else if (rule.eligible.length) {
+        const prefix = request.awaitingReviewers.length ? 'ask an eligible approver: ' : 'ask ';
+        const suffix = others > 0 ? ` or ${others} ${others === 1 ? 'other' : 'others'}` : '';
+        who = `, ${prefix}@${rule.eligible.join(', @')}${suffix}`;
+      }
       lines.push(`Still needed: ${rule.name} (${rule.required} required in total${who})`);
     }
     if (missing.length > 2) lines.push(`+${missing.length - 2} more rules`);
@@ -1013,14 +1016,22 @@ export class GitLabForge implements Forge {
       mergeTrainIndex: node.mergeTrainCar?.index,
       awaitingReviewers,
       reviewersComplete: reviewersPage.complete,
-      changesRequested: reviewersPage.nodes.some(
-        (reviewer) => reviewer.mergeRequestInteraction?.reviewState === 'REQUESTED_CHANGES',
-      )
-        ? true
-        : reviewersPage.complete &&
-            reviewersPage.nodes.every((reviewer) => reviewer.mergeRequestInteraction?.reviewState)
-          ? false
-          : undefined,
+      changesRequested: (() => {
+        if (
+          reviewersPage.nodes.some(
+            (reviewer) => reviewer.mergeRequestInteraction?.reviewState === 'REQUESTED_CHANGES',
+          )
+        ) {
+          return true;
+        }
+        if (
+          reviewersPage.complete &&
+          reviewersPage.nodes.every((reviewer) => reviewer.mergeRequestInteraction?.reviewState)
+        ) {
+          return false;
+        }
+        return undefined;
+      })(),
       approvalsComplete: reviewersPage.complete && approvedByPage.complete,
       reviewerIDs: reviewersPage.nodes.flatMap((reviewer) => reviewer.id ?? []),
       approvers,

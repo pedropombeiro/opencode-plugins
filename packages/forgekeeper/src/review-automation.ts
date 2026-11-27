@@ -145,32 +145,33 @@ export const ADMISSION_CHECKS = 3;
 
 // A review update's batch is its comments. A failed-job update's batch is its
 // pipeline, so later failures in the pipeline join the same batch.
-export const automationBatch = (item: FeedbackItem) =>
-  isJobFailure(item)
-    ? pipelineBatch(item)
-    : isApproval(item)
-      ? createHash('sha256')
-          .update(
-            JSON.stringify([
-              item.url,
-              'approval',
-              item.approverID ?? null,
-              [...(item.reviewers ?? [])].map((name) => name.toLowerCase()).sort(),
-              item.approvalToken ?? null,
-              item.approvalCycle ?? null,
-              item.postedAt ?? item.at,
-            ]),
-          )
-          .digest('hex')
-      : createHash('sha256')
-          .update(
-            JSON.stringify([
-              item.url,
-              [...(item.commentIDs ?? item.links)].sort(),
-              item.postedAt ?? item.at,
-            ]),
-          )
-          .digest('hex');
+export const automationBatch = (item: FeedbackItem) => {
+  if (isJobFailure(item)) return pipelineBatch(item);
+  if (isApproval(item)) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          item.url,
+          'approval',
+          item.approverID ?? null,
+          [...(item.reviewers ?? [])].map((name) => name.toLowerCase()).sort(),
+          item.approvalToken ?? null,
+          item.approvalCycle ?? null,
+          item.postedAt ?? item.at,
+        ]),
+      )
+      .digest('hex');
+  }
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        item.url,
+        [...(item.commentIDs ?? item.links)].sort(),
+        item.postedAt ?? item.at,
+      ]),
+    )
+    .digest('hex');
+};
 
 // The review rules that cover the PR/MR's project.
 const reviewRules = (rules: readonly AutomationRule[], ref: ReviewRef) =>
@@ -863,18 +864,22 @@ export function createReviewAutomation(host: AutomationHost) {
       );
       return 'over';
     }
-    await transitionAttempt(
-      record,
-      outcome,
-      outcome === 'failed'
-        ? `The ${isJobFailure(record.item) ? 'investigation' : isApproval(record.item) ? 'approval follow-up' : 'coding'} turn failed or was interrupted.`
-        : isJobFailure(record.item)
-          ? 'The investigation finished. See the session for its causes and recommended fixes.'
-          : isApproval(record.item)
-            ? 'The approval follow-up finished. See the session for the status and any actions taken.'
-            : 'The coding turn finished. See the session for changes, checks, and skipped findings.',
-      { release: true },
-    );
+    const turnDescription = (): string => {
+      if (outcome === 'failed') {
+        let kind = 'coding';
+        if (isJobFailure(record.item)) kind = 'investigation';
+        else if (isApproval(record.item)) kind = 'approval follow-up';
+        return `The ${kind} turn failed or was interrupted.`;
+      }
+      if (isJobFailure(record.item)) {
+        return 'The investigation finished. See the session for its causes and recommended fixes.';
+      }
+      if (isApproval(record.item)) {
+        return 'The approval follow-up finished. See the session for the status and any actions taken.';
+      }
+      return 'The coding turn finished. See the session for changes, checks, and skipped findings.';
+    };
+    await transitionAttempt(record, outcome, turnDescription(), { release: true });
     return 'over';
   }
 

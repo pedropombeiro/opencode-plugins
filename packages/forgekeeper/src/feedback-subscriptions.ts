@@ -132,13 +132,12 @@ export function createFeedbackSubscriptions(options: {
       const entry = entries.get(url);
       if (!entry) return { state: 'polling-only' };
       const cooldownUntil = cooldowns.get(new URL(url).origin);
+      let state: SubscriptionStatus['state'] = 'connecting';
+      if (entry.connected) state = 'connected';
+      else if (entry.retryAt !== undefined) state = 'waiting';
       return structuredClone({
-        state: entry.connected
-          ? 'connected'
-          : entry.retryAt !== undefined
-            ? 'waiting'
-            : 'connecting',
-        ...(entry.retryAt !== undefined ? { retryAt: entry.retryAt } : {}),
+        state,
+        ...(entry.retryAt === undefined ? {} : { retryAt: entry.retryAt }),
         ...(cooldownUntil !== undefined && cooldownUntil > now() ? { cooldownUntil } : {}),
         ...(entry.error ? { error: entry.error } : {}),
       });

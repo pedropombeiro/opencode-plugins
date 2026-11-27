@@ -74,8 +74,10 @@ function catalog(
     repository?: RepositoryLookup;
   } = {},
 ): ForgeCatalog {
-  const kind = (host: string): ForgeKind | undefined =>
-    host === 'github.com' ? 'github' : host.includes('gitlab') ? 'gitlab' : undefined;
+  const kind = (host: string): ForgeKind | undefined => {
+    if (host === 'github.com') return 'github';
+    return host.includes('gitlab') ? 'gitlab' : undefined;
+  };
   return {
     kinds,
     kind,

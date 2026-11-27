@@ -117,13 +117,11 @@ export default {
               {(line) => {
                 if (!line) return <box height={1} />;
                 const label = /^([^:]+:)(?: |$)/.exec(line)?.[1];
-                const status = line.startsWith('Cache: ')
-                  ? line.includes('cold')
-                    ? color('warning')
-                    : line.includes('likely warm')
-                      ? color('success')
-                      : context.theme.text.base
-                  : context.theme.text.base;
+                let status = context.theme.text.base;
+                if (line.startsWith('Cache: ')) {
+                  if (line.includes('cold')) status = color('warning');
+                  else if (line.includes('likely warm')) status = color('success');
+                }
                 return (
                   <text fg={status} wrapMode="word">
                     {label ? <b>{label}</b> : line}

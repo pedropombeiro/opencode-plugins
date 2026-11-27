@@ -190,18 +190,23 @@ export function healthTip(finding: Finding, model: string): Tip | undefined {
 
 export function healthLines(status: Status, summary: Summary): string[] {
   const lines: string[] = [];
-  if (status.kind === 'waiting')
-    lines.push('Cache health: waiting for more requests on this model');
-  else if (status.kind === 'ok')
-    lines.push(
-      `Cache health: ${formatShare(status.window.share)} of ${formatTokens(status.window.input)} input tokens read from the cache across the last ${status.window.requests} requests`,
-    );
-  else if (status.kind === 'low') {
-    const earlier =
-      status.baseline === undefined ? '' : `, down from ${formatShare(status.baseline)}`;
-    lines.push(
-      `Cache health: reuse unexpectedly low, ${formatShare(status.window.share)} of ${formatTokens(status.window.input)} input tokens read from the cache across the last ${status.window.requests} requests${earlier}`,
-    );
+  switch (status.kind) {
+    case 'waiting':
+      lines.push('Cache health: waiting for more requests on this model');
+      break;
+    case 'ok':
+      lines.push(
+        `Cache health: ${formatShare(status.window.share)} of ${formatTokens(status.window.input)} input tokens read from the cache across the last ${status.window.requests} requests`,
+      );
+      break;
+    case 'low': {
+      const earlier =
+        status.baseline === undefined ? '' : `, down from ${formatShare(status.baseline)}`;
+      lines.push(
+        `Cache health: reuse unexpectedly low, ${formatShare(status.window.share)} of ${formatTokens(status.window.input)} input tokens read from the cache across the last ${status.window.requests} requests${earlier}`,
+      );
+      break;
+    }
   }
   const { last } = summary;
   if (!last) return lines;

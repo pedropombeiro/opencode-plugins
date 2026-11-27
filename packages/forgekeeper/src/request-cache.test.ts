@@ -47,7 +47,10 @@ describe('shared request cache', () => {
     const cache = createRequestCache<number | undefined>({
       ttl: () => 0,
       now: () => clock,
-      classify: (value) => (value === undefined ? 'unavailable' : value ? 'usable' : 'incomplete'),
+      classify: (value) => {
+        if (value === undefined) return 'unavailable';
+        return value ? 'usable' : 'incomplete';
+      },
     });
     await cache.get('a', async () => 0);
     expect(cache.inspect('a')).toEqual({ loading: false, attemptedAt: 1, result: 'incomplete' });

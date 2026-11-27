@@ -64,11 +64,19 @@ function observed(message: Message) {
     : undefined;
 }
 
+function callsFor(
+  rate: ReturnType<typeof rateFor>,
+  prompt: number | undefined,
+): number | undefined {
+  if (typeof rate === 'number') return rate;
+  if (!prompt) return undefined;
+  return rate?.[prompt > DUO_TIER ? 1 : 0];
+}
+
 function add(usage: Usage, model: ModelRef, message: Message) {
   const rate = rateFor(model, message.time.created);
   const prompt = message.tokens && promptTokens(message.tokens);
-  const calls =
-    typeof rate === 'number' ? rate : prompt ? rate?.[prompt > DUO_TIER ? 1 : 0] : undefined;
+  const calls = callsFor(rate, prompt);
   usage.calls++;
   usage.credits = calls && usage.credits !== undefined ? usage.credits + 1 / calls : undefined;
 }
