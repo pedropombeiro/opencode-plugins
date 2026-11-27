@@ -1,13 +1,5 @@
 # Changelog
 
-## [6.1.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-6.0.1...opencode-forgekeeper-6.1.0) (2026-11-27)
-
-
-### Features
-
-* **forgekeeper:** add session cleanup for merged PRs/MRs and closed issues ([#219](https://github.com/pedropombeiro/opencode-plugins/issues/219)) ([81de6ec](https://github.com/pedropombeiro/opencode-plugins/commit/81de6ecda9520faa01a60e43af7c4589b3c37ffb))
-* **forgekeeper:** show compact inbox emoji badge in status bar ([#220](https://github.com/pedropombeiro/opencode-plugins/issues/220)) ([640b84b](https://github.com/pedropombeiro/opencode-plugins/commit/640b84b773e56ce03a6ffaadb0f3fcc2e7afb644))
-
 ## [6.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-6.0.0...opencode-forgekeeper-6.0.1) (2026-11-27)
 
 
