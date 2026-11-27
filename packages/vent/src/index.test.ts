@@ -605,6 +605,21 @@ describe('resolve-vent skill registration', () => {
     expect(fileOnlySkill.content).not.toContain('gh issue close');
   });
 
+  test('explains how to detect and report missing GitHub Projects access', () => {
+    const skill = buildResolveVentSkill(
+      resolveOptions({
+        destinations: { github: { type: 'github', repo: 'owner/agent-friction' } },
+      }),
+    );
+
+    expect(skill.content).toContain('empty `projectItems` array can mean');
+    expect(skill.content).toContain('verify access to the');
+    expect(skill.content).toContain('report that the status was not updated');
+    expect(skill.content).toContain('`read:project` allows reads and `project` allows writes');
+    expect(skill.content).toContain('gh project item-edit --id "$ITEM_ID"');
+    expect(skill.content).toContain('--single-select-option-id "$STATUS_OPTION_ID"');
+  });
+
   test('registers the skill via ctx.skill.transform unless a local override exists', async () => {
     const registeredSkills = new Map<string, Skill.Info>();
     let skillsDisposed = false;
