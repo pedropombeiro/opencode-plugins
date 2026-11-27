@@ -50,6 +50,8 @@ standalone `--` followed by a space disables task-aware completion.
 - Avoid negated ternary conditions (`!cond ? a : b` or `x !== y ? a : b`); flip the condition and
   swap the branches instead
 - Avoid nested ternary operators; extract a helper function or use `if`/`return` statements instead
+- Prefer `switch` statements over multiple `if`/`else if` branches when dispatching on a value or
+  discriminant
 
 ## Plugin API
 
