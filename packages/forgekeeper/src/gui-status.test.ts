@@ -83,8 +83,8 @@ describe('Desktop status pill', () => {
 
   test('preserves dropdown status links, panel actions, and feedback', () => {
     const { actions, calls } = harness();
-    const pill = statusPill(snapshot([mr()]), '2 review updates', actions)!;
-    expect(pill.label).toBe('!4281 · 💬 2 · ✓ CI · ◷ @david · ↻ 2');
+    const pill = statusPill(snapshot([mr()]), '📥 2', actions)!;
+    expect(pill.label).toBe('!4281 · 💬 2 · ✓ CI · ◷ @david · 📥 2');
     expect(pill.title).toBe('PR/MR status');
     expect(pill.rows?.map((row) => row.label)).toEqual([
       '!4281',
@@ -92,7 +92,7 @@ describe('Desktop status pill', () => {
       '2 unresolved threads',
       'awaiting @david',
       'Show PR/MR status',
-      '2 review updates',
+      '📥 2',
     ]);
     pill.rows?.[0].run?.();
     pill.rows?.find((row) => row.id === 'details')?.run?.();
@@ -178,10 +178,10 @@ describe('Desktop status pill', () => {
           awaitingReviewers: ['a', 'b', 'c'],
         }),
       ]),
-      '3 review updates (paused)',
+      '📥 3 (paused)',
       actions,
     );
-    expect(pill?.label).toBe('!4281 · 💬 1+ · ✓ CI · ◷ @a +2 · ↻ 3 (paused)');
+    expect(pill?.label).toBe('!4281 · 💬 1+ · ✓ CI · ◷ @a +2 · 📥 3 (paused)');
     expect(pill?.rows?.map((row) => row.label)).toContain('1+ unresolved threads');
     expect(pill?.rows?.map((row) => row.label)).toContain('awaiting @a, @b, @c');
   });
@@ -209,7 +209,7 @@ describe('Desktop status pill', () => {
   test('shows feedback on its own and hides an empty pill', () => {
     const { actions } = harness();
     expect(statusPill({ loading: false }, undefined, actions)).toBeUndefined();
-    expect(statusPill({ loading: false }, '2 updates', actions)?.label).toBe('2 updates');
+    expect(statusPill({ loading: false }, '📥 2', actions)?.label).toBe('📥 2');
   });
 
   test('includes a cleanup action row when all PRs/MRs are merged or tracked issues are closed', () => {

@@ -33,7 +33,7 @@ export function statusPill(
         .sort((a, b) => a.priority - b.priority)
         .map(({ segment }) => compactLabel(segment, pending)),
       ...(issueClosed ? [`✓ ${ready.reason}`] : []),
-      updates?.replace(/^(\d+) review updates?/, '↻ $1'),
+      updates?.replace(/^(\d+) review updates?/, '📥 $1'),
     ]
       .filter(Boolean)
       .join(' · '),
