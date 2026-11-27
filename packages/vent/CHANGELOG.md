@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-vent-0.2.0...opencode-vent-0.2.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **vent:** fix GitHub Projects access checks and item-edit command ([119a950](https://github.com/pedropombeiro/opencode-plugins/commit/119a950caefe764ee8e55a00b09e795b6a28a304))
+
 ## [0.2.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-vent-0.1.1...opencode-vent-0.2.0) (2026-11-27)
 
 
