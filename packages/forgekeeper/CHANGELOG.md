@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.0.1](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-6.0.0...opencode-forgekeeper-6.0.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **forgekeeper:** report invalid entries in model group and allowedModels errors ([f5e96d8](https://github.com/pedropombeiro/opencode-plugins/commit/f5e96d89db6f6f69f1765f87818fa4eadb8a6574))
+
 ## [6.0.0](https://github.com/pedropombeiro/opencode-plugins/compare/opencode-forgekeeper-5.2.0...opencode-forgekeeper-6.0.0) (2026-11-26)
 
 
