@@ -103,7 +103,8 @@ Then configure at least one destination in `~/.config/opencode/opencode.json`:
 
 ## Destination resolution order
 
-1. First matching route with `enforced: true`. A different destination is rejected unless it sets
+1. First matching route with `enforced: true` (must target a configured `gitlab` or `github`
+   destination). A different destination is rejected unless it sets
    `acceptsUnrelated: true` and `unrelatedReason` explains why the friction is unrelated to the
    checkout.
 2. Explicit `destination` tool argument.
@@ -138,13 +139,14 @@ would otherwise send elsewhere, as long as the call names it in `destination` an
 
 ## Closed matches
 
-`vent` never writes to a closed issue on its own. When a similar closed issue exists, the result
-has `action: "closed-match"`, the issue URL, its labels, and advice. The agent then asks you and
-calls `vent` again with `onClosedMatch`:
+`vent` never writes to a closed issue on its own. When a similar closed issue exists, `vent`
+returns a message naming the closed issue URL, similarity score, existing labels, and next-step
+advice without creating or commenting. The agent then asks you and calls `vent` again with
+`onClosedMatch` and `closedMatchUrl`:
 
-- `reopen` sets the issue to open, removes labels that start with `resolutionLabelPrefix`, and
-  adds the new occurrence as a comment.
-- `create` files a new issue that links the closed one.
+- `reopen` sets the approved issue to open, removes labels that start with
+  `resolutionLabelPrefix`, and adds the new occurrence as a comment.
+- `create` files a new issue that links the approved closed one.
 
 `reopenLabels` lists labels that mark an issue as closed without a confirmed fix, such as
 `resolution::cannot-reproduce`. The advice recommends `reopen` for those. For any other closed

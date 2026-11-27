@@ -69,7 +69,7 @@ function describeClosedDuplicateGuidance(
 
   for (const [name, config] of issueDestinations) {
     const prefixNote = config.resolutionLabelPrefix
-      ? `removing its \`${config.resolutionLabelPrefix}\` label`
+      ? `removing its \`${config.resolutionLabelPrefix}*\` labels`
       : 'keeping its existing labels';
     if (config.reopenLabels && config.reopenLabels.length > 0) {
       const reopen = config.reopenLabels.map((label) => `\`${label}\``).join(' or ');
@@ -77,11 +77,11 @@ function describeClosedDuplicateGuidance(
         ? ` (such as \`${config.resolutionLabelPrefix}fixed\` or \`${config.resolutionLabelPrefix}intended\`)`
         : '';
       lines.push(
-        `   - **${name}**: ${reopen} marks an item closed without a confirmed fix, so the new report is additional evidence. Ask the user, then reopen it (\`vent\` with \`onClosedMatch: "reopen"\`, or manually reopen, ${prefixNote}, and comment with the new evidence). Other closed items${otherExamples} indicate a likely regression: file a new item that links the closed one (\`onClosedMatch: "create"\`) and check why the earlier fix or documentation did not hold.`,
+        `   - **${name}**: ${reopen} marks an item closed without a confirmed fix, so the new report is additional evidence. Ask the user, then reopen it (\`vent\` with \`onClosedMatch: "reopen"\` and \`closedMatchUrl\`, or manually reopen, ${prefixNote}, and comment with the new evidence). Other closed items${otherExamples} indicate a likely regression: file a new item that links the closed one (\`onClosedMatch: "create"\` and \`closedMatchUrl\`) and check why the earlier fix or documentation did not hold.`,
       );
     } else {
       lines.push(
-        `   - **${name}**: no \`reopenLabels\` are configured. Ask the user whether to reopen the closed item and add the new evidence (\`vent\` with \`onClosedMatch: "reopen"\`, ${prefixNote}) or to file a new item that links the closed one (\`onClosedMatch: "create"\`).`,
+        `   - **${name}**: no \`reopenLabels\` are configured. Ask the user whether to reopen the closed item and add the new evidence (\`vent\` with \`onClosedMatch: "reopen"\` and \`closedMatchUrl\`, ${prefixNote}) or to file a new item that links the closed one (\`onClosedMatch: "create"\` and \`closedMatchUrl\`).`,
       );
     }
   }
@@ -227,9 +227,8 @@ export function buildResolveVentSkill(options: ResolvedVentOptions): Skill.Info 
     '',
     '   When the fix involves a real choice, ask the user with the `question` tool',
     '   before building it.',
-    '1. **Review and verify the fix.** Follow the repository or dotfiles review flow',
-    '   (for example, reviewing patches for protected configuration directories before',
-    '   applying) and run the tests or checks that cover the changed files.',
+    '1. **Review and verify the fix.** Follow the repository review flow and run the',
+    '   tests or checks that cover the changed files.',
     ...describeCloseOutSteps(options.destinations),
   ].join('\n');
 

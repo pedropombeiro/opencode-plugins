@@ -223,6 +223,12 @@ describe('options and routing', () => {
     expect(() => selectDestination(options, { requested: 'missing' })).toThrow(
       'Unknown vent destination',
     );
+    expect(() => selectDestination(options, { requested: 'toString' })).toThrow(
+      'Unknown vent destination',
+    );
+    expect(() => selectDestination(options, { requested: 'constructor' })).toThrow(
+      'Unknown vent destination',
+    );
   });
 
   test('matches directoryPrefix across symlinks and root prefix', async () => {
@@ -1655,6 +1661,12 @@ describe('closed matches', () => {
     expect(() => parseVentInput({ ...sampleInput, onClosedMatch: 'delete' })).toThrow(
       'Invalid `onClosedMatch`',
     );
+    expect(() =>
+      parseVentInput({
+        ...sampleInput,
+        closedMatchUrl: 'https://github.com/owner/repo/issues/5',
+      }),
+    ).toThrow('`closedMatchUrl` requires `onClosedMatch`.');
 
     const { exec, calls } = githubExec([closedIssue(['agent-friction'])]);
     await expect(
@@ -1721,7 +1733,7 @@ describe('resolve-vent skill registration', () => {
       '**gitlab**: `status::needs-info` or `status::mitigated` marks an item closed without a confirmed fix',
     );
     expect(skill.content).toContain(
-      '**github**: no `reopenLabels` are configured. Ask the user whether to reopen the closed item and add the new evidence (`vent` with `onClosedMatch: "reopen"`, keeping its existing labels) or to file a new item that links the closed one (`onClosedMatch: "create"`).',
+      '**github**: no `reopenLabels` are configured. Ask the user whether to reopen the closed item and add the new evidence (`vent` with `onClosedMatch: "reopen"` and `closedMatchUrl`, keeping its existing labels) or to file a new item that links the closed one (`onClosedMatch: "create"` and `closedMatchUrl`).',
     );
     expect(skill.content).toContain('`status::cannot-reproduce`');
     expect(skill.content).toContain('glab api --hostname <host>');

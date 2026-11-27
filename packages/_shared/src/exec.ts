@@ -33,13 +33,21 @@ export function exec(file: string, args: string[], options: ExecOptions = {}): P
           return;
         }
         const code = typeof error.code === 'number' ? error.code : -1;
-        resolve({ stdout, stderr: stderr || error.message, code });
+        const stderrMessage =
+          error.killed || typeof error.code !== 'number'
+            ? [stderr.trim(), error.message].filter(Boolean).join('\n')
+            : stderr || error.message;
+        resolve({ stdout, stderr: stderrMessage, code });
       },
     );
 
-    if (options.stdin !== undefined && child.stdin) {
+    if (child.stdin) {
       child.stdin.on('error', () => {});
-      child.stdin.end(options.stdin);
+      if (options.stdin !== undefined) {
+        child.stdin.end(options.stdin);
+      } else {
+        child.stdin.end();
+      }
     }
   });
 }

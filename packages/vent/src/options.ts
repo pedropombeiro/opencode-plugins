@@ -60,7 +60,9 @@ export const DEFAULT_SIMILARITY_THRESHOLD = 0.45;
 
 export function expandHome(inputPath: string, home: string = homedir()): string {
   if (inputPath === '~') return home;
-  if (inputPath.startsWith('~/')) return resolve(home, inputPath.slice(2));
+  if (inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
+    return resolve(home, inputPath.slice(2));
+  }
   return inputPath;
 }
 
@@ -68,6 +70,18 @@ function stringValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function validHost(value: unknown, fallback: string): string | undefined {
+  const host = stringValue(value) ?? fallback;
+  if (host.startsWith('-') || /[\s/]/.test(host)) return undefined;
+  return host;
+}
+
+function normalizeRepoPath(value: unknown): string | undefined {
+  const raw = stringValue(value)?.replace(/^\/+|\/+$/g, '');
+  if (!raw || raw.startsWith('-') || /\s/.test(raw) || !raw.includes('/')) return undefined;
+  return raw;
 }
 
 function stringArray(value: unknown): string[] {
@@ -95,14 +109,15 @@ function parseDestination(raw: unknown): DestinationConfig | undefined {
   };
 
   if (type === 'gitlab') {
-    const project = stringValue(record.project);
-    if (!project) return undefined;
+    const project = normalizeRepoPath(record.project);
+    const host = validHost(record.host, 'gitlab.com');
+    if (!project || !host) return undefined;
     const epic = stringValue(record.epic);
     return {
       type: 'gitlab',
       project,
       ...(epic ? { epic } : {}),
-      host: stringValue(record.host) ?? 'gitlab.com',
+      host,
       confidential: typeof record.confidential === 'boolean' ? record.confidential : true,
       labels: stringArray(record.labels),
       ...closedMatch,
@@ -111,12 +126,13 @@ function parseDestination(raw: unknown): DestinationConfig | undefined {
   }
 
   if (type === 'github') {
-    const repo = stringValue(record.repo);
-    if (!repo) return undefined;
+    const repo = normalizeRepoPath(record.repo);
+    const host = validHost(record.host, 'github.com');
+    if (!repo || !host) return undefined;
     return {
       type: 'github',
       repo,
-      host: stringValue(record.host) ?? 'github.com',
+      host,
       labels: stringArray(record.labels),
       ...closedMatch,
       ...base,
@@ -169,7 +185,14 @@ export function resolveOptions(raw: unknown): ResolvedVentOptions {
   if (record.destinations && typeof record.destinations === 'object') {
     for (const [name, value] of Object.entries(record.destinations as Record<string, unknown>)) {
       const trimmedName = name.trim();
-      if (!trimmedName) continue;
+      if (
+        !trimmedName ||
+        trimmedName === '__proto__' ||
+        trimmedName === 'prototype' ||
+        trimmedName === 'constructor'
+      ) {
+        continue;
+      }
       const parsed = parseDestination(value);
       if (parsed) destinations[trimmedName] = parsed;
     }
@@ -296,6 +319,14 @@ function matchesPrefix(directory: string, prefix: string, home: string): boolean
   return isPathInside(canonicalDir, canonicalPrefix);
 }
 
+function getDestination(
+  destinations: Record<string, DestinationConfig>,
+  name: string | undefined,
+): DestinationConfig | undefined {
+  if (!name || !Object.hasOwn(destinations, name)) return undefined;
+  return destinations[name];
+}
+
 export function selectDestination(
   options: ResolvedVentOptions,
   context: {
@@ -312,7 +343,7 @@ export function selectDestination(
   const names = Object.keys(options.destinations);
   if (names.length === 0) {
     throw new Error(
-      'No vent destinations are configured. Add a `destinations` entry to the `vent` plugin options.',
+      'No vent destinations are configured. Add a `destinations` entry to the `opencode-vent` plugin options.',
     );
   }
 
@@ -334,7 +365,7 @@ export function selectDestination(
   });
 
   const enforced = matchingRoutes.find((route) => route.enforced);
-  const requested = context.requested ? options.destinations[context.requested] : undefined;
+  const requested = getDestination(options.destinations, context.requested);
   if (context.requested && !requested) {
     throw new Error(
       `Unknown vent destination "${context.requested}". Configured destinations: ${names.join(', ')}.`,
@@ -344,7 +375,7 @@ export function selectDestination(
     throw new Error('`unrelatedReason` requires an explicit destination.');
   }
 
-  if (!enforced && context.remoteLookupFailed && fetchRemotes.length === 0) {
+  if (!enforced && context.remoteLookupFailed) {
     const unverifiedEnforced = options.routes.find((route) => {
       if (!route.enforced || (!route.remoteContains && !route.remoteRepository)) return false;
       return (
@@ -362,7 +393,7 @@ export function selectDestination(
   }
 
   if (enforced) {
-    const config = options.destinations[enforced.destination];
+    const config = getDestination(options.destinations, enforced.destination);
     if (!config || config.type === 'file') {
       throw new Error(
         `Enforced vent route requires a configured issue destination: "${enforced.destination}".`,
@@ -393,16 +424,18 @@ export function selectDestination(
     };
   }
 
-  const route = matchingRoutes.find((entry) => options.destinations[entry.destination]);
+  const route = matchingRoutes.find((entry) =>
+    Boolean(getDestination(options.destinations, entry.destination)),
+  );
   if (route) {
     return {
       name: route.destination,
-      config: options.destinations[route.destination]!,
+      config: getDestination(options.destinations, route.destination)!,
     };
   }
 
   if (options.defaultDestination) {
-    const config = options.destinations[options.defaultDestination];
+    const config = getDestination(options.destinations, options.defaultDestination);
     if (!config) {
       throw new Error(
         `Configured defaultDestination "${options.defaultDestination}" was not found in destinations (${names.join(', ')}).`,
