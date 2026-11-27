@@ -5,6 +5,7 @@ coveragePathIgnorePatterns = [
   "**/dist/**",
   "**/bench/**",
   "**/*.fixture.ts",
+  "**/*-harness.ts",
   "**/testing.ts",
   ".mise/**",
 ]
