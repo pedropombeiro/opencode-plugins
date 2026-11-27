@@ -1,49 +1,21 @@
 import type { Plugin } from '@opencode/plugin';
-import { approvalDetails, matchesApproval } from './approval-watch';
 import { automatedReview } from './automated-review-watch';
-import { createRequestCache } from './request-cache';
-import { createFeedbackSubscriptions, RECONCILE_INTERVAL } from './feedback-subscriptions';
+import { closedFeedback, resolvedFeedback, settledFeedback } from './feedback-cleanup';
+import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
 import {
   createFeedbackInbox,
   isApproval,
   isLifecycle,
-  sessionItems,
   type FeedbackItem,
   type InboxState,
 } from './feedback-inbox';
-import { closedFeedback, resolvedFeedback, settledFeedback } from './feedback-cleanup';
-import { createSummaryDelivery, type SummaryDependencies } from './summary-delivery';
-import { createFeedbackDiscovery, DISCOVERY_INTERVAL } from './feedback-discovery';
-import { createLifecycleNotifications } from './lifecycle-notifications';
-import { APPROVAL_TOOLS } from './review-preparation';
-import { createReviewMonitoring } from './review-monitoring';
-import {
-  automationReviewers,
-  createReviewAutomation,
-  matchesApprovalRule,
-  modelKey,
-} from './review-automation';
-import {
-  createAutomationHost,
-  type AutomationDependencies,
-  type MarkReadyInvocation,
-} from './review-automation-host';
-import {
-  linkedOwner,
-  PRESENCE_INTERVAL,
-  presenceKey,
-  type DirectorySession,
-  type Presence,
-} from './linked-session';
-import {
-  approvalsComplete,
-  approversOf,
-  type FeedbackSnapshot,
-  type ForgeKind,
-  type IssueSnapshot,
-  type ReviewerApproval,
-  type ReviewRequest,
-  type ReviewRequestHistory,
+import { createFeedbackSubscriptions, RECONCILE_INTERVAL } from './feedback-subscriptions';
+import type {
+  FeedbackSnapshot,
+  ForgeKind,
+  IssueSnapshot,
+  ReviewRequest,
+  ReviewRequestHistory,
 } from './forge';
 import {
   forgeScope,
@@ -56,34 +28,59 @@ import {
 } from './forges';
 import { FETCH_INTERVAL } from './human-review-watch';
 import { investigatesJobs, isJobFailure } from './job-investigation';
-import { REQUEST_INTERVAL } from './review-request-watch';
-import { locate } from './locate';
-import { matchesReviewBot, type StatusOptions } from './options';
-import type { CleanupProgress, Notice } from './rpc';
-import type { MonitoringStatus } from './monitoring-status';
+import { createLifecycleNotifications } from './lifecycle-notifications';
 import {
-  cleanupCandidates as scanCleanupCandidates,
-  cleanupSessions as runCleanupSessions,
+  linkedOwner,
+  PRESENCE_INTERVAL,
+  presenceKey,
+  type DirectorySession,
+  type Presence,
+} from './linked-session';
+import { locate } from './locate';
+import type { MonitoringStatus } from './monitoring-status';
+import type { StatusOptions } from './options';
+import { createRequestCache } from './request-cache';
+import {
+  automationReviewers,
+  createReviewAutomation,
+  matchesApprovalRule,
+  modelKey,
+} from './review-automation';
+import {
+  createAutomationHost,
+  type AutomationDependencies,
+  type MarkReadyInvocation,
+} from './review-automation-host';
+import { createReviewMonitoring } from './review-monitoring';
+import { APPROVAL_TOOLS } from './review-preparation';
+import { REQUEST_INTERVAL } from './review-request-watch';
+import type { CleanupProgress, Notice } from './rpc';
+import {
   cleanupWatchKey,
   createCleanupWatch,
-  listProjectSessions,
-  pruneForeignInboxSession,
   resolveLookupCleanupReady,
   splitCleanupTargets,
-  type CleanupProgressEvent,
   type CleanupResult,
   type CleanupScanResult,
   type CleanupWatchRecord,
-  type ListedSession,
-  type SessionPage,
 } from './session-cleanup';
+import {
+  createApprovalRevalidator,
+  createViewerIDLookup,
+  drain,
+  DRAIN_TIME,
+  missingSession,
+  requestKey,
+  REVIEW_POLL_SECONDS,
+  runSessionCleanup,
+  runSessionCleanupCandidates,
+  scanAll,
+  sessionOwnership,
+} from './status-server-helpers';
 import { createStatusService, HOME } from './status-service';
 import type { Snapshot } from './store';
+import { createSummaryDelivery, type SummaryDependencies } from './summary-delivery';
 import { classifyTargets, includesRequest, targetOutput, type Target } from './target';
-
-// Running automated reviews poll at most this often, so a finished review is
-// noticed promptly.
-const REVIEW_POLL_SECONDS = 30;
 
 export interface StatusDependencies extends SummaryDependencies, AutomationDependencies {
   // Forges and commands for status lookups and feedback, which share one
@@ -97,22 +94,6 @@ export interface StatusDependencies extends SummaryDependencies, AutomationDepen
     request: ReviewRequest,
     directory: string,
   ) => Promise<ReviewRequestHistory | undefined>;
-}
-
-// How long cleanup waits for running review checks before giving up. They
-// can't send or write anything after cleanup starts, so this only bounds how
-// long a stopped plugin keeps work around.
-const DRAIN_TIME = 5_000;
-
-// Waits for the tasks, or for `limit` milliseconds, whichever comes first.
-async function drain(tasks: ReadonlySet<Promise<unknown>>, limit: number) {
-  if (!tasks.size) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    Promise.allSettled([...tasks]),
-    new Promise<void>((resolve) => (timer = setTimeout(resolve, limit))),
-  ]);
-  clearTimeout(timer);
 }
 
 export interface StatusHost {
@@ -139,8 +120,6 @@ export async function setupStatus(
 ) {
   const directory = ctx.location.directory;
   const projectID = (ctx.location as { project?: { id?: string } }).project?.id;
-  const requestKey = (ref: { forge: string; host: string; project: string; iid: string }) =>
-    JSON.stringify([ref.forge, ref.host, ref.project.toLowerCase(), ref.iid]);
   const statusCache = createRequestCache<ReviewRequest | undefined>({
     now: deps.now,
     classify: (request) => (request ? 'usable' : 'unavailable'),
@@ -185,104 +164,24 @@ export async function setupStatus(
   // watches them, even if a CLI still leases them here.
   const foreign = new Set<string>();
   let invalidate: (sessionID: string) => void = () => {};
-  const activeReviewBots = settings.watch.reviewBots ? settings.reviewBots : {};
-  const watchesApprover = (url: string, approver: ReviewerApproval) => {
-    if (approver.automated) return settings.watch.automatedReviews;
-    if (approver.bot) {
-      const hostName = parseUrl(url)?.host;
-      return !!hostName && matchesReviewBot(activeReviewBots, hostName, approver.username);
-    }
-    return settings.watch.humanReviews;
-  };
-  const watchesApprovalItem = (item: FeedbackItem) => {
-    if (item.approverKind === 'automated') return settings.watch.automatedReviews;
-    if (item.approverKind === 'bot') {
-      const hostName = parseUrl(item.url)?.host;
-      return (
-        !!hostName &&
-        !!item.reviewers?.some((name) => matchesReviewBot(activeReviewBots, hostName, name))
-      );
-    }
-    if (item.approverKind === 'human') return settings.watch.humanReviews;
-    return false;
-  };
 
-  async function freshRequest(url: string): Promise<ReviewRequest | undefined> {
-    const ref = parseUrl(url);
-    const forge = ref && deps.forges.forHost(ref.host, directory);
-    if (!ref || !forge) return undefined;
-    return forge.findByNumber([{ host: ref.host, path: ref.project }], ref.iid);
-  }
-
-  type FreshLookup = { live: ReviewRequest | undefined; fetchedAt: number };
-  let freshBatch: Map<string, Promise<FreshLookup>> | undefined;
-  const recentSelectionFresh = new Map<string, FreshLookup>();
-
-  async function loadFreshApproval(item: FeedbackItem, shareBatch: boolean): Promise<FreshLookup> {
-    if (shareBatch) {
-      const reused = recentSelectionFresh.get(item.id);
-      if (reused) {
-        recentSelectionFresh.delete(item.id);
-        return reused;
-      }
-      const ref = parseUrl(item.url);
-      if (freshBatch && ref) {
-        const key = requestKey(ref);
-        let pending = freshBatch.get(key);
-        if (!pending) {
-          const fetchedAt = (deps.now ?? Date.now)();
-          pending = freshRequest(item.url).then((live) => ({ live, fetchedAt }));
-          freshBatch.set(key, pending);
-        }
-        return pending;
-      }
-    }
-    const fetchedAt = (deps.now ?? Date.now)();
-    return { live: await freshRequest(item.url), fetchedAt };
-  }
-
-  const mayAutomateApproval = (item: FeedbackItem): boolean => {
-    if (item.approverKind === 'human') return false;
-    if (!item.automationAllowed) return false;
-    if (item.automation) return false;
-    if (!watchesApprovalItem(item)) return false;
-    const ref = parseUrl(item.url);
-    return !!ref && matchesApprovalRule(automationRules, ref, item.reviewers);
-  };
-
-  // Revalidates an approval item against live uncached forge state before
-  // delivery, automation, or manual summary. Revoked approvals or closed
-  // PRs/MRs reconcile the watcher baseline and are pruned immediately.
-  async function revalidateApproval(
-    item: FeedbackItem,
-    {
-      checkWatch = true,
-      shareBatch = false,
-      stashForNotify = false,
-    }: { checkWatch?: boolean; shareBatch?: boolean; stashForNotify?: boolean } = {},
-  ): Promise<
-    | { state: 'valid'; item: FeedbackItem; fresh?: FreshLookup }
-    | { state: 'stale' | 'defer' | 'unwatched' }
-  > {
-    if (checkWatch && !watchesApprovalItem(item)) return { state: 'unwatched' };
-    const fresh = await loadFreshApproval(item, shareBatch);
-    const { live, fetchedAt } = fresh;
-    if (!live || settledFeedback(item, { kind: 'found', requests: [live] })) {
-      if (live) await reviews.reconcileApproval(item.sessionID, live, fetchedAt).catch(() => {});
-      await inbox.prune((entry) => entry.id === item.id);
-      return { state: 'stale' };
-    }
-    if (!approvalsComplete(live)) return { state: 'defer' };
-    const matching = approversOf(live).filter((approver) => matchesApproval(item, approver));
-    if (checkWatch && !matching.some((approver) => watchesApprover(live.url, approver)))
-      return { state: 'unwatched' };
-    const details = approvalDetails(live);
-    return {
-      state: 'valid',
-      item: { ...item, ...(details.length ? { details } : { details: undefined }) },
-      ...(stashForNotify ? { fresh } : {}),
-    };
-  }
+  const approvalRevalidator = createApprovalRevalidator({
+    settings,
+    forges: deps.forges,
+    directory,
+    now: deps.now,
+    reconcileApproval: (sessionID, live, fetchedAt) =>
+      reviews.reconcileApproval(sessionID, live, fetchedAt),
+    pruneInbox: (predicate) => inbox.prune(predicate),
+  });
+  const {
+    watchesApprover,
+    watchesApprovalItem,
+    freshRequest,
+    mayAutomateApproval,
+    revalidateApproval,
+    decorateInbox,
+  } = approvalRevalidator;
 
   const inbox = createFeedbackInbox({
     initiallyPaused: !settings.inbox && !settings.automation.rules.length,
@@ -297,15 +196,7 @@ export async function setupStatus(
         });
         if (checked.state !== 'valid') return true;
         const selected = await automation.selectAutomatic(checked.item);
-        if (
-          !selected &&
-          checked.fresh &&
-          item.notifiedAt === undefined &&
-          item.delivery &&
-          settings.delivery.reviews !== 'inbox'
-        ) {
-          recentSelectionFresh.set(item.id, checked.fresh);
-        }
+        if (!selected) approvalRevalidator.stashFreshSelection(item, checked.fresh);
         return selected;
       }
       return automation.selectAutomatic(item);
@@ -376,11 +267,6 @@ export async function setupStatus(
     return settledFeedback(item, service.get(item.sessionID).lookup);
   }
 
-  // Whether an error says the session doesn't exist, which ends its delivery.
-  const missingSession = (error: unknown) =>
-    (error as { _tag?: unknown } | null)?._tag === 'SessionNotFoundError' ||
-    /session not found/i.test(error instanceof Error ? error.message : String(error));
-
   // Whether the update may still reach its session: the session exists here,
   // isn't archived, and still targets the PR/MR. Rejects only for failures
   // worth retrying, such as a session that can't be read right now.
@@ -407,20 +293,11 @@ export async function setupStatus(
   // forge lookup per target across items handled in the same pass.
   const notifyPending = () =>
     tracked(
-      (async () => {
-        const ownsBatch = !freshBatch;
-        if (ownsBatch) freshBatch = new Map();
-        try {
-          await inbox.notifyPending();
-        } finally {
-          if (ownsBatch) {
-            freshBatch = undefined;
-            recentSelectionFresh.clear();
-          }
-        }
-      })().catch((error) =>
-        reportOnce('notification', 'Could not post review updates to sessions', error),
-      ),
+      approvalRevalidator
+        .withFreshBatch(() => inbox.notifyPending())
+        .catch((error) =>
+          reportOnce('notification', 'Could not post review updates to sessions', error),
+        ),
     );
 
   // Clears the PR/MR's updates whose comments are all resolved. A comment the
@@ -461,16 +338,7 @@ export async function setupStatus(
       .catch((error) => reportOnce('storage', 'Could not store review state', error));
   };
 
-  async function scanAll(prefix: string) {
-    const entries: { key: string; value: unknown }[] = [];
-    let after: string | undefined;
-    do {
-      const page = await ctx.storage.scan({ prefix, ...(after ? { after } : {}) });
-      entries.push(...page.entries);
-      after = page.next;
-    } while (after);
-    return entries;
-  }
+  const scanStorage = (prefix: string) => scanAll(ctx.storage, prefix);
 
   // While closing, a delivery that finishes still toasts, but failures, such
   // as deliveries that cleanup stopped, don't.
@@ -502,7 +370,7 @@ export async function setupStatus(
     closing: () => closing,
     inbox: inbox.list,
     deliverable,
-    scan: scanAll,
+    scan: scanStorage,
     write,
     report: (error) => reportOnce('summary', 'Could not restore review summary turns', error),
   });
@@ -516,7 +384,7 @@ export async function setupStatus(
     inbox,
     deliverable,
     readFeedback: (request, cwd) => readFeedback(request, cwd),
-    scan: scanAll,
+    scan: scanStorage,
     missingSession,
     redeliver: () => void notifyPending(),
     report: (error) =>
@@ -639,47 +507,10 @@ export async function setupStatus(
     return includesRequest(targets, url) ? targets : undefined;
   }
 
-  async function sessionOwnership(sessionIDs: readonly string[]) {
-    const here: string[] = [];
-    const deleted: string[] = [];
-    await Promise.all(
-      sessionIDs.map(async (sessionID) => {
-        try {
-          const session = await ctx.session.get({ sessionID });
-          if (!session) deleted.push(sessionID);
-          else if (session.location.directory === directory) here.push(sessionID);
-        } catch (error) {
-          if (missingSession(error)) deleted.push(sessionID);
-        }
-      }),
-    );
-    return { here, deleted };
-  }
+  const checkSessionOwnership = (sessionIDs: readonly string[]) =>
+    sessionOwnership(ctx, directory, sessionIDs);
 
-  const viewerIDs = new Map<string, Promise<string | undefined>>();
-  const viewerIDFor = (url: string) => {
-    const ref = parseUrl(url);
-    if (!ref) return Promise.resolve(undefined);
-    const key = `${ref.forge}:${ref.host}`;
-    const existing = viewerIDs.get(key);
-    if (existing) return existing;
-    const task = Promise.resolve()
-      .then(() =>
-        deps.viewerID
-          ? deps.viewerID(ref)
-          : traitsOf(ref).feedback?.viewerID?.(deps.exec, directory, ref.host),
-      )
-      .then((id) => {
-        if (!id) viewerIDs.delete(key);
-        return id;
-      })
-      .catch((error) => {
-        viewerIDs.delete(key);
-        throw error;
-      });
-    viewerIDs.set(key, task);
-    return task;
-  };
+  const viewerIDFor = createViewerIDLookup(deps, directory);
 
   const pruneDeletedSessions = async (sessionIDs: readonly string[]) => {
     if (!sessionIDs.length) return;
@@ -695,7 +526,7 @@ export async function setupStatus(
       isTarget,
       targets: sessionTargets,
       storedTargets: host.storedTargets,
-      sessionOwnership,
+      sessionOwnership: checkSessionOwnership,
       onSessionsDeleted: pruneDeletedSessions,
       receipts: inbox.receipts,
       releaseReceipts: inbox.releaseReceipts,
@@ -720,7 +551,7 @@ export async function setupStatus(
       interval: (request) =>
         subscriptions.connected(request.url) ? RECONCILE_INTERVAL : FETCH_INTERVAL,
       accepted: clearResolved,
-      scan: scanAll,
+      scan: scanStorage,
       write,
       record,
       notice,
@@ -743,7 +574,7 @@ export async function setupStatus(
     targets: sessionTargets,
     storedTargets: host.storedTargets,
     closing: () => closing,
-    scan: scanAll,
+    scan: scanStorage,
     record: async (item, supersedes) => {
       await record(item, supersedes);
     },
@@ -777,7 +608,7 @@ export async function setupStatus(
       if (closed) return;
       await ctx.storage.remove(cleanupWatchKey(sessionID));
     },
-    scan: scanAll,
+    scan: scanStorage,
     hasTargets: async (sessionID) => {
       const raw = await host.storedTargets(sessionID);
       const { mergeRequests, issues } = splitCleanupTargets(raw);
@@ -871,7 +702,7 @@ export async function setupStatus(
     missing: missingSession,
     candidate: async (id) => hasTarget(await host.storedTargets(id)),
     candidates: async () =>
-      (await scanAll('sessions/')).flatMap(({ key, value }) => {
+      (await scanStorage('sessions/')).flatMap(({ key, value }) => {
         const targets = (value as { targets?: Target[] }).targets ?? [];
         return hasTarget(targets) ? [key.slice('sessions/'.length)] : [];
       }),
@@ -968,45 +799,13 @@ export async function setupStatus(
     await cleanupWatch.prune();
     const state = await inbox.list();
     if (state.items.length) {
-      const { deleted } = await sessionOwnership([
+      const { deleted } = await checkSessionOwnership([
         ...new Set(state.items.map((item) => item.sessionID)),
       ]);
       if (deleted.length) await pruneDeletedSessions(deleted);
     }
   });
 
-  const canActItem = (item: FeedbackItem): boolean => {
-    if (item.humanApprovalOnly) return false;
-    if (isApproval(item)) {
-      if (item.approverKind === 'human') return false;
-      if (!watchesApprovalItem(item)) return false;
-      const ref = parseUrl(item.url);
-      return !!ref && matchesApprovalRule(automationRules, ref, item.reviewers);
-    }
-    if (item.kind && !isJobFailure(item)) return false;
-    return true;
-  };
-  const decorateInbox = (state: InboxState): InboxState => ({
-    ...state,
-    items: state.items.map((item) => ({ ...item, canAct: canActItem(item) })),
-  });
-  const readSession = async (sessionID: string): Promise<ListedSession | undefined> => {
-    try {
-      return (await ctx.session.get({ sessionID })) as ListedSession | undefined;
-    } catch (error) {
-      if (missingSession(error)) return undefined;
-      throw error;
-    }
-  };
-  const buildStoredTargetsMap = (entries: Array<{ key: string; value: unknown }>) => {
-    const map = new Map<string, readonly Target[]>();
-    for (const { key, value } of entries) {
-      const sessionID = key.slice('sessions/'.length);
-      const record = value as { targets?: Target[] } | undefined;
-      map.set(sessionID, Array.isArray(record?.targets) ? record.targets : []);
-    }
-    return map;
-  };
   const retireSessionState = (sessionID: string) => {
     service.invalidate(sessionID);
     reviews.forget(sessionID);
@@ -1216,130 +1015,47 @@ export async function setupStatus(
       }
       return service.refresh(sessionID);
     },
-    async cleanupCandidates(options?: {
+    cleanupCandidates: (options?: {
       scanID?: string;
       signal?: AbortSignal;
-    }): Promise<CleanupScanResult> {
-      const foreignInboxes = new Map<string, Promise<InboxState | undefined>>();
-      const listFn = (
-        ctx.session as { list?: (input: unknown) => Promise<SessionPage> }
-      ).list?.bind(ctx.session);
-      const emitProgress = (progress: CleanupProgressEvent) => {
-        host.cleanupProgress?.({
-          ...(options?.scanID ? { scanID: options.scanID } : {}),
-          ...progress,
-        });
-      };
-      let scannedSessionsPromise: Promise<Array<{ key: string; value: unknown }>> | undefined;
-      const getScannedSessions = () => (scannedSessionsPromise ??= scanAll('sessions/'));
-      return scanCleanupCandidates({
+    }): Promise<CleanupScanResult> =>
+      runSessionCleanupCandidates({
+        ctx,
         projectID,
         directory,
         forges: deps.forges,
+        scanID: options?.scanID,
         signal: options?.signal,
-        onProgress: emitProgress,
-        listSessions: () =>
-          listProjectSessions({
-            projectID,
-            directory,
-            list: listFn ? (input) => listFn(input) : undefined,
-            scanTargets: async () =>
-              (await getScannedSessions()).map(({ key }) => key.slice('sessions/'.length)),
-            getSession: readSession,
-            signal: options?.signal,
-            onProgress: (checked) => emitProgress({ phase: 'sessions', checked, total: 0 }),
-          }),
         storedTargets: host.storedTargets,
-        storedTargetsMap: async () => buildStoredTargetsMap(await getScannedSessions()),
-        pendingFeedbackCount: async (sessionDirectory, sessionID) => {
-          if (sessionDirectory === directory) {
-            return sessionItems(await inbox.list(), sessionID).length;
-          }
-          let loading = foreignInboxes.get(sessionDirectory);
-          if (!loading) {
-            loading = ctx.storage
-              .get(`feedback-inbox/${encodeURIComponent(sessionDirectory)}`)
-              .then(
-                (value) => value as InboxState | undefined,
-                () => undefined,
-              );
-            foreignInboxes.set(sessionDirectory, loading);
-          }
-          const state = await loading;
-          return state ? sessionItems(state, sessionID).length : 0;
-        },
-      });
-    },
-    async cleanupSessions(
+        inboxList: inbox.list,
+        cleanupProgress: host.cleanupProgress,
+      }),
+    cleanupSessions: (
       sessionIDs: readonly string[],
       options?: { scanID?: string; allowClientArchive?: boolean; finalizeArchived?: boolean },
-    ): Promise<CleanupResult> {
-      const emitProgress = (progress: CleanupProgressEvent) => {
-        host.cleanupProgress?.({
-          ...(options?.scanID ? { scanID: options.scanID } : {}),
-          ...progress,
-        });
-      };
-      const cleanedLocal = new Set<string>();
-      const cleanedForeign = new Map<string, Set<string>>();
-      const defaultForge = await host.forge?.();
-      const result = await runCleanupSessions(sessionIDs, {
+    ): Promise<CleanupResult> =>
+      runSessionCleanup({
+        ctx,
         projectID,
         directory,
         forges: deps.forges,
-        ...(defaultForge ? { defaultForge } : {}),
-        getSession: readSession,
-        archiveSession: async (sessionID) => {
-          const updated = (await ctx.session.update({ sessionID, archived: true })) as
-            ListedSession | undefined;
-          if (updated?.time?.archived !== undefined) return 'archived';
-          const verified = await readSession(sessionID);
-          if (verified?.time?.archived !== undefined) return 'archived';
-          return 'unsupported';
-        },
-        storedTargets: host.storedTargets,
-        storedTargetsMap: async () => buildStoredTargetsMap(await scanAll('sessions/')),
+        now: deps.now,
+        sessionIDs,
+        scanID: options?.scanID,
         allowClientArchive: options?.allowClientArchive,
         finalizeArchived: options?.finalizeArchived,
-        onProgress: emitProgress,
-        onSessionCleaned: async (sessionID, sessionDirectory) => {
-          service.invalidate(sessionID);
-          reviews.forget(sessionID);
-          cleanedLocal.add(sessionID);
-          if (sessionDirectory !== directory) {
-            let set = cleanedForeign.get(sessionDirectory);
-            if (!set) {
-              set = new Set();
-              cleanedForeign.set(sessionDirectory, set);
-            }
-            set.add(sessionID);
-          }
-          await Promise.all([
-            reviews.retireApprovals(sessionID).catch(() => {}),
-            cleanupWatch.forget(sessionID),
-          ]);
-        },
-      });
-      if (cleanedLocal.size > 0) {
-        await Promise.all([
-          inbox.prune((item) => cleanedLocal.has(item.sessionID)).catch(() => {}),
-          ...[...cleanedForeign.entries()].map(([foreignDirectory, ids]) =>
-            pruneForeignInboxSession({
-              storage: ctx.storage,
-              directory: foreignDirectory,
-              sessionIDs: ids,
-              now: deps.now,
-              changed: (dir) => host.feedbackChanged?.(dir),
-            }).catch(() => {}),
-          ),
-        ]);
-        for (const sessionID of cleanedLocal) {
-          void discovery.refresh(sessionID);
-        }
-      }
-      if (result.archived.length) host.sessionsCleanedUp?.(result.archived);
-      return result;
-    },
+        forge: host.forge,
+        storedTargets: host.storedTargets,
+        invalidateService: (sessionID) => service.invalidate(sessionID),
+        forgetReviews: (sessionID) => reviews.forget(sessionID),
+        retireApprovals: (sessionID) => reviews.retireApprovals(sessionID),
+        forgetCleanupWatch: (sessionID) => cleanupWatch.forget(sessionID),
+        pruneInbox: (predicate) => inbox.prune(predicate),
+        refreshDiscovery: (sessionID) => discovery.refresh(sessionID),
+        feedbackChanged: host.feedbackChanged,
+        sessionsCleanedUp: host.sessionsCleanedUp,
+        cleanupProgress: host.cleanupProgress,
+      }),
     // Discards lookups of the old targets and looks the session up again.
     // Whether the new targets include a PR/MR is known now, so the footer
     // doesn't depend on that lookup succeeding.
