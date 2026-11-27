@@ -13,9 +13,8 @@ Notification wording has changed since this capture.
 
 ## Installation
 
-Requires OpenCode 2.3 or later (2.4 or later to archive sessions with `/forge-cleanup` and
-`/forge-prune`), plus an authenticated [`gh`](https://cli.github.com/) for GitHub or
-[`glab`](https://gitlab.com/gitlab-org/cli) for GitLab. The CLI must be available on the
+Requires OpenCode 2.3 or later, plus an authenticated [`gh`](https://cli.github.com/) for GitHub
+or [`glab`](https://gitlab.com/gitlab-org/cli) for GitLab. The CLI must be available on the
 OpenCode server's `PATH`; only the CLI for your forge is required.
 
 ```sh

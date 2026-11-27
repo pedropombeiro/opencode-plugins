@@ -597,10 +597,10 @@ export class GitHubForge implements Forge {
         if (!repository) return;
         chunk.forEach((iid, index) => {
           const node = repository[`pr${index}`];
-          if (!node || String(node.number ?? iid) !== iid) return;
+          if (!node || !node.url || !node.state || String(node.number ?? iid) !== iid) return;
           found.set(iid, {
             iid,
-            title: node.title,
+            title: node.title ?? '',
             url: node.url,
             state: node.state === 'OPEN' ? 'opened' : node.state.toLowerCase(),
             targetProject: node.baseRepository?.nameWithOwner ?? project.path,

@@ -1078,6 +1078,7 @@ test('requestStates and issueStates batch GitHub PR and issue numbers', async ()
             baseRepository: { nameWithOwner: 'owner/repo' },
           },
           pr1: null,
+          pr2: { number: 3, title: 'Missing state', url: 'https://github.com/owner/repo/pull/3' },
         },
       };
     }
@@ -1089,7 +1090,11 @@ test('requestStates and issueStates batch GitHub PR and issue numbers', async ()
       },
     };
   });
-  const prs = await forge.requestStates({ host: 'github.com', path: 'owner/repo' }, ['1', '2']);
+  const prs = await forge.requestStates({ host: 'github.com', path: 'owner/repo' }, [
+    '1',
+    '2',
+    '3',
+  ]);
   expect(prs.get('1')).toEqual({
     iid: '1',
     title: 'PR 1',
@@ -1098,11 +1103,12 @@ test('requestStates and issueStates batch GitHub PR and issue numbers', async ()
     targetProject: 'owner/repo',
   });
   expect(prs.has('2')).toBe(false);
+  expect(prs.has('3')).toBe(false);
 
   const issues = await forge.issueStates({ host: 'github.com', path: 'owner/repo' }, ['10', '11']);
   expect(issues.has('10')).toBe(false);
   expect(issues.get('11')).toEqual({ iid: '11', open: true });
-  expect(seenVariables[0]).toEqual({ owner: 'owner', repo: 'repo', n0: 1, n1: 2 });
+  expect(seenVariables[0]).toEqual({ owner: 'owner', repo: 'repo', n0: 1, n1: 2, n2: 3 });
   expect(seenVariables[1]).toEqual({ owner: 'owner', repo: 'repo', n0: 10, n1: 11 });
 
   // Splits chunks on request errors and preserves valid siblings when a single leaf fails,

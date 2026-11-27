@@ -1264,9 +1264,7 @@ export async function setupStatus(
           if (updated?.time?.archived !== undefined) return;
           const verified = await readSession(sessionID);
           if (verified?.time?.archived === undefined) {
-            throw new Error(
-              'OpenCode did not archive the session (OpenCode 2.4+ is required to archive sessions from plugins).',
-            );
+            throw new Error('OpenCode did not archive the session.');
           }
         },
         storedTargets: host.storedTargets,

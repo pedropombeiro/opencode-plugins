@@ -835,6 +835,37 @@ export function createAutomationHost(
     };
   }
 
+  function linkedNotifyDescription(
+    phase: 'started' | 'ended',
+    job: boolean,
+    label: string,
+    state: string,
+  ): string {
+    if (phase === 'started') {
+      const action = job ? 'investigating failed jobs for' : 'preparing review fixes for';
+      return `Forgekeeper: ${action} ${label}`;
+    }
+    const kind = job ? 'failed-job investigation' : 'review preparation';
+    return `Forgekeeper: ${kind} ${state} for ${label}`;
+  }
+
+  function linkedNotifyLines(
+    phase: 'started' | 'ended',
+    url: string,
+    task: string,
+    state: string,
+    reason: string | undefined,
+    details: readonly string[],
+  ): string[] {
+    if (phase === 'started') {
+      return [
+        `Forgekeeper is ${task} ${url} in a linked session, because this checkout isn't at the PR/MR's head commit.`,
+        ...details,
+      ];
+    }
+    const suffix = reason ? ` ${reason}` : '';
+    return [`Forgekeeper's linked session for ${url} ended: ${state}.${suffix}`, ...details];
+  }
   async function notify(record: AutomationRecord, phase: 'started' | 'ended') {
     if (!record.execution) return;
     const provider = environmentProvider(environments, record);
@@ -847,20 +878,15 @@ export function createAutomationHost(
       const ref = parseUrl(record.item.url);
       const label = ref ? traitsOf(ref).reference(ref.iid) : record.item.url;
       const task = job ? 'investigating the failed jobs of' : 'preparing fixes for';
-      const lines =
-        phase === 'started'
-          ? [
-              `Forgekeeper is ${task} ${record.item.url} in a linked session, because this checkout isn't at the PR/MR's head commit.`,
-              ...details,
-            ]
-          : [
-              `Forgekeeper's linked session for ${record.item.url} ended: ${record.state}.${record.reason ? ` ${record.reason}` : ''}`,
-              ...details,
-            ];
-      const description =
-        phase === 'started'
-          ? `Forgekeeper: ${job ? 'investigating failed jobs for' : 'preparing review fixes for'} ${label}`
-          : `Forgekeeper: ${job ? 'failed-job investigation' : 'review preparation'} ${record.state} for ${label}`;
+      const lines = linkedNotifyLines(
+        phase,
+        record.item.url,
+        task,
+        record.state,
+        record.reason,
+        details,
+      );
+      const description = linkedNotifyDescription(phase, job, label, record.state);
       await env.relay(record.item.sessionID, description, lines.join('\n\n'), true);
     }
     if (phase === 'ended' && record.state === 'completed' && provider.archive) {

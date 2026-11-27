@@ -217,7 +217,7 @@ describe('Desktop status pill', () => {
     const withCleanup = { ...actions, cleanup: () => calls.push('cleanup') };
     const mergedPill = statusPill(snapshot([mr({ state: 'merged' })]), undefined, withCleanup);
     const cleanupRow = mergedPill?.rows?.find((row) => row.id === 'cleanup');
-    expect(cleanupRow?.label).toBe('PR/MR merged — clean up session');
+    expect(cleanupRow?.label).toBe('PR/MR merged · /forge-cleanup');
     cleanupRow?.run?.();
     expect(calls).toEqual(['cleanup']);
 
@@ -236,7 +236,7 @@ describe('Desktop status pill', () => {
     expect(issuePill?.label).toBe('✓ Tracked issue closed');
     expect(issuePill?.tone).toBe('success');
     expect(issuePill?.rows?.find((row) => row.id === 'cleanup')?.label).toBe(
-      'Tracked issue closed — clean up session',
+      'Tracked issue closed · /forge-cleanup',
     );
   });
 });

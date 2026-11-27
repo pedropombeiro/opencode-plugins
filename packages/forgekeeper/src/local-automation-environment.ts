@@ -427,8 +427,11 @@ export function createLocalEnvironment(input: {
     async archive(record) {
       const sessionID = localExecution(record).sessionID;
       if (!sessionID) return undefined;
-      await ctx.session.update({ sessionID, archived: true });
-      return sessionID;
+      const updated = (await ctx.session.update({ sessionID, archived: true })) as
+        { time?: { archived?: number } } | undefined;
+      if (updated?.time?.archived !== undefined) return sessionID;
+      const verified = await ctx.session.get({ sessionID }).catch(() => undefined);
+      return verified?.time?.archived !== undefined ? sessionID : undefined;
     },
     async sweep() {
       if (input.closing() || !(ctx.location as { project?: { id?: string } }).project?.id)

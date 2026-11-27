@@ -871,10 +871,9 @@ export default {
 
     let activeCleanupScan: AbortController | undefined;
 
-    async function showCleanup(prefetched?: CleanupScanResult) {
-      const place = currentPlace();
-      if (statusOff(place)) return;
-      const directory = place.directory;
+    async function showCleanup(prefetched?: CleanupScanResult, targetDirectory?: string) {
+      const directory = targetDirectory ?? currentPlace().directory;
+      if (statusOff({ directory, key: HOME })) return;
       activeCleanupScan?.abort();
       let scan = prefetched;
       if (!scan) {
@@ -990,7 +989,7 @@ export default {
             selection: 'none',
             onTrigger: () => {
               context.ui.dialog.clear();
-              void showCleanup();
+              void showCleanup(undefined, directory);
             },
           },
         ],
@@ -1001,7 +1000,7 @@ export default {
       if (scan.candidates.length > 1 && doneIDs.size > 0) {
         const remaining = scan.candidates.filter((candidate) => !doneIDs.has(candidate.sessionID));
         if (remaining.length > 0) {
-          void showCleanup({ ...scan, candidates: remaining });
+          void showCleanup({ ...scan, candidates: remaining }, directory);
         }
       }
     }
@@ -1016,7 +1015,11 @@ export default {
           <Show when={ready()}>
             {(value: () => NonNullable<ReturnType<typeof ready>>) => (
               <box paddingLeft={1} paddingRight={1} height={1} flexShrink={0}>
-                <text wrapMode="none" fg={color('success')} onMouseUp={() => void showCleanup()}>
+                <text
+                  wrapMode="none"
+                  fg={color('success')}
+                  onMouseUp={() => void showCleanup(undefined, place().directory)}
+                >
                   ✓ {value().reason} — run <b>/forge-cleanup</b> to archive this session
                 </text>
               </box>

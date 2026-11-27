@@ -135,14 +135,14 @@ function describeCandidate(
   ];
 }
 
+function skippedWarning(skippedErrors: number): string[] {
+  if (skippedErrors <= 0) return [];
+  const suffix = skippedErrors === 1 ? '' : 's';
+  return [`Skipped ${skippedErrors} session${suffix} whose target status could not be verified.`];
+}
+
 export function cleanupReport(scan: CleanupScanResult, note?: string): string {
-  const warnings =
-    scan.skippedErrors > 0
-      ? [
-          `Skipped ${scan.skippedErrors} session${scan.skippedErrors === 1 ? '' : 's'} whose target status could not be verified.`,
-        ]
-      : [];
-  const lines = [...(note ? [note] : []), ...warnings];
+  const lines = [...(note ? [note] : []), ...skippedWarning(scan.skippedErrors)];
   if (!scan.candidates.length) {
     return [...lines, 'No sessions with all PRs/MRs merged or tracked issues closed.'].join('\n\n');
   }

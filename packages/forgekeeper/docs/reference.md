@@ -11,8 +11,7 @@ and review notifications are optional; see [Keep only session titles](#keep-only
 
 Notification wording has changed since this capture.
 
-Requires OpenCode 2.3 or later (2.4 or later to archive sessions with `/forge-cleanup` and
-`/forge-prune`). It replaces
+Requires OpenCode 2.3 or later. It replaces
 [`opencode-forge-session-title`](https://www.npmjs.com/package/opencode-forge-session-title); see
 [Migrating from opencode-forge-session-title](#migrating-from-opencode-forge-session-title).
 

@@ -74,7 +74,7 @@ export function statusPill(
         ? [
             {
               id: 'cleanup',
-              label: `${ready.reason} — clean up session`,
+              label: `${ready.reason} · /forge-cleanup`,
               icon: 'archive' as const,
               tone: 'success' as const,
               run: actions.cleanup,
