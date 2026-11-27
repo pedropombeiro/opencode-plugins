@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { findingsDigest } from './review-preparation';
-import { EnvironmentUncertain } from './automation-environment';
+import { EnvironmentUncertain, type AutomationEnvironmentProvider } from './automation-environment';
 import {
   ADMISSION_CHECKS,
   allowedModelsFor,
@@ -1238,8 +1238,8 @@ describe('review automation in a worktree', () => {
 
   function worktreeFixture(
     overrides: Partial<AutomationHost> & {
-      provision?: import('./automation-environment').AutomationEnvironmentProvider['provision'];
-      verifyExecution?: import('./automation-environment').AutomationEnvironmentProvider['verify'];
+      provision?: AutomationEnvironmentProvider['provision'];
+      verifyExecution?: AutomationEnvironmentProvider['verify'];
     } = {},
   ) {
     const waited: string[] = [];

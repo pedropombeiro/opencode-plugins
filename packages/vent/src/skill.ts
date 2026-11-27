@@ -127,12 +127,17 @@ function describeCloseOutSteps(destinations: Record<string, DestinationConfig>):
     configuredPrefixes.length <= 1
       ? `\`${primaryPrefix}${suffix}\``
       : configuredPrefixes.map((prefix) => `\`${prefix}${suffix}\``).join(' / ');
-  const prefixHeading =
-    configuredPrefixes.length === 0
-      ? 'Pick the native close reason (and a resolution label such as `resolution::<name>` if the destination uses resolution labels):'
-      : configuredPrefixes.length === 1
-        ? `Pick the resolution label (\`${primaryPrefix}<name>\`, when configured on the destination) and native close reason:`
-        : `Pick the resolution label (${configuredPrefixes.map((prefix) => `\`${prefix}<name>\``).join(' or ')}, matching the destination's configured prefix) and native close reason:`;
+  const formatPrefixHeading = (): string => {
+    switch (configuredPrefixes.length) {
+      case 0:
+        return 'Pick the native close reason (and a resolution label such as `resolution::<name>` if the destination uses resolution labels):';
+      case 1:
+        return `Pick the resolution label (\`${primaryPrefix}<name>\`, when configured on the destination) and native close reason:`;
+      default:
+        return `Pick the resolution label (${configuredPrefixes.map((prefix) => `\`${prefix}<name>\``).join(' or ')}, matching the destination's configured prefix) and native close reason:`;
+    }
+  };
+  const prefixHeading = formatPrefixHeading();
 
   return [
     '1. **Close out after approval.** Once the fix is in place:',

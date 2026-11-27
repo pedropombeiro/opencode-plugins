@@ -108,14 +108,14 @@ function createFakeCatalog(options: {
 
   const forges: ForgeCatalog = {
     kinds: ['gitlab', 'github'],
-    kind: (host) =>
-      host === 'gitlab.com' ? 'gitlab' : host === 'github.com' ? 'github' : undefined,
-    forHost: (host) =>
-      host === 'gitlab.com'
-        ? adapter('gitlab')
-        : host === 'github.com'
-          ? adapter('github')
-          : undefined,
+    kind: (host) => {
+      if (host === 'gitlab.com') return 'gitlab';
+      return host === 'github.com' ? 'github' : undefined;
+    },
+    forHost: (host) => {
+      if (host === 'gitlab.com') return adapter('gitlab');
+      return host === 'github.com' ? adapter('github') : undefined;
+    },
     projects: async () => [],
     repository: async () => ({ kind: 'none', reason: 'not used' }),
   };
@@ -746,14 +746,14 @@ describe('cleanupCandidates & cleanupSessions', () => {
 
     const forges: ForgeCatalog = {
       kinds: ['gitlab', 'github'],
-      kind: (host) =>
-        host === 'gitlab.com' ? 'gitlab' : host === 'github.com' ? 'github' : undefined,
-      forHost: (host) =>
-        host === 'gitlab.com'
-          ? adapter('gitlab')
-          : host === 'github.com'
-            ? adapter('github')
-            : undefined,
+      kind: (host) => {
+        if (host === 'gitlab.com') return 'gitlab';
+        return host === 'github.com' ? 'github' : undefined;
+      },
+      forHost: (host) => {
+        if (host === 'gitlab.com') return adapter('gitlab');
+        return host === 'github.com' ? adapter('github') : undefined;
+      },
       projects: async () => [],
       repository: async () => ({ kind: 'none', reason: 'not used' }),
     };

@@ -130,9 +130,9 @@ export function createReviewMonitoring(
         title: description,
         links: links.length ? links : [request.url],
         ...(comments.ids?.length ? { commentIDs: comments.ids } : {}),
-        ...(comments.postedAt !== undefined ? { postedAt: comments.postedAt } : {}),
+        ...(comments.postedAt === undefined ? {} : { postedAt: comments.postedAt }),
         ...(comments.humanApprovalOnly ? { humanApprovalOnly: true } : {}),
-        ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
+        ...(settings.delivery.reviews === 'inbox' ? {} : { delivery: settings.delivery.reviews }),
         at: now(),
       });
     }
@@ -330,7 +330,7 @@ export function createReviewMonitoring(
       commentIDs: context.replies.map((comment) => comment.id),
       postedAt: event.at,
       ...(line ? { details: [line] } : {}),
-      ...(settings.delivery.reviews !== 'inbox' ? { delivery: settings.delivery.reviews } : {}),
+      ...(settings.delivery.reviews === 'inbox' ? {} : { delivery: settings.delivery.reviews }),
       at: now(),
     });
     host.notice({
@@ -465,7 +465,7 @@ export function createReviewMonitoring(
             approverKind: kind,
             ...(event.approver.id ? { approverID: event.approver.id } : {}),
             ...(event.approver.reviewID ? { approvalToken: event.approver.reviewID } : {}),
-            ...(event.cycle !== undefined ? { approvalCycle: event.cycle } : {}),
+            ...(event.cycle === undefined ? {} : { approvalCycle: event.cycle }),
             ...(details.length ? { details } : {}),
             ...(event.delivery ? { delivery: event.delivery } : {}),
             at: event.detectedAt,

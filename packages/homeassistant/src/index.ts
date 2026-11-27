@@ -431,7 +431,7 @@ export function createHomeAssistant(deps: HomeAssistantDeps) {
     try {
       await deps.log(level, message);
     } catch {
-      return;
+      // Ignore logging failures so notifications never crash the plugin
     }
   }
 

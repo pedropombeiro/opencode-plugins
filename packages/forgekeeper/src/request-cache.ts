@@ -53,7 +53,7 @@ export function createRequestCache<T>(options: {
                   loading: false,
                   attemptedAt: now(),
                   result,
-                  ...(fetchedAt !== undefined ? { fetchedAt } : {}),
+                  ...(fetchedAt === undefined ? {} : { fetchedAt }),
                 });
               }
               return value;

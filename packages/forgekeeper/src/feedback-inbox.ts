@@ -108,12 +108,12 @@ export function listAllowsAct(
 // When an update's feedback happened: its newest comment, or for updates
 // without comments, such as Copilot reviews, when Forgekeeper recorded it. A
 // review request shows when it was made.
-export const feedbackTime = (item: Pick<FeedbackItem, 'postedAt' | 'at' | 'kind'>) =>
-  isReviewRequest(item)
-    ? `Requested: ${formatTime(item.postedAt ?? item.at)}`
-    : item.postedAt !== undefined
-      ? `Latest comment: ${formatTime(item.postedAt)}`
-      : `Detected: ${formatTime(item.at)}`;
+export const feedbackTime = (item: Pick<FeedbackItem, 'postedAt' | 'at' | 'kind'>) => {
+  if (isReviewRequest(item)) return `Requested: ${formatTime(item.postedAt ?? item.at)}`;
+  return item.postedAt === undefined
+    ? `Detected: ${formatTime(item.at)}`
+    : `Latest comment: ${formatTime(item.postedAt)}`;
+};
 
 export const sessionItems = (state: InboxState, sessionID: string | undefined): FeedbackItem[] =>
   sessionID ? state.items.filter((item) => item.sessionID === sessionID) : [];

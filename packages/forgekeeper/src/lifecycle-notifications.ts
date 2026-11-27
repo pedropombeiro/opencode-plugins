@@ -61,16 +61,18 @@ function failureDetails(ci: PipelineState, failures: ReturnType<typeof splitFail
     ...failures.earlier.map((job) => line(job, ' earlier')),
   ];
   const more = listed.length - MAX_LISTED_JOBS;
+  let unlistedNotice: string[] = [];
+  if (failures.unlisted) {
+    unlistedNotice = [
+      'A job that is not allowed to fail failed the pipeline, but it is not among the failed jobs Forgekeeper reads.',
+    ];
+  } else if (!ci.complete) {
+    unlistedNotice = ['More jobs failed than Forgekeeper reads.'];
+  }
   return [
     ...listed.slice(0, MAX_LISTED_JOBS),
     ...(more > 0 ? [`${more} more jobs failed.`] : []),
-    ...(failures.unlisted
-      ? [
-          'A job that is not allowed to fail failed the pipeline, but it is not among the failed jobs Forgekeeper reads.',
-        ]
-      : ci.complete
-        ? []
-        : ['More jobs failed than Forgekeeper reads.']),
+    ...unlistedNotice,
     ...(ci.running ? ['Other jobs are still running.'] : []),
   ];
 }
@@ -170,14 +172,25 @@ export function createLifecycleNotifications(
     const failures = ci && splitFailures(ci, event.jobs ?? []);
     const details = ci && failures ? failureDetails(ci, failures) : proposals;
     const forge = feedbackTarget(record.url);
-    const title =
-      ci && failures
-        ? failureTitle(record.reference, ci, failures, forge ? traitsOf(forge).ci : 'pipeline')
-        : event.kind === 'conflict'
-          ? `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`
-          : event.kind === 'changes-requested'
-            ? `${record.reference}: a reviewer requested changes`
-            : `${record.reference} merged into ${record.targetBranch}`;
+    const resolveTitle = (): string => {
+      if (ci && failures) {
+        return failureTitle(
+          record.reference,
+          ci,
+          failures,
+          forge ? traitsOf(forge).ci : 'pipeline',
+        );
+      }
+      switch (event.kind) {
+        case 'conflict':
+          return `${record.reference} can no longer merge: it conflicts with ${record.targetBranch}`;
+        case 'changes-requested':
+          return `${record.reference}: a reviewer requested changes`;
+        default:
+          return `${record.reference} merged into ${record.targetBranch}`;
+      }
+    };
+    const title = resolveTitle();
     const item: FeedbackItem = {
       id: event.id,
       kind: event.kind,

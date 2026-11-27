@@ -96,16 +96,12 @@ describe('Forges', () => {
   });
 
   test('resolves the branch only on supported forges', async () => {
-    const unsupported: Exec = async (_file, args) => ({
-      code: 0,
-      stderr: '',
-      stdout:
-        args[0] === 'config'
-          ? 'remote.origin.url git@bitbucket.org:o/r.git'
-          : args[0] === 'symbolic-ref' && args.length === 4
-            ? 'feature'
-            : '/repo',
-    });
+    const unsupported: Exec = async (_file, args) => {
+      if (args[0] === 'config')
+        return { code: 0, stderr: '', stdout: 'remote.origin.url git@bitbucket.org:o/r.git' };
+      const stdout = args[0] === 'symbolic-ref' && args.length === 4 ? 'feature' : '/repo';
+      return { code: 0, stderr: '', stdout };
+    };
     expect(await new Forges(unsupported, forges.hosts).repository('/repo')).toEqual({
       kind: 'none',
       reason: 'Not a supported forge remote',

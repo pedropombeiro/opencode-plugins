@@ -44,20 +44,24 @@ export function statusPill(
     tone: pillTone(tones),
     title: `${noun} status`,
     rows: [
-      ...segments.map((segment, index) => ({
-        id: `segment-${index}`,
-        label:
-          segment.text.startsWith('awaiting ') && pending?.length
-            ? `awaiting ${pending.map((username) => `@${username}`).join(', ')}`
-            : segment.text,
-        ...(segment.url ? { icon: 'outline-arrow-up-right' as const } : {}),
-        ...(segment.tone === 'success' || segment.tone === 'warning'
-          ? { tone: segment.tone }
-          : segment.tone === 'error'
-            ? { tone: 'danger' as const }
-            : {}),
-        ...(segment.url ? { run: () => actions.external(segment.url!) } : {}),
-      })),
+      ...segments.map((segment, index) => {
+        let tone: 'success' | 'warning' | 'danger' | undefined;
+        if (segment.tone === 'success' || segment.tone === 'warning') {
+          tone = segment.tone;
+        } else if (segment.tone === 'error') {
+          tone = 'danger';
+        }
+        return {
+          id: `segment-${index}`,
+          label:
+            segment.text.startsWith('awaiting ') && pending?.length
+              ? `awaiting ${pending.map((username) => `@${username}`).join(', ')}`
+              : segment.text,
+          ...(segment.url ? { icon: 'outline-arrow-up-right' as const } : {}),
+          ...(tone ? { tone } : {}),
+          ...(segment.url ? { run: () => actions.external(segment.url!) } : {}),
+        };
+      }),
       {
         id: 'details',
         label: `Show ${noun} status`,

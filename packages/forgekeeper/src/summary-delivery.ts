@@ -108,12 +108,16 @@ interface SummaryHost {
   report: (error: unknown) => void;
 }
 
-const receipt = (note: LinkedResult) =>
-  note.status === 'fetched'
-    ? `Read ${note.url}. Its text is in the request, in a <linked-note> block.`
-    : note.status === 'omitted'
-      ? `${note.url} was left out because of size limits.`
-      : `Could not read ${note.url}.`;
+const receipt = (note: LinkedResult) => {
+  switch (note.status) {
+    case 'fetched':
+      return `Read ${note.url}. Its text is in the request, in a <linked-note> block.`;
+    case 'omitted':
+      return `${note.url} was left out because of size limits.`;
+    default:
+      return `Could not read ${note.url}.`;
+  }
+};
 
 export const feedbackTarget = (url: string): FeedbackTarget | undefined => {
   const ref = parseUrl(url);
@@ -225,25 +229,28 @@ export function createSummaryDelivery(
     // A review request's replies are context, so it's summarized without
     // them when they can't be read.
     const replies = summary && asked ? commentIDs.slice(0, MAX_FINDINGS) : [];
-    const read = review
-      ? await details(request, commentIDs.slice(0, MAX_FINDINGS * 2))
-      : replies.length && request && details
-        ? await details(request, replies).catch(() => [])
-        : [];
-    const findings =
-      summary && (event || approved)
-        ? lifecycleText({ ...item, kind: event ?? 'approval' }, feedbackTime(item))
-        : summary && asked
-          ? requestText(
-              described,
-              item.url,
-              read,
-              replies.length,
-              !!item.details?.includes(REPLIES_UNAVAILABLE),
-            )
-          : review
-            ? findingsText(described, item.url, read)
-            : noticeText(described, links);
+    let read: CommentDetail[] = [];
+    if (review) {
+      read = await details(request, commentIDs.slice(0, MAX_FINDINGS * 2));
+    } else if (replies.length && request && details) {
+      read = await details(request, replies).catch(() => []);
+    }
+    let findings: string;
+    if (summary && (event || approved)) {
+      findings = lifecycleText({ ...item, kind: event ?? 'approval' }, feedbackTime(item));
+    } else if (summary && asked) {
+      findings = requestText(
+        described,
+        item.url,
+        read,
+        replies.length,
+        !!item.details?.includes(REPLIES_UNAVAILABLE),
+      );
+    } else if (review) {
+      findings = findingsText(described, item.url, read);
+    } else {
+      findings = noticeText(described, links);
+    }
     const allowed = review
       ? (
           traitsOf(request).feedback?.linkedNotes?.(
@@ -396,15 +403,23 @@ export function createSummaryDelivery(
           ? undefined
           : linkedContext(record.linked, MAX_TOTAL - record.findings.length - 2);
       const tool = linked?.tool ? event.tools[LINKED_NOTE_TOOL] : undefined;
+      let system = summarySystem(!!tool, !!linked);
+      if (record !== 'failed') {
+        switch (record.system) {
+          case 'lifecycle':
+            system = LIFECYCLE_SYSTEM;
+            break;
+          case 'relay':
+            system = RELAY_SYSTEM;
+            break;
+          case 'review-request':
+            system = REQUEST_SYSTEM;
+            break;
+        }
+      }
       restrictRequest(
         event,
-        record !== 'failed' && record.system === 'lifecycle'
-          ? LIFECYCLE_SYSTEM
-          : record !== 'failed' && record.system === 'relay'
-            ? RELAY_SYSTEM
-            : record !== 'failed' && record.system === 'review-request'
-              ? REQUEST_SYSTEM
-              : summarySystem(!!tool, !!linked),
+        system,
         record === 'failed'
           ? UNAVAILABLE_TEXT
           : [record.findings, linked?.text ?? ''].filter(Boolean).join('\n\n'),

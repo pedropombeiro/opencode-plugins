@@ -98,7 +98,7 @@ async function writeAtomicFile(
     await writeFile(tempPath, content, {
       encoding: 'utf8',
       flag: 'wx',
-      ...(mode !== undefined ? { mode } : {}),
+      ...(mode === undefined ? {} : { mode }),
     });
     signal?.throwIfAborted();
     await rename(tempPath, filePath);

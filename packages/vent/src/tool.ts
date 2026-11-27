@@ -196,14 +196,14 @@ export async function collectGitContext(
   const gitEnv = { LC_ALL: 'C' };
   const [remoteResult, branchResult] = await Promise.all([
     run('git', ['remote', '-v'], { cwd: directory, env: gitEnv, timeout: 5_000, signal }),
-    options?.needBranch !== false
-      ? run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+    options?.needBranch === false
+      ? Promise.resolve({ stdout: '', stderr: '', code: 1 })
+      : run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
           cwd: directory,
           env: gitEnv,
           timeout: 5_000,
           signal,
-        })
-      : Promise.resolve({ stdout: '', stderr: '', code: 1 }),
+        }),
   ]);
 
   const fetchEntries =
@@ -237,24 +237,31 @@ export function formatVentResult(result: VentResult): string {
   const target = result.url ?? result.path ?? result.destination;
   const lines: string[] = [];
 
-  if (result.action === 'commented') {
-    const score = result.matchScore !== undefined ? ` (similarity ${result.matchScore})` : '';
-    lines.push(
-      `Recorded new occurrence on existing ${result.destinationType} entry "${result.matchedTitle ?? result.title}"${score}: ${target}`,
-    );
-  } else if (result.action === 'reopened') {
-    lines.push(
-      `Reopened closed ${result.destinationType} issue "${result.matchedTitle}" and recorded a new occurrence: ${target}`,
-    );
-  } else if (result.action === 'closed-match') {
-    const score = result.matchScore !== undefined ? ` (similarity ${result.matchScore})` : '';
-    lines.push(
-      `Found a similar closed ${result.destinationType} issue "${result.matchedTitle}"${score}: ${target}`,
-    );
-  } else {
-    lines.push(
-      `Created new ${result.destinationType} vent "${result.title}" in destination "${result.destination}": ${target}`,
-    );
+  switch (result.action) {
+    case 'commented': {
+      const score = result.matchScore === undefined ? '' : ` (similarity ${result.matchScore})`;
+      lines.push(
+        `Recorded new occurrence on existing ${result.destinationType} entry "${result.matchedTitle ?? result.title}"${score}: ${target}`,
+      );
+      break;
+    }
+    case 'reopened':
+      lines.push(
+        `Reopened closed ${result.destinationType} issue "${result.matchedTitle}" and recorded a new occurrence: ${target}`,
+      );
+      break;
+    case 'closed-match': {
+      const score = result.matchScore === undefined ? '' : ` (similarity ${result.matchScore})`;
+      lines.push(
+        `Found a similar closed ${result.destinationType} issue "${result.matchedTitle}"${score}: ${target}`,
+      );
+      break;
+    }
+    default:
+      lines.push(
+        `Created new ${result.destinationType} vent "${result.title}" in destination "${result.destination}": ${target}`,
+      );
+      break;
   }
 
   if (result.note) {
@@ -317,14 +324,14 @@ export async function executeVent(
   const metadata: VentMetadata = {
     date,
     timestamp,
-    ...(!omitCheckoutMetadata
-      ? {
+    ...(omitCheckoutMetadata
+      ? {}
+      : {
           directory: runtime.directory,
           ...(remote ? { remote } : {}),
           ...(branch ? { branch } : {}),
           sessionID: runtime.sessionID,
-        }
-      : {}),
+        }),
     ...(input.category ? { category: input.category } : {}),
   };
 

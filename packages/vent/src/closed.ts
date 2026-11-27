@@ -35,18 +35,25 @@ export function parseConcatenatedJson<T>(raw: string): T {
           }
           continue;
         }
-        if (ch === '"') {
-          inString = true;
-        } else if (ch === '[' || ch === '{') {
-          depth += 1;
-        } else if (ch === ']' || ch === '}') {
-          depth -= 1;
-          if (depth < 0) throw firstError;
-          if (depth === 0) {
-            end += 1;
+        switch (ch) {
+          case '"':
+            inString = true;
             break;
-          }
+          case '[':
+          case '{':
+            depth += 1;
+            break;
+          case ']':
+          case '}':
+            depth -= 1;
+            if (depth < 0) throw firstError;
+            if (depth === 0) {
+              end += 1;
+              break;
+            }
+            break;
         }
+        if (depth === 0 && (ch === ']' || ch === '}')) break;
       }
 
       if (depth !== 0 || inString) {

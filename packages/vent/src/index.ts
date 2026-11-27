@@ -71,7 +71,7 @@ export default {
         if (!(await ownsSession(event.sessionID))) return;
         event.system.push({ type: 'text', text: VENT_GUIDANCE });
       } catch {
-        return;
+        // Ignore session lookup errors during context assembly
       }
     });
 

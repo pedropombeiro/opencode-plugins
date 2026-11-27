@@ -115,7 +115,6 @@ export function createAgentStateTracker(options: AgentStateOptions) {
       case 'form.replied':
       case 'form.cancelled':
         await resolve(event.data.sessionID, event.data.id);
-        return;
     }
   }
 

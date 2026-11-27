@@ -322,10 +322,15 @@ export const githubTraits: ForgeTraits<GitHubPullRequest, GitHubForge> = {
   },
 };
 
+function copilotLabel(dismissed: boolean | undefined, feedback: boolean): string {
+  if (dismissed) return 'dismissed';
+  return feedback ? 'commented' : 'no comments';
+}
+
 function copilotStatus(review: CopilotReview | undefined): AutomatedReviewStatus | undefined {
   if (!review) return undefined;
   const feedback = review.comments > 0 && !review.dismissed;
-  const label = review.dismissed ? 'dismissed' : feedback ? 'commented' : 'no comments';
+  const label = copilotLabel(review.dismissed, feedback);
   const completed = review.reviewID ? { id: review.reviewID, feedback, label } : undefined;
 
   if (review.requested) return { state: 'running', label: 'reviewing', completed };
@@ -900,7 +905,8 @@ export class GitHubForge implements Forge {
       awaitingReviewers: reviewers.nodes.flatMap((request) => {
         const reviewer = request.requestedReviewer;
         if (reviewer?.__typename === 'Bot') return [];
-        return reviewer?.login ? [reviewer.login] : reviewer?.name ? [reviewer.name] : [];
+        const name = reviewer?.login || reviewer?.name;
+        return name ? [name] : [];
       }),
       reviewersComplete: !!reviewers.pageInfo && !reviewers.pageInfo.hasNextPage,
       approvalsComplete:

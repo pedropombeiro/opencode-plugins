@@ -309,13 +309,18 @@ describe('verified review findings', () => {
     const deps = {
       reviewerID: async (_ref: unknown, name: string) => `id-${name}`,
       details: async (_target: unknown, ids: string[]) =>
-        ids.map((id) => ({
-          id,
-          url: `${url}#note_${id}`,
-          username: 'someone',
-          authorID: id === '1' ? 'id-duo' : id === '2' ? 'id-bot' : 'id-human',
-          body: `Finding ${id}`,
-        })),
+        ids.map((id) => {
+          let authorID = 'id-human';
+          if (id === '1') authorID = 'id-duo';
+          else if (id === '2') authorID = 'id-bot';
+          return {
+            id,
+            url: `${url}#note_${id}`,
+            username: 'someone',
+            authorID,
+            body: `Finding ${id}`,
+          };
+        }),
     } as unknown as AutomationDependencies;
     const env = {
       readFeedback: async () => ({
@@ -784,19 +789,29 @@ describe('worktree automation', () => {
   // What `git status --short` reports in the worktree.
   let status = '';
   // Git in a worktree at `head` on `feature`.
-  const exec = (async (_file: string, args: string[]) => ({
-    code: ['symbolic-ref', 'rev-parse', 'status'].includes(args[0]) ? 0 : 1,
-    stderr: '',
-    stdout: args.includes('--show-toplevel')
-      ? '/repo'
-      : args[0] === 'rev-parse'
-        ? head
-        : args[0] === 'symbolic-ref'
-          ? 'feature'
-          : args[0] === 'status'
-            ? status
-            : '',
-  })) as unknown as AutomationDependencies['exec'];
+  const exec = (async (_file: string, args: string[]) => {
+    let stdout = '';
+    if (args.includes('--show-toplevel')) {
+      stdout = '/repo';
+    } else {
+      switch (args[0]) {
+        case 'rev-parse':
+          stdout = head;
+          break;
+        case 'symbolic-ref':
+          stdout = 'feature';
+          break;
+        case 'status':
+          stdout = status;
+          break;
+      }
+    }
+    return {
+      code: ['symbolic-ref', 'rev-parse', 'status'].includes(args[0]) ? 0 : 1,
+      stderr: '',
+      stdout,
+    };
+  }) as unknown as AutomationDependencies['exec'];
 
   function hostFixture(options: Options = {}) {
     status = options.status ?? '';

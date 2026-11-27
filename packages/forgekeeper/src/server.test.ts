@@ -23,7 +23,9 @@ import { footerSegments } from './format';
 import type { RemoteProject } from './git';
 import type { TitleLookups } from './lookups';
 import { FETCH_INTERVAL, RETRY_DELAY, SETTLE_TIME } from './human-review-watch';
-import { formatTime } from './feedback-inbox';
+import { formatTime, type InboxState } from './feedback-inbox';
+import type { MonitoringStatus } from './monitoring-status';
+import type { CleanupResult, CleanupScanResult } from './session-cleanup';
 import { setupServer } from './server';
 import type { Snapshot } from './store';
 import { deferred, flush, until } from './testing';
@@ -543,7 +545,7 @@ async function harness(options: Options = {}) {
       }),
     },
     event: {
-      subscribe: async function* ({ signal }: { signal: AbortSignal }) {
+      async *subscribe({ signal }: { signal: AbortSignal }) {
         while (!signal.aborted) {
           const next = events.shift();
           if (next !== undefined) {
@@ -618,28 +620,22 @@ async function harness(options: Options = {}) {
     renames: () => renames,
     target: (sessionID = 'one') => handlers.target!({ sessionID }),
     monitoringStatus: (sessionID = 'one') =>
-      handlers.monitoringStatus!({ sessionID }) as Promise<
-        import('./monitoring-status').MonitoringStatus
-      >,
-    feedback: () => handlers.feedback!({}) as Promise<import('./feedback-inbox').InboxState>,
+      handlers.monitoringStatus!({ sessionID }) as Promise<MonitoringStatus>,
+    feedback: () => handlers.feedback!({}) as Promise<InboxState>,
     pauseFeedback: (paused: boolean) => handlers.pauseFeedback!({ paused }),
     acknowledgeFeedback: (id: string) => handlers.acknowledgeFeedback!({ id }),
     summarizeFeedback: (id: string) => handlers.summarizeFeedback!({ id }),
     actOnFeedback: (id: string, retry = false) => handlers.actOnFeedback!({ id, retry }),
-    cleanupCandidates: () =>
-      handlers.cleanupCandidates!({}) as Promise<import('./session-cleanup').CleanupScanResult>,
+    cleanupCandidates: () => handlers.cleanupCandidates!({}) as Promise<CleanupScanResult>,
     cleanupSessions: (
       sessionIDs: string[],
       options?: { allowClientArchive?: boolean; finalizeArchived?: boolean; scanID?: string },
-    ) =>
-      handlers.cleanupSessions!({ sessionIDs, ...options }) as Promise<
-        import('./session-cleanup').CleanupResult
-      >,
+    ) => handlers.cleanupSessions!({ sessionIDs, ...options }) as Promise<CleanupResult>,
     watch: (keys: string[], visible?: string) =>
       handlers.watch!({
         clientID: 'cli',
         keys,
-        ...(visible !== undefined ? { visible } : {}),
+        ...(visible === undefined ? {} : { visible }),
       }) as Promise<{
         enabled: boolean;
         statuses: Record<string, Snapshot>;
@@ -6089,7 +6085,7 @@ describe('reviewer approval notifications and automation', () => {
       await settle();
 
       forge.requests.set('team/project!12', {
-        ...(forge.requests.get('team/project!12') as import('./forge').GitHubPullRequest),
+        ...(forge.requests.get('team/project!12') as GitHubPullRequest),
         approved: true,
         awaitingReviewers: [],
         approvers: [{ id: 'U_ALICE', username: 'alice', reviewID: 'PRR_1' }],
@@ -7415,14 +7411,18 @@ describe('reviewer approval notifications and automation', () => {
       unresolvedThreads: 0,
       threadsComplete: true,
     });
-    const resolveReviewer = async (_ref: ReviewRef, name: string) =>
-      name === 'gitlabduo'
-        ? 'duo-id'
-        : name === 'alice'
-          ? 'author-a'
-          : name === 'bob'
-            ? 'author-b'
-            : undefined;
+    const resolveReviewer = async (_ref: ReviewRef, name: string) => {
+      switch (name) {
+        case 'gitlabduo':
+          return 'duo-id';
+        case 'alice':
+          return 'author-a';
+        case 'bob':
+          return 'author-b';
+        default:
+          return undefined;
+      }
+    };
     const first = await harness({
       status: forge,
       reviewClaims: claims,

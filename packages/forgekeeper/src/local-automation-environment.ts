@@ -82,13 +82,13 @@ export function extractTurnReport(
   return `${report.slice(0, MAX_LINKED_REPORT - LINKED_REPORT_TRUNCATED.length)}${LINKED_REPORT_TRUNCATED}`;
 }
 
-export const localRunnerOf = (record: Pick<AutomationRecord, 'item' | 'execution'>) =>
-  record.execution
-    ? record.execution.provider === 'local-worktree' &&
-      typeof record.execution.state.sessionID === 'string'
-      ? record.execution.state.sessionID
-      : undefined
-    : record.item.sessionID;
+export const localRunnerOf = (record: Pick<AutomationRecord, 'item' | 'execution'>) => {
+  if (!record.execution) return record.item.sessionID;
+  return record.execution.provider === 'local-worktree' &&
+    typeof record.execution.state.sessionID === 'string'
+    ? record.execution.state.sessionID
+    : undefined;
+};
 
 export function localExecution(record: AutomationRecord) {
   const execution = record.execution;

@@ -111,15 +111,15 @@ export function approvalStatusData(request: ReviewRequest, approvers: readonly R
             ...(request.pipeline.id ? { id: request.pipeline.id } : {}),
             status: request.pipeline.status,
             label: request.pipeline.label,
-            ...(request.pipeline.running !== undefined
-              ? { running: request.pipeline.running }
-              : {}),
+            ...(request.pipeline.running === undefined
+              ? {}
+              : { running: request.pipeline.running }),
             ...(request.pipeline.failedJobs?.length
               ? { failedJobs: request.pipeline.failedJobs.length }
               : {}),
-            ...(request.pipeline.failedJobsComplete !== undefined
-              ? { failedJobsComplete: request.pipeline.failedJobsComplete }
-              : {}),
+            ...(request.pipeline.failedJobsComplete === undefined
+              ? {}
+              : { failedJobsComplete: request.pipeline.failedJobsComplete }),
           },
         }
       : {}),
@@ -172,7 +172,10 @@ export function approvalDigest(
 // starts, that they are still current and authorized.
 export function findingsDigest(findings: readonly CommentDetail[]): string {
   const stable = [...findings]
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .sort((a, b) => {
+      if (a.id < b.id) return -1;
+      return a.id > b.id ? 1 : 0;
+    })
     .map(({ id, url, authorID, body, path, line }) => [
       id,
       url,

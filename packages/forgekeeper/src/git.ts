@@ -160,9 +160,23 @@ export async function listWorktrees(
       const value = rest.join(' ');
       if (key === 'worktree') entry = { directory: value, unusable: false };
       else if (!entry) continue;
-      else if (key === 'HEAD') entry.head = value;
-      else if (key === 'branch') entry.branch = stripHeads(value);
-      else if (key === 'bare' || key === 'locked' || key === 'prunable') entry.unusable = true;
+      else
+        switch (key) {
+          case 'HEAD': {
+            entry.head = value;
+            break;
+          }
+          case 'branch': {
+            entry.branch = stripHeads(value);
+            break;
+          }
+          case 'bare':
+          case 'locked':
+          case 'prunable': {
+            entry.unusable = true;
+            break;
+          }
+        }
     }
     if (entry) entries.push(entry);
   }

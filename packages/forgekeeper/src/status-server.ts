@@ -160,13 +160,18 @@ export async function setupStatus(
   const feedbackCache = createRequestCache<FeedbackSnapshot | undefined>({
     now: deps.now,
     ttl: (snapshot) => (snapshot?.complete ? FETCH_INTERVAL : 0),
-    classify: (snapshot) =>
-      !snapshot ? 'unavailable' : snapshot.complete ? 'usable' : 'incomplete',
+    classify: (snapshot) => {
+      if (!snapshot) return 'unavailable';
+      return snapshot.complete ? 'usable' : 'incomplete';
+    },
   });
   const requestCache = createRequestCache<ReviewRequestHistory | undefined>({
     now: deps.now,
     ttl: (history) => (history?.complete ? REQUEST_INTERVAL : 0),
-    classify: (history) => (!history ? 'unavailable' : history.complete ? 'usable' : 'incomplete'),
+    classify: (history) => {
+      if (!history) return 'unavailable';
+      return history.complete ? 'usable' : 'incomplete';
+    },
   });
   // Cleanup runs in two steps. `closing` is set first: no new fetch or
   // delivery starts, so a check that finishes later, such as a feedback
@@ -1173,7 +1178,7 @@ export async function setupStatus(
         automatedFeedback: settings.watch.automatedReviews,
         status: {
           loading: snapshot.loading,
-          ...(snapshot.fetchedAt !== undefined ? { fetchedAt: snapshot.fetchedAt } : {}),
+          ...(snapshot.fetchedAt === undefined ? {} : { fetchedAt: snapshot.fetchedAt }),
           ...(snapshot.error ? { error: snapshot.error } : {}),
         },
         targets: targets.flatMap((target) => {

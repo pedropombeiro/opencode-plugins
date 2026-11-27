@@ -33,17 +33,20 @@ export function parseDuration(value: unknown): number | undefined {
 
 type Fields = { interval?: unknown; duration?: unknown };
 
-const fieldsOf = (value: unknown): Fields | undefined =>
-  value === true ? {} : value && typeof value === 'object' ? (value as Fields) : undefined;
+const fieldsOf = (value: unknown): Fields | undefined => {
+  if (value === true) return {};
+  return value && typeof value === 'object' ? (value as Fields) : undefined;
+};
+
+function resolveInterval(rawInterval: unknown, ttl: number | undefined): number | undefined {
+  if (rawInterval === 'auto') return ttl && ttl * 0.9;
+  if (rawInterval === undefined) return DEFAULT_WARMING.interval;
+  return parseDuration(rawInterval);
+}
 
 function schedule(fields: Fields, top: Fields, ttl: number | undefined): Warming | undefined {
   const rawInterval = fields.interval ?? top.interval;
-  const interval =
-    rawInterval === 'auto'
-      ? ttl && ttl * 0.9
-      : rawInterval === undefined
-        ? DEFAULT_WARMING.interval
-        : parseDuration(rawInterval);
+  const interval = resolveInterval(rawInterval, ttl);
   const rawDuration = fields.duration ?? top.duration;
   const duration =
     rawDuration === undefined ? DEFAULT_WARMING.duration : parseDuration(rawDuration);

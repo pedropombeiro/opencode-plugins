@@ -312,12 +312,12 @@ export async function fetchDetails(
           ]
         : [];
       const isBot = node.author.__typename === 'Bot' || node.author.login.endsWith('[bot]');
-      const reviewState =
-        node.__typename === 'PullRequestReviewComment'
-          ? (node.pullRequestReview?.state ?? undefined)
-          : node.__typename === 'PullRequestReview'
-            ? (node.state ?? undefined)
-            : undefined;
+      let reviewState: string | undefined;
+      if (node.__typename === 'PullRequestReviewComment') {
+        reviewState = node.pullRequestReview?.state ?? undefined;
+      } else if (node.__typename === 'PullRequestReview') {
+        reviewState = node.state ?? undefined;
+      }
       details.push({
         id: node.id,
         url: node.url,
@@ -327,7 +327,7 @@ export async function fetchDetails(
         ...(reviewState ? { reviewState } : {}),
         body: node.body,
         ...(node.path ? { path: node.path } : {}),
-        ...(line !== undefined ? { line } : {}),
+        ...(line === undefined ? {} : { line }),
         ...(node.path && hunk ? { code: { path: node.path, text: hunk } } : {}),
         ...(parent.length ? { replies: parent } : {}),
       });

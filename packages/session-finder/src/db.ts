@@ -395,15 +395,11 @@ function search(
     });
   }
 
-  results.sort((a, b) =>
-    b.last_match_ms !== a.last_match_ms
-      ? b.last_match_ms - a.last_match_ms
-      : b.id < a.id
-        ? -1
-        : b.id > a.id
-          ? 1
-          : 0,
-  );
+  results.sort((a, b) => {
+    if (b.last_match_ms !== a.last_match_ms) return b.last_match_ms - a.last_match_ms;
+    if (b.id < a.id) return -1;
+    return b.id > a.id ? 1 : 0;
+  });
   return results.map(({ last_match_ms: _, ...session }) => session);
 }
 
