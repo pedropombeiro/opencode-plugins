@@ -6,5 +6,5 @@
   "packages/tmux-indicator": "1.0.2",
   "packages/session-finder": "1.2.0",
   "packages/cache-coach": "0.7.0",
-  "packages/vent": "0.1.0"
+  "packages/vent": "0.1.1"
 }
